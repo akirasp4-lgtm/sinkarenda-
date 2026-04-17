@@ -1,0 +1,1134 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>管理画面</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;background:#f2f2f7;color:#1a1a1a;min-height:100vh}
+
+/* ===== PINロック画面 ===== */
+#pin-screen{position:fixed;inset:0;background:#1D9E75;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999}
+#pin-screen h1{color:#fff;font-size:22px;font-weight:700;margin-bottom:8px}
+#pin-screen p{color:rgba(255,255,255,0.7);font-size:14px;margin-bottom:32px}
+.pin-dots{display:flex;gap:14px;margin-bottom:32px}
+.pin-dot{width:16px;height:16px;border-radius:50%;background:rgba(255,255,255,0.3);transition:background 0.15s}
+.pin-dot.filled{background:#fff}
+.pin-keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;width:240px}
+.pin-key{height:64px;border-radius:16px;border:none;background:rgba(255,255,255,0.15);color:#fff;font-size:22px;font-weight:600;cursor:pointer;transition:background 0.1s;-webkit-tap-highlight-color:transparent}
+.pin-key:active{background:rgba(255,255,255,0.35)}
+.pin-error{color:#FFD0CC;font-size:14px;margin-top:16px;min-height:20px;text-align:center}
+
+/* ===== メインアプリ ===== */
+#app{display:none}
+#app.unlocked{display:block}
+.lock-btn{position:fixed;top:10px;right:10px;z-index:110;background:rgba(0,0,0,0.1);border:none;border-radius:16px;padding:4px 10px;font-size:12px;color:#555;cursor:pointer}
+
+/* ===== 共通スタイル（index.htmlと同じ） ===== */
+.company-bar{position:fixed;top:0;left:0;right:0;z-index:100;background:#fff;border-bottom:1px solid #ddd;padding:8px 12px;display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.company-chip{padding:6px 14px;border-radius:20px;font-size:13px;font-weight:500;white-space:nowrap;border:1.5px solid #ddd;background:#fff;color:#666;cursor:pointer;flex-shrink:0;transition:all 0.15s}
+.company-chip.active{background:#1D9E75;color:#fff;border-color:#1D9E75}
+.tab-bar{position:fixed;bottom:0;left:0;right:0;display:flex;background:#fff;border-top:1px solid #ddd;z-index:100;padding-bottom:env(safe-area-inset-bottom)}
+.tab{flex:1;padding:10px 0 6px;text-align:center;font-size:10px;color:#999;border:none;background:none;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px}
+.tab.active{color:#1D9E75}
+.tab-icon{font-size:22px;line-height:1}
+.screen{display:none;padding:12px 12px 80px;max-width:600px;margin:0 auto;padding-top:52px}
+.screen.active{display:block}
+.page-title{font-size:20px;font-weight:600;margin-bottom:16px;padding-top:8px}
+.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.08)}
+label{font-size:13px;color:#666;display:block;margin-bottom:4px}
+input:not([type="checkbox"]),select,textarea{width:100%;font-size:16px;padding:10px 12px;border:1px solid #ddd;border-radius:8px;background:#f9f9f9;color:#1a1a1a;margin-bottom:12px;-webkit-appearance:none}
+select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23999' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
+textarea{resize:vertical;min-height:64px;font-size:15px}
+.btn{width:100%;padding:14px;border-radius:10px;font-size:16px;font-weight:600;cursor:pointer;border:none;background:#1D9E75;color:#fff}
+.btn:disabled{opacity:0.5;cursor:not-allowed}
+.btn-secondary{background:#f2f2f7;color:#1a1a1a;border:1px solid #ddd}
+.btn-danger{background:#ff3b30;color:#fff;border:none}
+.btn-sm{width:auto;padding:6px 14px;font-size:13px;font-weight:500;border-radius:8px}
+.alert{border-radius:10px;padding:12px;font-size:14px;margin-bottom:12px;display:none}
+.alert-ok{background:#EAF3DE;color:#3B6D11}
+.alert-err{background:#FCEBEB;color:#A32D2D}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.metric{background:#f2f2f7;border-radius:10px;padding:14px;text-align:center}
+.metric-val{font-size:24px;font-weight:600}
+.metric-lbl{font-size:12px;color:#666;margin-top:2px}
+.yotei-card{background:#fff;border-radius:12px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.08);overflow:hidden}
+.yotei-header{padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #f2f2f7}
+.yotei-date{font-size:13px;color:#666}
+.yotei-genba{font-size:16px;font-weight:600}
+.yotei-body{padding:12px 16px}
+.yotei-loc{font-size:13px;color:#666;margin-bottom:8px}
+.yotei-members{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.member-tag{padding:4px 10px;border-radius:20px;font-size:13px}
+.tag-leader{background:#E6F1FB;color:#0C447C}
+.tag-member{background:#EAF3DE;color:#3B6D11}
+.yotei-time{font-size:13px;color:#666}
+.yotei-memo{font-size:13px;color:#444;margin-top:6px;padding-top:6px;border-top:1px solid #f2f2f7}
+.yotei-updated-by{font-size:11px;color:#888;text-align:right;margin-top:6px}
+.yotei-actions{display:flex;gap:8px;padding:10px 16px;background:#f9f9f9}
+.yakin-badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;background:#2C2C5A;color:#E8D44D;margin-left:6px;vertical-align:middle}
+.yasumi-badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;background:#E8384F;color:#fff;margin-left:6px;vertical-align:middle}
+.yotei-badge-tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;background:#3B82F6;color:#fff;margin-left:6px;vertical-align:middle}
+.souko-badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;background:#8B5E3C;color:#fff;margin-left:6px;vertical-align:middle}
+.company-badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500;background:#f0f0f0;color:#666;margin-left:4px;vertical-align:middle}
+.toggle-row{display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:10px 12px;border:1px solid #ddd;border-radius:8px;background:#f9f9f9;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.toggle-row .t-icon{font-size:20px;opacity:0.4;transition:opacity 0.15s}
+.toggle-row .t-label{font-size:15px;font-weight:500;color:#666;transition:color 0.15s}
+.toggle-row.active .t-icon{opacity:1}
+.toggle-souko.active{background:#8B5E3C;border-color:#8B5E3C}.toggle-souko.active .t-label{color:#fff}
+.toggle-yakin.active{background:#2C2C5A;border-color:#2C2C5A}.toggle-yakin.active .t-label{color:#E8D44D}
+.toggle-yasumi.active{background:#E8384F;border-color:#E8384F}.toggle-yasumi.active .t-label{color:#fff}
+.toggle-yotei.active{background:#3B82F6;border-color:#3B82F6}.toggle-yotei.active .t-label{color:#fff}
+.member-section{margin-bottom:12px}
+.member-label{font-size:13px;color:#666;margin-bottom:6px}
+.member-grid{display:flex;flex-wrap:wrap;gap:8px;padding:12px;border:1px solid #ddd;border-radius:10px;background:#f9f9f9;min-height:52px}
+.member-chip{padding:8px 14px;border-radius:20px;font-size:14px;cursor:pointer;border:1px solid #ddd;background:#fff;color:#444;-webkit-tap-highlight-color:transparent;transition:all 0.1s}
+.member-chip.selected{background:#EAF3DE;border-color:#97C459;color:#3B6D11;font-weight:500}
+.leader-select-wrap{margin-bottom:12px}
+.modal-bg{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:200;align-items:flex-end;justify-content:center}
+.modal-bg.active{display:flex}
+.modal{background:#fff;border-radius:20px 20px 0 0;padding:20px;width:100%;max-width:600px;max-height:90vh;overflow-y:auto;padding-bottom:calc(20px + env(safe-area-inset-bottom))}
+.modal-title{font-size:18px;font-weight:600;margin-bottom:16px}
+.tbl{width:100%;font-size:13px;border-collapse:collapse}
+.tbl th{text-align:left;color:#666;font-weight:500;padding:6px 8px;border-bottom:1px solid #eee}
+.tbl td{padding:8px;border-bottom:1px solid #eee;vertical-align:top}
+.tbl tr:last-child td{border-bottom:none}
+.empty{color:#999;text-align:center;padding:32px;font-size:15px}
+.filter-row{display:flex;gap:8px;margin-bottom:12px}
+.filter-row select{margin-bottom:0;flex:1}
+.archive-section{margin-top:16px;padding:16px;background:#FFF9E6;border-radius:12px;border:1px solid #F0D860}
+.archive-section .archive-title{font-size:14px;font-weight:600;color:#8B7000;margin-bottom:8px}
+.archive-section .archive-desc{font-size:12px;color:#8B7000;margin-bottom:12px}
+.loading-bar{position:fixed;top:44px;left:0;right:0;height:3px;z-index:101;display:none}
+.loading-bar.active{display:block}
+.loading-bar::after{content:'';display:block;height:100%;background:#1D9E75;animation:loadAnim 1.2s ease-in-out infinite}
+@keyframes loadAnim{0%{width:0;margin-left:0}50%{width:60%}100%{width:0;margin-left:100%}}
+.notice-bar{background:#FFF3CD;color:#856404;padding:8px 16px;font-size:13px;text-align:center;display:none}
+.notice-bar.active{display:block}
+.week-table{width:100%;border-collapse:collapse;font-size:13px}
+.week-table th{padding:6px 4px;text-align:center;font-weight:600;border-bottom:2px solid #ddd;font-size:12px;color:#666}
+.week-table td{padding:4px 2px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:12px}
+.week-table .name-col{text-align:left;font-weight:500;padding-left:8px;min-width:60px;white-space:nowrap}
+.week-cell{border-radius:4px;padding:3px 2px;font-size:11px;font-weight:500}
+.week-cell.free{background:#EAF3DE;color:#3B6D11}
+.week-cell.busy{background:#FAECE7;color:#993C1D}
+.week-cell.yasumi{background:#FFF9E6;color:#8B7000}
+.week-cell.souko{background:#F3EAE0;color:#8B5E3C}
+.week-sun th,.week-sun{color:#E8384F!important}
+.week-sat th,.week-sat{color:#3B82F6!important}
+.gm-day-row{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid #f0f0f0}
+.gm-day-row:last-child{border-bottom:none}
+.gm-day-check{width:22px;height:22px;flex-shrink:0;cursor:pointer;accent-color:#ff3b30}
+.gm-day-info{flex:1;min-width:0}
+.gm-day-date{font-size:14px;font-weight:600}
+.gm-day-members{font-size:12px;color:#666;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gm-edit-btn{flex-shrink:0;padding:6px 12px;font-size:12px;font-weight:500;border-radius:8px;border:1px solid #ddd;background:#f2f2f7;color:#1a1a1a;cursor:pointer}
+.gm-delete-bar{background:#fff;border-top:2px solid #ff3b30;padding:10px 12px;display:none;position:sticky;bottom:64px;z-index:50}
+.gm-delete-bar.active{display:block}
+.cal-header{display:grid;grid-template-columns:repeat(7,1fr);margin-bottom:2px}
+.cal-header-cell{text-align:center;font-size:11px;font-weight:600;color:#999;padding:4px 0}
+.cal-header-cell:first-child{color:#E8384F}
+.cal-header-cell:last-child{color:#3B82F6}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+.cal-cell{min-height:72px;border-radius:6px;padding:3px 2px;background:#f9f9f9;cursor:pointer;position:relative;-webkit-tap-highlight-color:transparent;transition:background 0.1s;overflow:hidden}
+.cal-cell:active{background:#e8e8e8}
+.cal-cell.empty{background:transparent;cursor:default}
+.cal-cell.today .cal-day-num{background:#1D9E75;color:#fff;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 2px}
+.cal-cell.sun .cal-day-num{color:#E8384F}
+.cal-cell.sat .cal-day-num{color:#3B82F6}
+.cal-day-num{font-size:12px;font-weight:600;text-align:center;margin-bottom:2px}
+.cal-event{font-size:9px;font-weight:600;color:#fff;border-radius:3px;padding:1px 3px;margin-bottom:1px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;line-height:1.4}
+.cal-overflow{font-size:9px;color:#999;padding-left:3px;line-height:1.4}
+.color-picker-wrap{display:flex;flex-wrap:wrap;gap:8px;padding:10px 0;margin-bottom:12px}
+.color-swatch{width:32px;height:32px;border-radius:50%;cursor:pointer;border:3px solid transparent;transition:all 0.15s;-webkit-tap-highlight-color:transparent}
+.color-swatch.selected{border-color:#1a1a1a;transform:scale(1.15)}
+.select-add-wrap{display:flex;align-items:center;gap:6px;margin-bottom:12px}
+.select-add-wrap select{flex:1;margin-bottom:0}
+.add-inline-btn{flex-shrink:0;padding:10px 12px;font-size:16px;line-height:1;width:auto}
+.jobno-hint{font-size:12px;color:#1D9E75;margin-top:-8px;margin-bottom:10px;padding:4px 8px;background:#EAF3DE;border-radius:6px;display:none}
+</style>
+</head>
+<body>
+
+<!-- ===== PINロック画面 ===== -->
+<div id="pin-screen">
+  <h1>🔐 管理画面</h1>
+  <p>PINコードを入力してください</p>
+  <div class="pin-dots">
+    <div class="pin-dot" id="dot0"></div>
+    <div class="pin-dot" id="dot1"></div>
+    <div class="pin-dot" id="dot2"></div>
+    <div class="pin-dot" id="dot3"></div>
+  </div>
+  <div class="pin-keypad">
+    <button class="pin-key" onclick="pinInput('1')">1</button>
+    <button class="pin-key" onclick="pinInput('2')">2</button>
+    <button class="pin-key" onclick="pinInput('3')">3</button>
+    <button class="pin-key" onclick="pinInput('4')">4</button>
+    <button class="pin-key" onclick="pinInput('5')">5</button>
+    <button class="pin-key" onclick="pinInput('6')">6</button>
+    <button class="pin-key" onclick="pinInput('7')">7</button>
+    <button class="pin-key" onclick="pinInput('8')">8</button>
+    <button class="pin-key" onclick="pinInput('9')">9</button>
+    <button class="pin-key" onclick="pinClear()" style="font-size:13px">クリア</button>
+    <button class="pin-key" onclick="pinInput('0')">0</button>
+    <button class="pin-key" onclick="pinDelete()">⌫</button>
+  </div>
+  <div class="pin-error" id="pin-error"></div>
+</div>
+
+<!-- ===== メインアプリ ===== -->
+<div id="app">
+<button class="lock-btn" onclick="lockScreen()">🔒 ロック</button>
+<div class="company-bar" id="company-bar"></div>
+<div class="loading-bar" id="loading-bar"></div>
+<div class="notice-bar" id="notice-bar">会社を選択して入力してください</div>
+
+<!-- 日報入力 -->
+<div id="screen-input" class="screen">
+<div class="page-title">日報入力</div>
+<div class="card">
+  <label>操作者（あなたの名前）<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
+  <div class="select-add-wrap">
+    <select id="s-operator" onchange="onOperatorChange()"><option value="">選択してください</option></select>
+    <button class="btn btn-secondary btn-sm add-inline-btn" onclick="openSettingsFor('s-operator')">➕</button>
+  </div>
+  <div class="grid2">
+    <div><label>開始日<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label><input type="date" id="s-date"></div>
+    <div><label>終了日（連続入力）</label><input type="date" id="s-date-end"></div>
+  </div>
+  <label>元請名<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
+  <div class="select-add-wrap">
+    <select id="s-genba-select" onchange="onGenbaSelect('s')"><option value="">選択してください</option><option value="__manual__">直接入力する</option></select>
+    <button class="btn btn-secondary btn-sm add-inline-btn" onclick="openGenbaSettingsFor('s-genba-select')">➕</button>
+  </div>
+  <input type="text" id="s-genba" placeholder="例：〇〇電気" style="display:none;margin-bottom:12px">
+  <label>現場名</label>
+  <input type="text" id="s-location" list="s-location-list" placeholder="例：〇〇ビル新築工事" oninput="checkLocationJobNo()">
+  <datalist id="s-location-list"></datalist>
+  <div class="jobno-hint" id="s-jobno-hint"></div>
+  <div class="grid2">
+    <div><label>出勤</label><input type="time" id="s-start" value="08:00"></div>
+    <div><label>退勤</label><input type="time" id="s-end" value="17:00"></div>
+  </div>
+  <div class="toggle-row toggle-souko" id="s-souko-toggle" onclick="setMode('s','souko')"><span class="t-icon">🏭</span><span class="t-label">倉庫</span></div>
+  <div class="toggle-row toggle-yakin" id="s-yakin-toggle" onclick="setMode('s','yakin')"><span class="t-icon">🌙</span><span class="t-label">夜勤</span></div>
+  <div class="toggle-row toggle-yasumi" id="s-yasumi-toggle" onclick="setMode('s','yasumi')"><span class="t-icon">🏖️</span><span class="t-label">休み</span></div>
+  <div class="toggle-row toggle-yotei" id="s-yotei-toggle" onclick="setMode('s','yotei')"><span class="t-icon">📌</span><span class="t-label">予定</span></div>
+  <label>人工（ひとり当たり）</label>
+  <select id="s-kosu"><option value="1.0">1人工</option><option value="1.5">1.5人工</option><option value="2.0">2人工</option></select>
+  <div class="leader-select-wrap">
+    <label>代表者<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
+    <div class="select-add-wrap" style="margin-bottom:0">
+      <select id="s-leader"><option value="">代表者を選択してください</option></select>
+      <button class="btn btn-secondary btn-sm add-inline-btn" onclick="openSettingsFor('s-leader')">➕</button>
+    </div>
+  </div>
+  <div class="member-section"><div class="member-label">同行メンバー（タップで選択）</div><div id="member-selector" class="member-grid"></div></div>
+  <label>メモ</label><textarea id="s-memo" placeholder="作業内容など"></textarea>
+  <label>カレンダーの色</label>
+  <div id="s-color-picker" class="color-picker-wrap"></div>
+  <div id="s-alert" class="alert"></div>
+  <button class="btn" id="submit-btn" onclick="submitNippo()">登録する</button>
+</div>
+</div>
+
+<!-- カレンダー -->
+<div id="screen-list" class="screen active">
+<div class="page-title">カレンダー</div>
+<div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:12px">
+  <button class="btn btn-secondary btn-sm" onclick="changeListMonth(-1)">◀</button>
+  <span id="list-month-label" style="font-size:15px;font-weight:600;min-width:100px;text-align:center"></span>
+  <button class="btn btn-secondary btn-sm" onclick="changeListMonth(1)">▶</button>
+</div>
+<div class="card" style="padding:8px"><div id="cal-grid"></div></div>
+<button class="btn" style="margin-top:8px" onclick="switchTab('input')">＋ 予定を入力する</button>
+<button class="btn btn-secondary" style="margin-top:8px" onclick="loadData()">更新</button>
+</div>
+
+<!-- カレンダー日付モーダル -->
+<div id="cal-day-modal" class="modal-bg" onclick="if(event.target===this)this.classList.remove('active')">
+<div class="modal">
+  <div class="modal-title" id="cal-day-title"></div>
+  <div id="cal-day-content"></div>
+  <div style="display:flex;gap:8px;margin-top:12px">
+    <button class="btn btn-secondary btn-sm" style="flex:1" onclick="document.getElementById('cal-day-modal').classList.remove('active')">閉じる</button>
+    <button class="btn btn-sm" style="flex:2" onclick="calGoToInput()">＋ この日の予定を入力</button>
+  </div>
+</div>
+</div>
+
+<!-- 空き確認 -->
+<div id="screen-avail" class="screen">
+<div class="page-title">空き確認</div>
+<div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:12px">
+  <button class="btn btn-secondary btn-sm" onclick="changeAvailWeek(-1)">◀</button>
+  <span id="avail-week-label" style="font-size:15px;font-weight:600;min-width:180px;text-align:center"></span>
+  <button class="btn btn-secondary btn-sm" onclick="changeAvailWeek(1)">▶</button>
+</div>
+<div class="card" style="overflow-x:auto">
+  <div id="avail-weekly" style="min-width:600px"></div>
+</div>
+<button class="btn btn-secondary" onclick="loadData()">更新</button>
+</div>
+
+<!-- 現場別管理 -->
+<div id="screen-genba" class="screen">
+<div class="page-title">現場別管理</div>
+<div class="card">
+  <label>元請名</label>
+  <select id="gm-genba" onchange="onGmGenbaChange()" style="margin-bottom:8px"><option value="">元請を選択</option></select>
+  <label>現場名</label>
+  <select id="gm-location" onchange="renderGmList()" style="margin-bottom:0"><option value="">現場を選択</option></select>
+</div>
+<div id="gm-list-wrap" style="display:none">
+  <div class="card" style="padding:12px 16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-size:13px;color:#666;font-weight:500">日程一覧</span>
+      <button class="btn btn-secondary btn-sm" id="gm-select-all-btn" onclick="toggleGmSelectAll()">全選択</button>
+    </div>
+    <div id="gm-day-list"></div>
+  </div>
+  <div class="gm-delete-bar" id="gm-delete-bar">
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-sm" id="gm-edit-checked-btn" onclick="openBulkEditModal()" style="flex:1;background:#1D9E75">チェックした日を一括編集</button>
+      <button class="btn btn-danger btn-sm" id="gm-delete-btn" onclick="deleteGmChecked()" style="flex:1">削除</button>
+    </div>
+  </div>
+</div>
+<button class="btn btn-secondary" style="margin-top:8px" onclick="loadData()">更新</button>
+</div>
+
+<!-- 事務 -->
+<div id="screen-jimu" class="screen">
+<div class="page-title">事務</div>
+<div class="grid2">
+  <div class="metric"><div class="metric-val" id="j-total-ko">－</div><div class="metric-lbl">今月 総人工</div></div>
+  <div class="metric"><div class="metric-val" id="j-total-days">－</div><div class="metric-lbl">今月 延べ人数</div></div>
+</div>
+<div class="filter-row">
+  <select id="j-month" onchange="updateJimu()"></select>
+  <select id="j-genba-filter" onchange="updateJimu()"><option value="">全元請</option></select>
+</div>
+<div class="card">
+  <div style="font-size:13px;color:#666;margin-bottom:10px;font-weight:500">職人別集計</div>
+  <table class="tbl">
+    <thead><tr><th>氏名</th><th>会社</th><th>出勤日数</th><th>人工合計</th></tr></thead>
+    <tbody id="j-shokunin-tbl"><tr><td colspan="4" class="empty">更新してください</td></tr></tbody>
+  </table>
+</div>
+<button class="btn btn-secondary" style="margin-bottom:8px" onclick="loadData()">更新</button>
+<div class="card" style="margin-top:8px">
+  <div style="font-size:13px;color:#666;margin-bottom:10px;font-weight:500">CSVダウンロード</div>
+  <select id="csv-sheet" style="margin-bottom:8px">
+    <option value="日報データ">日報データ</option><option value="アーカイブ">アーカイブ</option>
+    <option value="月別集計">月別集計</option><option value="会社別集計">会社別集計</option>
+    <option value="職人マスタ">職人マスタ</option><option value="元請マスタ">元請マスタ</option>
+    <option value="現場マスタ">現場マスタ</option>
+    <option value="月別確認表">月別確認表</option><option value="元請別請求集計">元請別請求集計</option>
+  </select>
+  <button class="btn btn-secondary" id="csv-btn" onclick="downloadSheetCSV()">ダウンロード</button>
+</div>
+<div style="display:flex;gap:8px;margin-top:8px">
+  <button class="btn btn-secondary" style="flex:1" onclick="openSettings()">職人を管理</button>
+  <button class="btn btn-secondary" style="flex:1" onclick="openGenbaSettings()">元請を管理</button>
+</div>
+<div class="archive-section" style="background:#E8F4FD;border-color:#85B7EB">
+  <div class="archive-title" style="color:#0C447C">📊 スプレッドシート集計</div>
+  <div class="archive-desc" style="color:#0C447C">会社別・月別の出勤日数・人工をスプレッドシートに自動集計します。毎朝6時にも自動更新されます。</div>
+  <button class="btn btn-secondary btn-sm" id="summary-btn" onclick="runSummary()">集計を更新</button>
+</div>
+<div class="archive-section">
+  <div class="archive-title">📦 データアーカイブ</div>
+  <div class="archive-desc">3ヶ月以上前のデータを「アーカイブ」シートに移動します。移動後は元に戻せません。</div>
+  <button class="btn btn-secondary btn-sm" onclick="archiveOldData()">古いデータをアーカイブ</button>
+</div>
+<div class="card" style="margin-top:8px">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <div style="font-size:13px;color:#666;font-weight:500">操作者名</div>
+      <div id="current-username-display" style="font-size:15px;font-weight:600;margin-top:2px">未設定</div>
+    </div>
+    <button class="btn btn-secondary btn-sm" onclick="openUsernameModal()">変更</button>
+  </div>
+</div>
+</div>
+
+<!-- タブバー -->
+<div class="tab-bar">
+  <button class="tab" onclick="switchTab('list')"><span class="tab-icon">📅</span>カレンダー</button>
+  <button class="tab" onclick="switchTab('avail')"><span class="tab-icon">👥</span>空き確認</button>
+  <button class="tab" onclick="switchTab('genba')"><span class="tab-icon">🏗️</span>現場管理</button>
+  <button class="tab active" onclick="switchTab('jimu')"><span class="tab-icon">📊</span>事務</button>
+</div>
+
+<!-- 操作者名変更モーダル -->
+<div id="username-modal" class="modal-bg">
+<div class="modal">
+  <div class="modal-title">操作者名の変更</div>
+  <select id="username-select" style="margin-bottom:12px;"></select>
+  <div style="display:flex;gap:8px;margin-top:4px">
+    <button class="btn btn-secondary btn-sm" style="flex:1" onclick="document.getElementById('username-modal').classList.remove('active')">キャンセル</button>
+    <button class="btn btn-sm" style="flex:2" onclick="confirmUsername()">変更する</button>
+  </div>
+</div>
+</div>
+
+<!-- 編集モーダル -->
+<div id="edit-modal" class="modal-bg">
+<div class="modal">
+  <div class="modal-title" id="edit-title">編集</div>
+  <label>元請名</label>
+  <select id="e-genba-select" onchange="onGenbaSelect('e')"><option value="">選択してください</option><option value="__manual__">直接入力する</option></select>
+  <input type="text" id="e-genba" style="display:none;margin-bottom:12px">
+  <label>現場名</label><input type="text" id="e-location">
+  <div class="grid2">
+    <div><label>出勤</label><input type="time" id="e-start"></div>
+    <div><label>退勤</label><input type="time" id="e-end"></div>
+  </div>
+  <div class="toggle-row toggle-souko" id="e-souko-toggle" onclick="setMode('e','souko')"><span class="t-icon">🏭</span><span class="t-label">倉庫</span></div>
+  <div class="toggle-row toggle-yakin" id="e-yakin-toggle" onclick="setMode('e','yakin')"><span class="t-icon">🌙</span><span class="t-label">夜勤</span></div>
+  <div class="toggle-row toggle-yasumi" id="e-yasumi-toggle" onclick="setMode('e','yasumi')"><span class="t-icon">🏖️</span><span class="t-label">休み</span></div>
+  <div class="toggle-row toggle-yotei" id="e-yotei-toggle" onclick="setMode('e','yotei')"><span class="t-icon">📌</span><span class="t-label">予定</span></div>
+  <label>人工（ひとり当たり）</label>
+  <select id="e-kosu"><option value="1.0">1人工</option><option value="1.5">1.5人工</option><option value="2.0">2人工</option></select>
+  <div class="leader-select-wrap"><label>代表者</label><select id="e-leader"><option value="">代表者を選択してください</option></select></div>
+  <div class="member-section"><div class="member-label">同行メンバー（タップで選択）</div><div id="e-member-selector" class="member-grid"></div></div>
+  <label>メモ</label><textarea id="e-memo"></textarea>
+  <label>カレンダーの色</label>
+  <div id="e-color-picker" class="color-picker-wrap"></div>
+  <div style="display:flex;gap:8px;margin-top:4px">
+    <button class="btn btn-secondary btn-sm" style="flex:1" onclick="closeEditModal()">キャンセル</button>
+    <button class="btn btn-sm" style="flex:2" id="save-edit-btn" onclick="saveEdit()">保存する</button>
+  </div>
+</div>
+</div>
+
+<!-- 職人管理モーダル -->
+<div id="settings-modal" class="modal-bg">
+<div class="modal">
+  <div class="modal-title">職人の管理 <span id="settings-company-name" style="font-size:14px;color:#1D9E75"></span></div>
+  <div style="display:flex;gap:8px;margin-bottom:8px">
+    <input type="text" id="new-shokunin" placeholder="氏名を入力" style="margin-bottom:0;flex:1">
+    <button class="btn btn-sm" onclick="addShokunin()">追加</button>
+  </div>
+  <div id="division-field" style="display:none;margin-bottom:12px">
+    <select id="new-shokunin-division" style="margin-bottom:0">
+      <option value="">事業部（なし）</option>
+      <option value="ICT">ICT（情報通信）</option>
+      <option value="INF">INF（インフラ）</option>
+      <option value="MSC">MSC（ミスク）</option>
+      <option value="GRB">GRB（ビジサポ）</option>
+    </select>
+  </div>
+  <div id="shokunin-list" style="margin-bottom:16px"></div>
+  <button class="btn btn-secondary" onclick="closeSettings()">閉じる</button>
+</div>
+</div>
+
+<!-- 元請管理モーダル -->
+<div id="genba-settings-modal" class="modal-bg">
+<div class="modal">
+  <div class="modal-title">元請の管理 <span id="genba-settings-company-name" style="font-size:14px;color:#1D9E75"></span></div>
+  <div style="display:flex;gap:8px;margin-bottom:12px">
+    <input type="text" id="new-genba-master" placeholder="元請名を入力" style="margin-bottom:0;flex:1">
+    <button class="btn btn-sm" onclick="addGenbaMaster()">追加</button>
+  </div>
+  <div id="genba-master-list" style="margin-bottom:16px"></div>
+  <button class="btn btn-secondary" onclick="closeGenbaSettings()">閉じる</button>
+</div>
+</div>
+
+</div><!-- /#app -->
+
+<script>
+// ============================================================
+// ★ PINコードはここを変更してください
+const ADMIN_PIN = '1234';
+// ============================================================
+
+const GAS_URL='https://script.google.com/macros/s/AKfycbxBMZ6oHXHDdtQBM7ZMoIU3JmvfLiJ5i7pu33WJ1PFBYQNnf1LwPxPTBVeVWNukuHXU9Q/exec';
+const COMPANIES=['グローライズ','和信カインド','ビジネスサポート','ラーテル','GRHD'];
+const MODES=['souko','yakin','yasumi','yotei'];
+const CAL_COLORS=['#1D9E75','#3B82F6','#E8384F','#F59E0B','#8B5CF6','#EC4899','#2C2C5A','#8B5E3C','#64748B','#0EA5E9'];
+const DIVISIONS=['ICT','INF','MSC','GRB'];
+// 管理画面は常にadminモード
+const isAdminMode = true;
+
+// ===== PINロック =====
+let pinBuffer='';
+function pinInput(d){if(pinBuffer.length>=4)return;pinBuffer+=d;updateDots();if(pinBuffer.length===4)setTimeout(checkPin,100);}
+function pinDelete(){pinBuffer=pinBuffer.slice(0,-1);updateDots();}
+function pinClear(){pinBuffer='';updateDots();}
+function updateDots(){for(let i=0;i<4;i++)document.getElementById('dot'+i).classList.toggle('filled',i<pinBuffer.length);}
+function checkPin(){
+  if(pinBuffer===ADMIN_PIN){
+    document.getElementById('pin-screen').style.display='none';
+    document.getElementById('app').style.display='block';
+    initApp();
+  }else{
+    document.getElementById('pin-error').textContent='PINが違います。もう一度入力してください。';
+    pinBuffer='';updateDots();
+    setTimeout(()=>document.getElementById('pin-error').textContent='',2000);
+  }
+}
+function lockScreen(){
+  if(!confirm('ロックしますか？'))return;
+  document.getElementById('app').style.display='none';
+  document.getElementById('pin-screen').style.display='flex';
+  pinBuffer='';updateDots();
+}
+
+// ===== アプリ変数 =====
+let currentCompany='全社';
+let allNippos=[];
+let allMembers=[];
+let allGenbaMaster=[];
+let selectedMembers=[];
+let editSelectedMembers=[];
+let editIds=[];
+let editDate='';
+let editDates=[];
+let bulkEditMode=false;
+let listMonth='';
+let modeState={s:'',e:''};
+let isSubmitting=false;
+let currentUsername='';
+let selectedColor={s:'#1D9E75',e:'#1D9E75'};
+let settingsOpenedForSelect=null;
+let genbaSettingsOpenedForSelect=null;
+
+function esc(s){const d=document.createElement('div');d.textContent=String(s||'');return d.innerHTML;}
+function uuid(){return 'xxxx-xxxx-xxxx'.replace(/x/g,()=>Math.floor(Math.random()*16).toString(16))+'-'+Date.now().toString(36);}
+function setLoading(on){document.getElementById('loading-bar').classList.toggle('active',on);}
+function getGasUrl(){return GAS_URL;}
+function getUsername(){return currentUsername;}
+
+function initApp(){
+  initCompanyBar();
+  initSelects();
+  initAvailWeek();
+  initUsername();
+  initColorPicker('s');
+  renderList();
+  loadData();
+  switchTab('jimu');
+}
+
+// ===== 会社バー（常に全社+全会社表示） =====
+function initCompanyBar(){
+  let html='<div class="company-chip'+(currentCompany==='全社'?' active':'')+'" onclick="switchCompany(\'全社\')">全社</div>';
+  html+=COMPANIES.map(c=>`<div class="company-chip${c===currentCompany?' active':''}" onclick="switchCompany('${esc(c)}')">${esc(c)}</div>`).join('');
+  document.getElementById('company-bar').innerHTML=html;
+}
+
+function switchCompany(c){
+  currentCompany=c;
+  selectedMembers=[];editSelectedMembers=[];
+  initCompanyBar();initMemberUI();renderList();updateAvailability();updateJimu();updateGenbaFilter();updateGmSelects();updateNoticeBar();
+}
+
+function updateNoticeBar(){
+  const isAll=currentCompany==='全社';
+  document.getElementById('notice-bar').classList.toggle('active',isAll);
+  const btn=document.getElementById('submit-btn');
+  if(btn){btn.disabled=isAll;btn.textContent=isAll?'会社を選択してください':'登録する';}
+}
+
+function filteredNippos(){
+  if(currentCompany==='全社')return allNippos;
+  return allNippos.filter(n=>n.company===currentCompany);
+}
+
+// ===== タブ =====
+function switchTab(t){
+  const tabs=['list','avail','genba','jimu','input'];
+  document.querySelectorAll('.tab').forEach((el,i)=>el.classList.toggle('active',['list','avail','genba','jimu'][i]===t));
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById('screen-'+t).classList.add('active');
+  if(t==='genba')updateGmSelects();
+  if(t==='list')renderList();
+  if(t==='input')initColorPicker('s',selectedColor.s);
+}
+
+// ===== ユーザー名 =====
+function initUsername(){
+  try{currentUsername=localStorage.getItem('admin-username')||'';}catch(e){}
+  updateUsernameDisplay();
+}
+function updateUsernameDisplay(){
+  const el=document.getElementById('current-username-display');
+  if(el)el.textContent=currentUsername||'未設定';
+}
+function openUsernameModal(){
+  const sel=document.getElementById('username-select');
+  const names=getShokunin();
+  sel.innerHTML='<option value="">名前を選択</option>'+names.map(n=>`<option value="${n}"${n===currentUsername?' selected':''}>${n}</option>`).join('');
+  document.getElementById('username-modal').classList.add('active');
+}
+function confirmUsername(){
+  const v=document.getElementById('username-select').value;
+  if(!v){alert('名前を選択してください');return;}
+  currentUsername=v;
+  try{localStorage.setItem('admin-username',v);}catch(e){}
+  updateUsernameDisplay();
+  document.getElementById('username-modal').classList.remove('active');
+}
+function onOperatorChange(){
+  const v=document.getElementById('s-operator').value;
+  if(v){currentUsername=v;try{localStorage.setItem('admin-username',v);}catch(e){}updateUsernameDisplay();updateLocationSuggestions();checkLocationJobNo();}
+}
+
+// ===== カラーピッカー =====
+function initColorPicker(prefix,current){
+  const wrap=document.getElementById(prefix+'-color-picker');if(!wrap)return;
+  const c=current||selectedColor[prefix]||CAL_COLORS[0];selectedColor[prefix]=c;
+  wrap.innerHTML=CAL_COLORS.map(col=>`<div class="color-swatch${col===c?' selected':''}" style="background:${col}" onclick="selectColor('${prefix}','${col}')"></div>`).join('');
+}
+function selectColor(prefix,color){selectedColor[prefix]=color;initColorPicker(prefix,color);}
+
+// ===== モード =====
+function setMode(p,mode){
+  const next=modeState[p]===mode?'':mode;modeState[p]=next;
+  MODES.forEach(m=>{const el=document.getElementById(p+'-'+m+'-toggle');if(el)el.classList.toggle('active',m===next);});
+}
+function applyMode(p,mode){
+  modeState[p]=mode||'';
+  MODES.forEach(m=>{const el=document.getElementById(p+'-'+m+'-toggle');if(el)el.classList.toggle('active',m===modeState[p]);});
+}
+
+// ===== 職人リスト =====
+function getShokunin(){
+  if(currentCompany==='全社'){const all=[];allMembers.forEach(m=>{if(!all.includes(m.name))all.push(m.name);});return all;}
+  return allMembers.filter(m=>m.company===currentCompany).map(m=>m.name);
+}
+function getGenbaMasterNames(){
+  if(currentCompany==='全社')return [...new Set(allGenbaMaster.map(g=>g.name))].sort();
+  return [...new Set(allGenbaMaster.filter(g=>g.company===currentCompany||!g.company).map(g=>g.name))].sort();
+}
+function initMemberUI(){
+  ['s-leader','e-leader'].forEach(id=>{
+    const sel=document.getElementById(id);if(!sel)return;
+    const cur=sel.value;
+    sel.innerHTML='<option value="">代表者を選択してください</option>'+getShokunin().map(n=>`<option value="${esc(n)}"${n===cur?' selected':''}>${esc(n)}</option>`).join('');
+  });
+  const opSel=document.getElementById('s-operator');
+  if(opSel){
+    const names=getShokunin();const cur=opSel.value||currentUsername;
+    opSel.innerHTML='<option value="">選択してください</option>'+names.map(n=>`<option value="${esc(n)}"${n===cur?' selected':''}>${esc(n)}</option>`).join('');
+    if(cur&&names.includes(cur))opSel.value=cur;
+  }
+  renderMemberChips('member-selector',selectedMembers,toggleMember);
+  renderMemberChips('e-member-selector',editSelectedMembers,toggleEditMember);
+  updateLocationSuggestions();
+}
+function renderMemberChips(id,arr,fn){
+  const el=document.getElementById(id);if(!el)return;
+  el.innerHTML=getShokunin().map((name,i)=>`<div class="member-chip${arr.includes(i)?' selected':''}" onclick="${fn.name}(${i})">${esc(name)}</div>`).join('');
+}
+function toggleMember(i){const x=selectedMembers.indexOf(i);if(x>=0)selectedMembers.splice(x,1);else selectedMembers.push(i);renderMemberChips('member-selector',selectedMembers,toggleMember);}
+function toggleEditMember(i){const x=editSelectedMembers.indexOf(i);if(x>=0)editSelectedMembers.splice(x,1);else editSelectedMembers.push(i);renderMemberChips('e-member-selector',editSelectedMembers,toggleEditMember);}
+
+// ===== データ =====
+function formatTime(v){if(!v&&v!==0)return'';const s=String(v);if(s.match(/^\d{1,2}:\d{2}/))return s.slice(0,5);return'';}
+function parseWorkDate(v){
+  if(!v)return'';const s=String(v);
+  if(/^\d{4}-\d{2}-\d{2}/.test(s))return s.slice(0,10);
+  const d=new Date(s);if(!isNaN(d))return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  return s;
+}
+function parseRows(rows,company){
+  return(rows||[]).map(r=>({
+    id:String(r['ID']||''),timestamp:String(r['登録日時']||''),
+    date:parseWorkDate(r['作業日']),genba:String(r['元請名']||''),loc:String(r['現場名']||''),
+    name:String(r['氏名']||''),role:String(r['役割']||''),
+    start:formatTime(r['出勤']),end:formatTime(r['退勤']),
+    kosu:parseFloat(r['人工'])||0,memo:String(r['メモ']||''),
+    yakin:String(r['夜勤']||'')==='夜勤',yasumi:String(r['夜勤']||'')==='休み',
+    yotei:String(r['夜勤']||'')==='予定',souko:String(r['夜勤']||'')==='倉庫',
+    company:String(r['会社']||'')||company,updatedBy:String(r['更新者']||''),
+    color:String(r['色']||''),division:String(r['事業部']||''),jobNo:String(r['工番']||'')
+  }));
+}
+async function loadData(){
+  setLoading(true);
+  try{
+    const res=await fetch(GAS_URL+'?t='+Date.now());
+    const json=await res.json();
+    allNippos=parseRows(json.rows,'');
+    if(json.members)allMembers=json.members;
+    if(json.genbaMaster){
+      allGenbaMaster=json.genbaMaster.length>0&&typeof json.genbaMaster[0]==='object'
+        ?json.genbaMaster:json.genbaMaster.map(g=>({name:g,company:'共通'}));
+    }
+    initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();updateGmSelects();updateLocationSuggestions();
+  }catch(e){console.error(e);}
+  setLoading(false);
+}
+
+// ===== 現場名サジェスト =====
+function updateLocationSuggestions(){
+  const dl=document.getElementById('s-location-list');if(!dl)return;
+  const genba=getGenbaValue('s');
+  if(!genba||currentCompany==='全社'){dl.innerHTML='';return;}
+  const locs=[...new Set(allNippos.filter(n=>n.genba===genba&&n.company===currentCompany&&n.loc).map(n=>n.loc))].sort();
+  dl.innerHTML=locs.map(l=>`<option value="${esc(l)}">`).join('');
+}
+function checkLocationJobNo(){
+  const hint=document.getElementById('s-jobno-hint');if(!hint)return;
+  if(currentCompany!=='グローライズ'){hint.style.display='none';return;}
+  const genba=getGenbaValue('s');const loc=document.getElementById('s-location').value.trim();
+  if(loc&&genba){const match=allNippos.find(n=>n.genba===genba&&n.loc===loc&&n.jobNo);if(match){hint.textContent='既存の工番 '+match.jobNo+' を使用します';hint.style.display='block';}else hint.style.display='none';}
+  else hint.style.display='none';
+}
+
+// ===== インラインマスタ追加 =====
+function openSettingsFor(selectId){settingsOpenedForSelect=selectId;openSettings();}
+function openGenbaSettingsFor(selectId){genbaSettingsOpenedForSelect=selectId;openGenbaSettings();}
+
+// ===== 日報登録 =====
+function getDateRange(startStr,endStr){
+  const dates=[];const s=startStr.split('-').map(Number);const start=new Date(s[0],s[1]-1,s[2]);
+  if(!endStr){dates.push(startStr);return dates;}
+  const e=endStr.split('-').map(Number);const end=new Date(e[0],e[1]-1,e[2]);
+  for(let d=new Date(start);d<=end;d.setDate(d.getDate()+1)){dates.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'));}
+  return dates;
+}
+async function submitNippo(){
+  if(isSubmitting)return;
+  if(currentCompany==='全社'){showAlert('会社を選択してから登録してください','err');return;}
+  const operator=document.getElementById('s-operator').value;if(!operator){showAlert('操作者を選択してください','err');return;}
+  const dateStart=document.getElementById('s-date').value;const dateEnd=document.getElementById('s-date-end').value;
+  const genba=getGenbaValue('s');const loc=document.getElementById('s-location').value.trim();
+  const start=document.getElementById('s-start').value;const end=document.getElementById('s-end').value;
+  const kosu=parseFloat(document.getElementById('s-kosu').value);const memo=document.getElementById('s-memo').value;
+  const leader=document.getElementById('s-leader').value;const mode=modeState.s;
+  const yasumi=mode==='yasumi';const yakin=mode==='yakin';const souko=mode==='souko';const yotei=mode==='yotei';
+  const effectiveKosu=yasumi?0:kosu;
+  if(!dateStart||!genba){showAlert('開始日と元請名は必須です','err');return;}
+  if(!leader){showAlert('代表者を選択してください','err');return;}
+  const members=[{name:leader,role:'代表'}];
+  const shokunin=getShokunin();selectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
+  const color=selectedColor.s||CAL_COLORS[0];const dates=getDateRange(dateStart,dateEnd);
+  const rows=[];
+  dates.forEach(date=>{const dayId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company:currentCompany,id:dayId,updatedBy:operator,color});});});
+  const btn=document.getElementById('submit-btn');isSubmitting=true;btn.textContent=`送信中...`;btn.disabled=true;
+  try{
+    const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'add',rows}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){
+      showAlert(`✓ ${dates.length}日×${members.length}人分を登録しました！`,'ok');
+      document.getElementById('s-genba').value='';document.getElementById('s-genba-select').value='';document.getElementById('s-genba').style.display='none';
+      document.getElementById('s-location').value='';document.getElementById('s-memo').value='';document.getElementById('s-leader').value='';
+      document.getElementById('s-date-end').value='';document.getElementById('s-jobno-hint').style.display='none';
+      applyMode('s','');selectedMembers=[];renderMemberChips('member-selector',selectedMembers,toggleMember);
+      await loadData();
+    }else showAlert('エラー：'+json.message,'err');
+  }catch(err){showAlert('送信エラー：'+err.message,'err');}
+  isSubmitting=false;btn.textContent='登録する';btn.disabled=(currentCompany==='全社');
+}
+function showAlert(msg,type){
+  const el=document.getElementById('s-alert');el.className='alert alert-'+(type==='err'?'err':'ok');el.textContent=msg;el.style.display='block';
+  if(type!=='err')setTimeout(()=>el.style.display='none',3000);
+}
+
+// ===== カレンダー =====
+function groupNippos(nippos){
+  const groups={};
+  nippos.forEach(n=>{
+    const key=n.id||`${n.date}__${n.genba}__${n.loc}__${n.start}__${n.end}__${n.kosu}__${n.memo}`;
+    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,color:n.color,jobNo:n.jobNo};
+    groups[key].members.push({name:n.name,role:n.role});if(n.id)groups[key].ids.push(n.id);
+  });
+  return Object.values(groups).sort((a,b)=>a.date.localeCompare(b.date));
+}
+function formatDate(d){if(!d)return'';const p=d.split('-');const dt=new Date(p[0],p[1]-1,p[2]);const days=['日','月','火','水','木','金','土'];return`${dt.getMonth()+1}/${dt.getDate()}(${days[dt.getDay()]})`;}
+
+function renderList(){
+  if(!listMonth){const now=new Date();listMonth=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');}
+  const lp=listMonth.split('-');document.getElementById('list-month-label').textContent=lp[0]+'年'+Number(lp[1])+'月';
+  renderCalendar();
+}
+function changeListMonth(delta){
+  const p=listMonth.split('-');const d=new Date(Number(p[0]),Number(p[1])-1+delta,1);
+  listMonth=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');renderList();
+}
+function renderCalendar(){
+  const lp=listMonth.split('-');const year=Number(lp[0]),month=Number(lp[1])-1;
+  const firstDay=new Date(year,month,1).getDay();const daysInMonth=new Date(year,month+1,0).getDate();
+  const groups=groupNippos(filteredNippos()).filter(g=>g.date.startsWith(listMonth));
+  const byDate={};groups.forEach(g=>{if(!byDate[g.date])byDate[g.date]=[];byDate[g.date].push(g);});
+  const today=new Date();const todayStr=today.getFullYear()+'-'+String(today.getMonth()+1).padStart(2,'0')+'-'+String(today.getDate()).padStart(2,'0');
+  const DOW=['日','月','火','水','木','金','土'];
+  let html='<div class="cal-header">';DOW.forEach(d=>{html+=`<div class="cal-header-cell">${d}</div>`;});html+='</div><div class="cal-grid">';
+  for(let i=0;i<firstDay;i++)html+='<div class="cal-cell empty"></div>';
+  for(let d=1;d<=daysInMonth;d++){
+    const dateStr=year+'-'+String(month+1).padStart(2,'0')+'-'+String(d).padStart(2,'0');
+    const dow=new Date(year,month,d).getDay();const dayGroups=byDate[dateStr]||[];const isToday=dateStr===todayStr;
+    let cls='cal-cell';if(dow===0)cls+=' sun';if(dow===6)cls+=' sat';if(isToday)cls+=' today';
+    const shown=dayGroups.slice(0,5);const overflow=dayGroups.length-5;let eventsHtml='';
+    shown.forEach(g=>{
+      const type=g.yakin?'yakin':g.yasumi?'yasumi':g.souko?'souko':g.yotei?'yotei':'';
+      const map={yakin:'#2C2C5A',yasumi:'#E8384F',souko:'#8B5E3C',yotei:'#3B82F6','':'#1D9E75'};
+      eventsHtml+=`<div class="cal-event" style="background:${g.color||map[type]}">${esc(g.loc||g.genba||'（現場名なし）')}</div>`;
+    });
+    if(overflow>0)eventsHtml+=`<div class="cal-overflow">+${overflow}</div>`;
+    html+=`<div class="${cls}" onclick="openCalDay('${dateStr}')"><div class="cal-day-num">${d}</div>${eventsHtml}</div>`;
+  }
+  html+='</div>';document.getElementById('cal-grid').innerHTML=html;
+}
+
+let calSelectedDate='';
+function openCalDay(dateStr){
+  calSelectedDate=dateStr;
+  const lp=dateStr.split('-');const dt=new Date(Number(lp[0]),Number(lp[1])-1,Number(lp[2]));
+  const DOW=['日','月','火','水','木','金','土'];
+  document.getElementById('cal-day-title').textContent=`${Number(lp[1])}/${Number(lp[2])}（${DOW[dt.getDay()]}）の予定`;
+  const groups=groupNippos(filteredNippos()).filter(g=>g.date===dateStr);
+  const con=document.getElementById('cal-day-content');
+  if(groups.length===0){con.innerHTML='<div class="empty" style="padding:20px">予定がありません</div>';}
+  else{
+    con.innerHTML=groups.map((g,idx)=>{
+      const memberTags=g.members.map(m=>`<span class="member-tag ${m.role==='代表'?'tag-leader':'tag-member'}">${esc(m.name)}</span>`).join('');
+      const companyBadge=g.company?`<span class="company-badge">${esc(g.company)}</span>`:'';
+      const badges=(g.yakin?'<span class="yakin-badge">🌙夜勤</span>':'')+(g.yasumi?'<span class="yasumi-badge">🏖️休み</span>':'')+(g.souko?'<span class="souko-badge">🏭倉庫</span>':'')+(g.yotei?'<span class="yotei-badge-tag">📌予定</span>':'');
+      const updaterHtml=g.updatedBy?`<div class="yotei-updated-by">🔄 更新: ${esc(g.updatedBy)}</div>`:'';
+      return`<div class="yotei-card" style="margin-bottom:10px">
+        <div class="yotei-header"><div><div class="yotei-date">${badges}${companyBadge}</div><div class="yotei-genba">${esc(g.genba)}</div></div>
+        <div style="font-size:13px;color:#666">${(g.kosu*g.members.length).toFixed(1)}人工</div></div>
+        <div class="yotei-body">
+          ${g.loc?`<div class="yotei-loc">📍 ${esc(g.loc)}</div>`:''}
+          <div class="yotei-members">${memberTags}</div>
+          <div class="yotei-time">🕐 ${esc(g.start)}〜${esc(g.end)}</div>
+          ${g.memo?`<div class="yotei-memo">📝 ${esc(g.memo)}</div>`:''}
+          ${updaterHtml}
+        </div>
+        <div class="yotei-actions">
+          <button class="btn btn-secondary btn-sm" onclick="calCopyToInput(${idx})">コピー</button>
+          <button class="btn btn-secondary btn-sm" onclick="calOpenEdit(${idx})">編集</button>
+          <button class="btn btn-sm" style="background:#ff3b30" onclick="calDeleteGroup(${idx})">削除</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+  document.getElementById('cal-day-modal').classList.add('active');
+}
+function getCalDayGroups(){return groupNippos(filteredNippos()).filter(g=>g.date===calSelectedDate);}
+function calGoToInput(){document.getElementById('cal-day-modal').classList.remove('active');switchTab('input');if(calSelectedDate)document.getElementById('s-date').value=calSelectedDate;}
+function calCopyToInput(idx){
+  const g=getCalDayGroups()[idx];if(!g)return;
+  document.getElementById('cal-day-modal').classList.remove('active');switchTab('input');
+  setGenbaValue('s',g.genba);document.getElementById('s-location').value=g.loc||'';
+  document.getElementById('s-start').value=g.start||'08:00';document.getElementById('s-end').value=g.end||'17:00';
+  document.getElementById('s-kosu').value=(g.kosu>0?g.kosu:1.0).toFixed(1);document.getElementById('s-memo').value=g.memo||'';
+  document.getElementById('s-date').value=calSelectedDate;document.getElementById('s-date-end').value='';
+  applyMode('s',g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'');
+  const leader=g.members.find(m=>m.role==='代表');document.getElementById('s-leader').value=leader?leader.name:'';
+  selectedMembers=[];const shokunin=getShokunin();g.members.filter(m=>m.role==='同行').forEach(m=>{const i=shokunin.indexOf(m.name);if(i>=0)selectedMembers.push(i);});
+  renderMemberChips('member-selector',selectedMembers,toggleMember);initColorPicker('s',g.color||CAL_COLORS[0]);
+  updateLocationSuggestions();checkLocationJobNo();showAlert('予定をコピーしました。','ok');
+}
+function calOpenEdit(idx){document.getElementById('cal-day-modal').classList.remove('active');openEditModal(idx,getCalDayGroups());}
+async function calDeleteGroup(idx){
+  const g=getCalDayGroups()[idx];if(!g||!confirm('この日報を削除しますか？'))return;
+  setLoading(true);
+  try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'delete',ids:[...new Set(g.ids)],updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();if(json.status==='ok'){document.getElementById('cal-day-modal').classList.remove('active');await loadData();}
+    else alert('削除エラー：'+json.message);}catch(e){alert('削除エラー：'+e.message);}
+  setLoading(false);
+}
+
+// ===== 編集 =====
+function openEditModal(idx,groupsOverride){
+  bulkEditMode=false;
+  const g=(groupsOverride||getDisplayedGroups())[idx];if(!g)return;
+  editIds=[...new Set(g.ids)];editDate=g.date;
+  setGenbaValue('e',g.genba);document.getElementById('e-location').value=g.loc||'';
+  document.getElementById('e-start').value=g.start||'08:00';document.getElementById('e-end').value=g.end||'17:00';
+  document.getElementById('e-kosu').value=(g.kosu>0?g.kosu:1.0).toFixed(1);document.getElementById('e-memo').value=g.memo||'';
+  document.getElementById('edit-title').textContent=`編集：${formatDate(g.date)} ${g.genba}`;
+  applyMode('e',g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'');
+  const leader=g.members.find(m=>m.role==='代表');document.getElementById('e-leader').value=leader?leader.name:'';
+  editSelectedMembers=[];const shokunin=getShokunin();
+  g.members.filter(m=>m.role==='同行').forEach(m=>{const i=shokunin.indexOf(m.name);if(i>=0)editSelectedMembers.push(i);});
+  renderMemberChips('e-member-selector',editSelectedMembers,toggleEditMember);initColorPicker('e',g.color||CAL_COLORS[0]);
+  document.getElementById('edit-modal').classList.add('active');
+}
+function closeEditModal(){document.getElementById('edit-modal').classList.remove('active');}
+function getDisplayedGroups(){return groupNippos(filteredNippos()).filter(g=>g.date.startsWith(listMonth));}
+async function saveEdit(){
+  const btn=document.getElementById('save-edit-btn');if(btn.disabled)return;
+  const genba=getGenbaValue('e');const loc=document.getElementById('e-location').value.trim();
+  const start=document.getElementById('e-start').value;const end=document.getElementById('e-end').value;
+  const kosu=parseFloat(document.getElementById('e-kosu').value);const memo=document.getElementById('e-memo').value;
+  const leader=document.getElementById('e-leader').value;const mode=modeState.e;
+  const yasumi=mode==='yasumi';const yakin=mode==='yakin';const souko=mode==='souko';const yotei=mode==='yotei';
+  if(!genba){alert('元請名は必須です');return;}if(!leader){alert('代表者を選択してください');return;}
+  const members=[{name:leader,role:'代表'}];const shokunin=getShokunin();
+  editSelectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
+  const company=currentCompany==='全社'?'':currentCompany;const color=selectedColor.e||CAL_COLORS[0];
+  const dates=bulkEditMode?editDates:[editDate];const rows=[];
+  dates.forEach(date=>{const newId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:yasumi?0:kosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color});});});
+  btn.textContent='保存中...';btn.disabled=true;
+  try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update',ids:editIds,rows}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();if(json.status==='ok'){closeEditModal();bulkEditMode=false;await loadData();renderGmList();}
+    else alert('保存エラー：'+json.message);}catch(e){alert('保存エラー：'+e.message);}
+  btn.textContent='保存する';btn.disabled=false;
+}
+
+// ===== 現場別管理 =====
+function updateGmSelects(){
+  const genbas=[...new Set(filteredNippos().map(n=>n.genba).filter(Boolean))].sort();
+  const gSel=document.getElementById('gm-genba');const curG=gSel.value;
+  gSel.innerHTML='<option value="">元請を選択</option>'+genbas.map(g=>`<option value="${esc(g)}"${g===curG?' selected':''}>${esc(g)}</option>`).join('');
+  onGmGenbaChange();
+}
+function onGmGenbaChange(){
+  const genba=document.getElementById('gm-genba').value;
+  const nippos=filteredNippos().filter(n=>n.genba===genba);
+  const locs=[...new Set(nippos.map(n=>n.loc).filter(Boolean))].sort();
+  const hasNoLoc=nippos.some(n=>!n.loc);
+  const lSel=document.getElementById('gm-location');const curL=lSel.value;
+  let opts='<option value="">現場を選択</option>';
+  opts+=locs.map(l=>`<option value="${esc(l)}"${l===curL?' selected':''}>${esc(l)}</option>`).join('');
+  if(hasNoLoc)opts+=`<option value="__noloc__"${curL==='__noloc__'?' selected':''}>（現場名なし）</option>`;
+  lSel.innerHTML=opts;if(locs.length===1&&!hasNoLoc)lSel.value=locs[0];renderGmList();
+}
+function getGmGroups(){
+  const genba=document.getElementById('gm-genba').value;const loc=document.getElementById('gm-location').value;
+  if(!genba||!loc)return[];
+  const nippos=loc==='__noloc__'?filteredNippos().filter(n=>n.genba===genba&&!n.loc):filteredNippos().filter(n=>n.genba===genba&&n.loc===loc);
+  return groupNippos(nippos).sort((a,b)=>a.date.localeCompare(b.date));
+}
+function renderGmList(){
+  const groups=getGmGroups();const wrap=document.getElementById('gm-list-wrap');
+  if(groups.length===0){wrap.style.display='none';return;}
+  wrap.style.display='block';document.getElementById('gm-select-all-btn').textContent='全選択';
+  document.getElementById('gm-day-list').innerHTML=groups.map((g,idx)=>{
+    const badges=(g.yakin?'<span class="yakin-badge">🌙夜勤</span>':'')+(g.yasumi?'<span class="yasumi-badge">🏖️休み</span>':'')+(g.souko?'<span class="souko-badge">🏭倉庫</span>':'')+(g.yotei?'<span class="yotei-badge-tag">📌予定</span>':'');
+    const updaterHtml=g.updatedBy?`<span style="font-size:11px;color:#999;margin-left:8px;">🔄 ${esc(g.updatedBy)}</span>`:'';
+    return`<div class="gm-day-row">
+      <input type="checkbox" class="gm-day-check" data-idx="${idx}" onchange="updateGmDeleteBar()">
+      <div class="gm-day-info">
+        <div class="gm-day-date">${formatDate(g.date)}</div>
+        <div class="gm-day-members">${esc(g.members.map(m=>m.name).join('・'))}${updaterHtml}</div>
+        ${badges?`<div style="margin-top:4px">${badges}</div>`:''}
+      </div>
+      <button class="gm-edit-btn" onclick="openEditModal(${idx},getGmGroups())">編集</button>
+    </div>`;
+  }).join('');updateGmDeleteBar();
+}
+function updateGmDeleteBar(){
+  const checked=document.querySelectorAll('.gm-day-check:checked');
+  document.getElementById('gm-delete-bar').classList.toggle('active',checked.length>0);
+  const btn=document.getElementById('gm-delete-btn');if(btn)btn.textContent=`チェックした${checked.length}日を削除`;
+}
+function toggleGmSelectAll(){
+  const checkboxes=document.querySelectorAll('.gm-day-check');const allChecked=[...checkboxes].every(c=>c.checked);
+  checkboxes.forEach(c=>c.checked=!allChecked);document.getElementById('gm-select-all-btn').textContent=allChecked?'全選択':'全解除';updateGmDeleteBar();
+}
+function openBulkEditModal(){
+  const groups=getGmGroups();const checked=[...document.querySelectorAll('.gm-day-check:checked')];if(checked.length===0)return;
+  const targets=checked.map(c=>groups[Number(c.dataset.idx)]).filter(Boolean);if(targets.length===0)return;
+  bulkEditMode=true;editIds=[...new Set(targets.flatMap(g=>g.ids))];editDates=targets.map(g=>g.date);
+  const g=targets[0];setGenbaValue('e',g.genba);document.getElementById('e-location').value=g.loc||'';
+  document.getElementById('e-start').value=g.start||'08:00';document.getElementById('e-end').value=g.end||'17:00';
+  document.getElementById('e-kosu').value=(g.kosu>0?g.kosu:1.0).toFixed(1);document.getElementById('e-memo').value=g.memo||'';
+  document.getElementById('edit-title').textContent=`一括編集：${targets.length}日分`;
+  applyMode('e',g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'');
+  const leader=g.members.find(m=>m.role==='代表');document.getElementById('e-leader').value=leader?leader.name:'';
+  editSelectedMembers=[];const shokunin=getShokunin();g.members.filter(m=>m.role==='同行').forEach(m=>{const i=shokunin.indexOf(m.name);if(i>=0)editSelectedMembers.push(i);});
+  renderMemberChips('e-member-selector',editSelectedMembers,toggleEditMember);initColorPicker('e',g.color||CAL_COLORS[0]);
+  document.getElementById('edit-modal').classList.add('active');
+}
+async function deleteGmChecked(){
+  const groups=getGmGroups();const checked=[...document.querySelectorAll('.gm-day-check:checked')];if(checked.length===0)return;
+  const targets=checked.map(c=>groups[Number(c.dataset.idx)]).filter(Boolean);
+  if(!confirm(`${targets.map(g=>formatDate(g.date)).join('、')}\nを削除しますか？`))return;
+  const ids=[...new Set(targets.flatMap(g=>g.ids))];setLoading(true);
+  try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'delete',ids,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();if(json.status==='ok'){await loadData();renderGmList();}else alert('削除エラー：'+json.message);}catch(e){alert('削除エラー：'+e.message);}
+  setLoading(false);
+}
+
+// ===== 空き確認 =====
+let availWeekStart=null;
+function getMonday(d){const dt=new Date(d);const day=dt.getDay();return new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()-day+(day===0?-6:1));}
+function initAvailWeek(){availWeekStart=getMonday(new Date());renderAvailWeek();}
+function changeAvailWeek(delta){availWeekStart=new Date(availWeekStart.getFullYear(),availWeekStart.getMonth(),availWeekStart.getDate()+delta*7);renderAvailWeek();}
+function renderAvailWeek(){
+  const days=[];for(let i=0;i<7;i++){const d=new Date(availWeekStart.getFullYear(),availWeekStart.getMonth(),availWeekStart.getDate()+i);days.push({date:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),label:(d.getMonth()+1)+'/'+d.getDate(),dow:d.getDay()});}
+  const dayNames=['日','月','火','水','木','金','土'];
+  document.getElementById('avail-week-label').textContent=days[0].label+'〜'+days[6].label;
+  const cn=filteredNippos();const shokunin=getShokunin();
+  if(shokunin.length===0){document.getElementById('avail-weekly').innerHTML='<div style="color:#999;text-align:center;padding:20px">更新ボタンを押してください</div>';return;}
+  let html='<table class="week-table"><thead><tr><th></th>';
+  days.forEach(d=>{const cls=d.dow===0?' class="week-sun"':d.dow===6?' class="week-sat"':'';html+=`<th${cls}>${d.label}<br>${dayNames[d.dow]}</th>`;});
+  html+='</tr></thead><tbody>';
+  shokunin.forEach(name=>{
+    html+='<tr><td class="name-col">'+esc(name)+'</td>';
+    days.forEach(d=>{
+      const entry=cn.find(n=>n.name===name&&n.date===d.date);let cls='free',label='○';
+      if(entry){if(entry.yasumi){cls='yasumi';label='休';}else if(entry.souko){cls='souko';label='倉';}else{cls='busy';label='出';}}
+      html+=`<td class="${d.dow===0?' week-sun':d.dow===6?' week-sat':''}"><div class="week-cell ${cls}">${label}</div></td>`;
+    });html+='</tr>';
+  });
+  html+='</tbody></table>';document.getElementById('avail-weekly').innerHTML=html;
+}
+function updateAvailability(){renderAvailWeek();}
+
+// ===== 事務 =====
+function initSelects(){
+  document.getElementById('s-date').valueAsDate=new Date();
+  const sel=document.getElementById('j-month');const now=new Date();let opts='';
+  for(let i=0;i<12;i++){const d=new Date(now.getFullYear(),now.getMonth()-i,1);const val=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;opts+=`<option value="${val}"${i===0?' selected':''}>${d.getFullYear()}年${d.getMonth()+1}月</option>`;}
+  sel.innerHTML=opts;
+}
+function updateGenbaFilter(){
+  const gs=[...new Set(filteredNippos().map(n=>n.genba).filter(Boolean))].sort();
+  const gf=document.getElementById('j-genba-filter');const cur=gf.value;
+  gf.innerHTML='<option value="">全元請</option>'+gs.map(g=>`<option${g===cur?' selected':''}>${esc(g)}</option>`).join('');
+}
+function updateJimu(){
+  const month=document.getElementById('j-month').value;const genbaF=document.getElementById('j-genba-filter').value;
+  const nippos=filteredNippos().filter(n=>n.date.startsWith(month)&&(!genbaF||n.genba===genbaF));
+  const byNameDate={};
+  nippos.forEach(n=>{
+    if(n.yasumi||n.yotei)return;
+    const key=n.name+'__'+n.date;
+    if(!byNameDate[key])byNameDate[key]={day:0,night:0,dc:false,nc:false,company:n.company};
+    if(n.yakin){byNameDate[key].night=Math.max(byNameDate[key].night,n.kosu);byNameDate[key].nc=true;}
+    else{byNameDate[key].day=Math.max(byNameDate[key].day,n.kosu);byNameDate[key].dc=true;}
+  });
+  const byName={};
+  Object.entries(byNameDate).forEach(([key,v])=>{
+    const name=key.split('__')[0];if(!byName[name])byName[name]={days:0,kosu:0,company:v.company};
+    if(v.dc)byName[name].days++;if(v.nc)byName[name].days++;byName[name].kosu+=v.day+v.night;
+  });
+  document.getElementById('j-total-days').textContent=Object.values(byName).reduce((s,v)=>s+v.days,0);
+  document.getElementById('j-total-ko').textContent=Object.values(byName).reduce((s,v)=>s+v.kosu,0).toFixed(1);
+  const entries=Object.entries(byName).sort((a,b)=>b[1].kosu-a[1].kosu);
+  document.getElementById('j-shokunin-tbl').innerHTML=entries.length?
+    entries.map(([name,v])=>`<tr><td>${esc(name)}</td><td><span class="company-badge">${esc(v.company)}</span></td><td>${v.days}日</td><td>${v.kosu.toFixed(1)}人工</td></tr>`).join(''):
+    `<tr><td colspan="4" class="empty">データなし</td></tr>`;
+}
+async function downloadSheetCSV(){
+  const sheetName=document.getElementById('csv-sheet').value;const btn=document.getElementById('csv-btn');btn.textContent='取得中...';btn.disabled=true;
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'get_sheet',sheet:sheetName}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'&&json.data){const BOM='\uFEFF';const csvEsc=v=>{const s=String(v==null?'':v);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;};
+      const csv=json.data.map(row=>row.map(csvEsc).join(',')).join('\n');const blob=new Blob([BOM+csv],{type:'text/csv;charset=utf-8;'});
+      const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`${sheetName}.csv`;a.click();}
+    else alert('エラー：'+(json.message||'データなし'));}catch(e){alert('エラー：'+e.message);}
+  btn.textContent='ダウンロード';btn.disabled=false;
+}
+async function runSummary(){
+  const btn=document.getElementById('summary-btn');btn.textContent='集計中...';btn.disabled=true;
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'summarize'}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();if(json.status==='ok')alert('集計シートを更新しました！');else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+  btn.textContent='集計を更新';btn.disabled=false;
+}
+async function archiveOldData(){
+  if(!confirm('3ヶ月以上前のデータをアーカイブします。よろしいですか？'))return;
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'archive',months:3}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();if(json.status==='ok'){alert(`${json.archived}件をアーカイブしました`);await loadData();}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+}
+
+// ===== 元請セレクト =====
+function initGenbaSelects(){
+  const gList=getGenbaMasterNames();
+  ['s','e'].forEach(p=>{
+    const sel=document.getElementById(p+'-genba-select');if(!sel)return;
+    const cur=sel.value;
+    let opts='<option value="">選択してください</option>';
+    gList.forEach(g=>{opts+=`<option value="${esc(g)}"${g===cur?' selected':''}>${esc(g)}</option>`;});
+    opts+='<option value="__manual__">直接入力する</option>';
+    sel.innerHTML=opts;
+  });
+}
+function onGenbaSelect(p){
+  const sel=document.getElementById(p+'-genba-select');const inp=document.getElementById(p+'-genba');
+  if(sel.value==='__manual__'){inp.style.display='';inp.value='';inp.focus();}else{inp.style.display='none';inp.value=sel.value;}
+  if(p==='s'){updateLocationSuggestions();checkLocationJobNo();}
+}
+function getGenbaValue(p){
+  const sel=document.getElementById(p+'-genba-select');
+  if(sel.value==='__manual__'||sel.value==='')return document.getElementById(p+'-genba').value.trim();
+  return sel.value;
+}
+function setGenbaValue(p,val){
+  const sel=document.getElementById(p+'-genba-select');const inp=document.getElementById(p+'-genba');
+  const opts=[...sel.options].map(o=>o.value);
+  if(val&&opts.includes(val)){sel.value=val;inp.style.display='none';inp.value=val;}
+  else{sel.value='__manual__';inp.style.display='';inp.value=val||'';}
+}
+
+// ===== 職人管理 =====
+function openSettings(){if(currentCompany==='全社'){alert('会社を選択してから管理してください');return;}renderSettings();document.getElementById('settings-modal').classList.add('active');}
+function closeSettings(){document.getElementById('settings-modal').classList.remove('active');initMemberUI();settingsOpenedForSelect=null;}
+function renderSettings(){
+  document.getElementById('settings-company-name').textContent=currentCompany;
+  const isGrowise=currentCompany==='グローライズ';
+  const divField=document.getElementById('division-field');if(divField)divField.style.display=isGrowise?'':'none';
+  document.getElementById('shokunin-list').innerHTML=getShokunin().map((s,i)=>{
+    const member=allMembers.find(m=>m.name===s&&m.company===currentCompany);const div=(member&&member.division)||'';
+    const divSelect=isGrowise?`<select onchange="updateMemberDivision('${esc(s)}',this.value)" style="width:auto;margin:0;padding:4px 8px;font-size:12px;border:1px solid #ddd;border-radius:6px;background:#f9f9f9">
+      <option value=""${!div?' selected':''}>（なし）</option>${DIVISIONS.map(d=>`<option value="${d}"${d===div?' selected':''}>${d}</option>`).join('')}</select>`:'';
+    return`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee;gap:6px">
+      <span style="font-size:15px;flex:1">${esc(s)}</span>
+      <div style="display:flex;align-items:center;gap:6px">${divSelect}<button class="btn btn-danger btn-sm" onclick="removeShokunin(${i})">削除</button></div>
+    </div>`;
+  }).join('')||'<div style="color:#999;padding:12px;text-align:center">職人が登録されていません</div>';
+}
+async function addShokunin(){
+  const v=document.getElementById('new-shokunin').value.trim();if(!v)return;
+  const isGrowise=currentCompany==='グローライズ';const divSel=document.getElementById('new-shokunin-division');const division=isGrowise&&divSel?divSel.value:'';
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'add_member',name:v,company:currentCompany,division}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){allMembers.push({name:v,company:currentCompany,division});document.getElementById('new-shokunin').value='';if(divSel)divSel.value='';renderSettings();initMemberUI();
+      if(settingsOpenedForSelect){const sel=document.getElementById(settingsOpenedForSelect);if(sel)sel.value=v;if(settingsOpenedForSelect==='s-operator'){currentUsername=v;try{localStorage.setItem('admin-username',v);}catch(e){}updateUsernameDisplay();}settingsOpenedForSelect=null;}
+    }else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+}
+async function removeShokunin(i){
+  const name=getShokunin()[i];if(!confirm(name+'を削除しますか？'))return;
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'remove_member',name,company:currentCompany}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();if(json.status==='ok'){allMembers=allMembers.filter(m=>!(m.name===name&&m.company===currentCompany));renderSettings();initMemberUI();}
+    else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+}
+async function updateMemberDivision(name,division){
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_division',name,company:currentCompany,division}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();if(json.status==='ok'){const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.division=division;}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+}
+
+// ===== 元請管理 =====
+function openGenbaSettings(){if(currentCompany==='全社'){alert('会社を選択してから管理してください');return;}renderGenbaSettings();document.getElementById('genba-settings-modal').classList.add('active');}
+function closeGenbaSettings(){document.getElementById('genba-settings-modal').classList.remove('active');initGenbaSelects();genbaSettingsOpenedForSelect=null;}
+function renderGenbaSettings(){
+  document.getElementById('genba-settings-company-name').textContent=currentCompany;
+  const list=allGenbaMaster.filter(g=>g.company===currentCompany||!g.company);
+  document.getElementById('genba-master-list').innerHTML=list.map((g,i)=>
+    `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee">
+      <span style="font-size:15px">${esc(g.name)}${!g.company?'<span style="font-size:11px;color:#999;margin-left:6px">（共通）</span>':''}</span>
+      <button class="btn btn-danger btn-sm" onclick="removeGenbaMaster(${i})">削除</button>
+    </div>`).join('')||'<div style="color:#999;padding:12px;text-align:center">元請が登録されていません</div>';
+}
+async function addGenbaMaster(){
+  const v=document.getElementById('new-genba-master').value.trim();if(!v)return;
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'add_genba',name:v,company:currentCompany}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){if(!json.duplicate)allGenbaMaster.push({name:v,company:currentCompany});allGenbaMaster.sort((a,b)=>a.name.localeCompare(b.name));
+      document.getElementById('new-genba-master').value='';renderGenbaSettings();initGenbaSelects();
+      if(genbaSettingsOpenedForSelect){const sel=document.getElementById(genbaSettingsOpenedForSelect);if(sel)sel.value=v;const prefix=genbaSettingsOpenedForSelect==='s-genba-select'?'s':genbaSettingsOpenedForSelect==='e-genba-select'?'e':null;if(prefix)onGenbaSelect(prefix);genbaSettingsOpenedForSelect=null;}
+    }else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+}
+async function removeGenbaMaster(i){
+  const list=allGenbaMaster.filter(g=>g.company===currentCompany||!g.company);const g=list[i];if(!g)return;
+  if(!confirm(g.name+'を削除しますか？'))return;const delCompany=g.company||'';
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'remove_genba',name:g.name,company:delCompany}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();if(json.status==='ok'){allGenbaMaster=allGenbaMaster.filter(x=>!(x.name===g.name&&(x.company||'')===delCompany));renderGenbaSettings();initGenbaSelects();}
+    else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+}
+</script>
+</body>
+</html>
