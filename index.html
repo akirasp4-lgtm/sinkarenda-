@@ -166,6 +166,15 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <input type="text" id="s-location" list="s-location-list" placeholder="例：〇〇ビル新築工事" oninput="checkLocationJobNo()">
   <datalist id="s-location-list"></datalist>
   <div class="jobno-hint" id="s-jobno-hint"></div>
+  <div id="s-jobno-div-wrap" style="display:none;margin-bottom:12px">
+    <label style="font-size:12px;color:#666">新規現場の工番事業部</label>
+    <select id="s-jobno-division">
+      <option value="ICT">ICT</option>
+      <option value="INF">INF</option>
+      <option value="MSC">MSC</option>
+      <option value="GRB">GRB</option>
+    </select>
+  </div>
   <div class="grid2">
     <div><label>出勤</label><input type="time" id="s-start" value="08:00"></div>
     <div><label>退勤</label><input type="time" id="s-end" value="17:00"></div>
@@ -400,7 +409,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 
 <script>
-const GAS_URL='https://script.google.com/macros/s/AKfycbxNdLX0T4Sg_P8vehxeDm-3TDdDlfXzFM06N3M-40Y-UKjvEdRBt5YDU-RVebgtH01laA/exec';
+const GAS_URL='https://script.google.com/macros/s/AKfycby_4pfnFzIPlE8VcSvjxhuWglsjSfBW3UhIvf_R4o4pqgGZUWzhiIcEBOXjn-37NwnZbg/exec';
 
 const COMPANIES=['グローライズ','和信カインド','ビジネスサポート','ラーテル','GRHD','GRミツマ'];
 const MODES=['souko','yakin','yasumi','yotei'];
@@ -410,6 +419,13 @@ const DIVISIONS=['ICT','INF','MSC','GRB'];
 // URLパラメータ解析（スクリプト冒頭で確定）
 const urlParams=new URLSearchParams(window.location.search);
 const isAdminMode=urlParams.get('mode')==='admin';
+
+// 全モーダル共通: 背景クリックで閉じる
+document.addEventListener('click',function(e){
+  if(e.target.classList&&e.target.classList.contains('modal-bg')&&e.target.classList.contains('active')){
+    e.target.classList.remove('active');
+  }
+});
 
 let selectedColor={s:'#1D9E75',e:'#1D9E75'};
 
@@ -624,15 +640,32 @@ function updateLocationSuggestions(){
 
 function checkLocationJobNo(){
   const hint=document.getElementById('s-jobno-hint');
+  const divWrap=document.getElementById('s-jobno-div-wrap');
   if(!hint)return;
-  if(currentCompany!=='グローライズ'){hint.style.display='none';return;}
+  if(currentCompany!=='グローライズ'){hint.style.display='none';if(divWrap)divWrap.style.display='none';return;}
   const genba=getGenbaValue('s');
   const loc=document.getElementById('s-location').value.trim();
   if(loc&&genba){
     const match=allNippos.find(n=>n.genba===genba&&n.loc===loc&&n.jobNo);
-    if(match){hint.textContent='既存の工番 '+match.jobNo+' を使用します';hint.style.display='block';}
-    else hint.style.display='none';
-  }else{hint.style.display='none';}
+    if(match){
+      hint.textContent='既存の工番 '+match.jobNo+' を使用します';
+      hint.style.display='block';
+      if(divWrap)divWrap.style.display='none';
+    }else{
+      hint.style.display='none';
+      if(divWrap){
+        const operator=document.getElementById('s-operator').value;
+        const member=allMembers.find(m=>m.name===operator&&m.company===currentCompany);
+        const opDiv=(member&&member.division)||'ICT';
+        const sel=document.getElementById('s-jobno-division');
+        if(sel&&!sel.dataset.userSet)sel.value=DIVISIONS.includes(opDiv)?opDiv:'ICT';
+        divWrap.style.display='block';
+      }
+    }
+  }else{
+    hint.style.display='none';
+    if(divWrap)divWrap.style.display='none';
+  }
 }
 
 // ========== インラインマスタ追加 ==========
@@ -713,10 +746,11 @@ async function submitNippo(){
     if(!proceed)return;
   }
 
+  const jobNoDivision=(currentCompany==='グローライズ'&&document.getElementById('s-jobno-div-wrap').style.display!=='none')?document.getElementById('s-jobno-division').value:'';
   const rows=[];
   dates.forEach(date=>{
     const dayId=uuid();
-    members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company:currentCompany,id:dayId,updatedBy:operator,color});});
+    members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company:currentCompany,id:dayId,updatedBy:operator,color,jobNoDivision});});
   });
   const btn=document.getElementById('submit-btn');
   isSubmitting=true;btn.textContent=`送信中（${dates.length}日分）...`;btn.disabled=true;
