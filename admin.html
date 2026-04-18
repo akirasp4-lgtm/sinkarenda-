@@ -24,6 +24,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;bac
 #app{display:none}
 #app.unlocked{display:block}
 .lock-btn{position:fixed;top:10px;right:10px;z-index:110;background:rgba(0,0,0,0.1);border:none;border-radius:16px;padding:4px 10px;font-size:12px;color:#555;cursor:pointer}
+.help-btn{position:fixed;top:10px;right:90px;z-index:110;background:#1D9E75;color:#fff;border:none;border-radius:16px;padding:4px 10px;font-size:12px;cursor:pointer}
+.help-section{margin-bottom:20px;border-left:3px solid #1D9E75;padding-left:12px}
+.help-section h3{margin:0 0 8px;font-size:15px;color:#1D9E75}
+.help-section p,.help-section li{font-size:13px;color:#333;line-height:1.6;margin:4px 0}
+.help-section ul,.help-section ol{padding-left:20px;margin:6px 0}
+.help-kbd{background:#F0F0F0;border:1px solid #DDD;border-radius:4px;padding:1px 6px;font-family:Consolas,monospace;font-size:12px}
 
 /* ===== 共通スタイル（index.htmlと同じ） ===== */
 .company-bar{position:fixed;top:0;left:0;right:0;z-index:100;background:#fff;border-bottom:1px solid #ddd;padding:8px 12px;display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
@@ -180,6 +186,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 
 <!-- ===== メインアプリ ===== -->
 <div id="app">
+<button class="help-btn" onclick="openHelp()">❓ 使い方</button>
 <button class="lock-btn" onclick="lockScreen()">🔒 ロック</button>
 <div class="company-bar" id="company-bar"></div>
 <div class="loading-bar" id="loading-bar"></div>
@@ -444,6 +451,73 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 
 <!-- 元請管理モーダル -->
+<div id="help-modal" class="modal-bg">
+<div class="modal" style="max-width:720px">
+  <div class="modal-title">❓ 管理者用 使い方ガイド</div>
+
+  <div class="help-section">
+    <h3>🔑 基本</h3>
+    <p>PIN <span class="help-kbd">8800</span> で入場。右上の <span class="help-kbd">🔒ロック</span> で一時退出。</p>
+    <p>画面上部の会社バーで集計対象を切替（全社 or 各社）。</p>
+  </div>
+
+  <div class="help-section">
+    <h3>📊 事務タブの使い方</h3>
+    <ol>
+      <li><b>月別集計</b>: 月を選ぶと職人別の出勤日数・人工合計が表示</li>
+      <li><b>CSVダウンロード</b>: 日報・マスタ・集計・操作ログを出力可能</li>
+      <li><b>職人を管理</b>: 氏名・会社・事業部・<b>単価（日当）</b>を登録/編集</li>
+      <li><b>元請を管理</b>: 元請リストの追加/削除</li>
+      <li><b>集計を更新</b>: 全集計シートを一括再生成（毎朝6時も自動）</li>
+      <li><b>データアーカイブ</b>: 3ヶ月以上前を退避（毎月1日3時も自動）</li>
+      <li><b>工番を修正する</b>: 事業部変更・売上入力</li>
+    </ol>
+  </div>
+
+  <div class="help-section">
+    <h3>🔧 工番修正モーダル</h3>
+    <p>現場マスタの全現場が一覧表示されます。各現場で:</p>
+    <ul>
+      <li><b>事業部を変更</b> → 「工番更新」で新事業部×年度の次連番で<b>再発番</b>（旧工番は欠番）</li>
+      <li><b>売上を入力</b> → 「売上保存」で現場マスタの売上列に反映</li>
+      <li>代表者の事業部が参考表示されるので、選び直しの判断に使える</li>
+    </ul>
+  </div>
+
+  <div class="help-section">
+    <h3>💰 粗利管理の始め方</h3>
+    <ol>
+      <li><b>職人単価を設定</b>: 職人を管理 → 各職人の単価欄に日当を入力（自動保存）</li>
+      <li><b>現場売上を入力</b>: 工番を修正する → 各現場の売上欄を入力 → 売上保存</li>
+      <li><b>集計ボタン</b>: 事務タブの「集計を更新」</li>
+    </ol>
+    <p>→ スプレッドシートの「<b>事業部別按分</b>」シートで、工番×事業部の人工・原価・売上按分・粗利・粗利率が自動計算されます。</p>
+  </div>
+
+  <div class="help-section">
+    <h3>📋 スプレッドシートのシート</h3>
+    <ul>
+      <li><b>データ</b>: 日報データ / アーカイブ / 職人マスタ / 元請マスタ / 現場マスタ</li>
+      <li><b>集計</b>: 会社別集計 / 月別集計 / 月別確認表 / 元請別請求集計 / 事業部別按分</li>
+      <li><b>運用</b>: 操作ログ（誰がいつ何を変更したか自動記録）</li>
+    </ul>
+    <p style="color:#c00;font-size:12px">⚠ 集計シートは手動で書き込まない（次回集計で消える）</p>
+  </div>
+
+  <div class="help-section">
+    <h3>🆘 困ったら</h3>
+    <ul>
+      <li><b>工番が空欄</b> → 代表者の事業部未設定。職人管理で割当</li>
+      <li><b>粗利がマイナス</b> → 売上未入力 or 単価が高すぎる可能性</li>
+      <li><b>原価が0</b> → 職人の単価が未設定</li>
+      <li><b>起動が遅い</b> → アーカイブを実行（3ヶ月以前を退避）</li>
+    </ul>
+  </div>
+
+  <button class="btn btn-secondary" style="width:100%;margin-top:8px" onclick="document.getElementById('help-modal').classList.remove('active')">閉じる</button>
+</div>
+</div>
+
 <div id="jobno-fix-modal" class="modal-bg">
 <div class="modal" style="max-width:720px">
   <div class="modal-title">工番事業部の修正</div>
@@ -486,13 +560,15 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 const ADMIN_PIN = '8800';
 // ============================================================
 
-const GAS_URL='https://script.google.com/macros/s/AKfycbxuTC52RIE3HAvLJGhIKgS-APraqft_Wq5MmPh2HKiARoHbZDfKbsFDoyYeUbujKUYdlA/exec';
+const GAS_URL='https://script.google.com/macros/s/AKfycbz7GqjqHu70-snJ52Kap7rypBHrIOE7ykI5904Bmu-wsd6f0hv9h7O0zwESBw-1MkQ8Hw/exec';
 const COMPANIES=['グローライズ','和信カインド','ビジネスサポート','ラーテル','GRHD','GRミツマ'];
 const MODES=['souko','yakin','yasumi','yotei'];
 const CAL_COLORS=['#1D9E75','#3B82F6','#E8384F','#F59E0B','#8B5CF6','#EC4899','#2C2C5A','#8B5E3C','#64748B','#0EA5E9'];
 const DIVISIONS=['ICT','INF','MSC','GRB'];
 // 管理画面は常にadminモード
 const isAdminMode = true;
+
+function openHelp(){document.getElementById('help-modal').classList.add('active');}
 
 // 全モーダル共通: 背景クリックで閉じる
 document.addEventListener('click',function(e){

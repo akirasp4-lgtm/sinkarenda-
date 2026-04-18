@@ -8,6 +8,12 @@
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;background:#f2f2f7;color:#1a1a1a;min-height:100vh}
 .company-bar{position:fixed;top:0;left:0;right:0;z-index:100;background:#fff;border-bottom:1px solid #ddd;padding:8px 12px;display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.help-btn{position:fixed;top:10px;right:10px;z-index:110;background:#1D9E75;color:#fff;border:none;border-radius:16px;padding:4px 10px;font-size:12px;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,0.2)}
+.help-section{margin-bottom:20px;border-left:3px solid #1D9E75;padding-left:12px}
+.help-section h3{margin:0 0 8px;font-size:15px;color:#1D9E75}
+.help-section p,.help-section li{font-size:13px;color:#333;line-height:1.6;margin:4px 0}
+.help-section ul,.help-section ol{padding-left:20px;margin:6px 0}
+.help-kbd{background:#F0F0F0;border:1px solid #DDD;border-radius:4px;padding:1px 6px;font-family:Consolas,monospace;font-size:12px}
 .company-chip{padding:6px 14px;border-radius:20px;font-size:13px;font-weight:500;white-space:nowrap;border:1.5px solid #ddd;background:#fff;color:#666;cursor:pointer;flex-shrink:0;transition:all 0.15s}
 .company-chip.active{background:#1D9E75;color:#fff;border-color:#1D9E75}
 .tab-bar{position:fixed;bottom:0;left:0;right:0;display:flex;background:#fff;border-top:1px solid #ddd;z-index:100;padding-bottom:env(safe-area-inset-bottom)}
@@ -141,6 +147,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </head>
 <body>
 <div class="company-bar" id="company-bar"></div>
+<button class="help-btn" onclick="openHelp()">❓ 使い方</button>
 <div class="loading-bar" id="loading-bar"></div>
 <div class="notice-bar" id="notice-bar">会社を選択して入力してください</div>
 
@@ -396,6 +403,95 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 </div>
 
+<div id="help-modal" class="modal-bg">
+<div class="modal" style="max-width:720px">
+  <div class="modal-title">❓ 使い方ガイド</div>
+
+  <div class="help-section">
+    <h3>📝 日報入力の流れ</h3>
+    <ol>
+      <li><b>操作者</b>（自分の名前）を選択 ※初回のみ、以降は記憶</li>
+      <li><b>作業日</b>を選ぶ（連続する複数日は終了日も指定）</li>
+      <li><b>元請名</b>をプルダウンから選択（なければ ➕ で追加）</li>
+      <li><b>現場名</b>を入力</li>
+      <li><b>代表者</b>を選ぶ（その日の現場責任者）</li>
+      <li><b>同行者</b>（代表以外のメンバー）を選ぶ</li>
+      <li><b>出勤/退勤時間</b>・<b>人工</b>（1.0/1.5/2.0）・<b>メモ</b>を入力</li>
+      <li>必要なら 🏭倉庫 / 🌙夜勤 / 🏖️休み / 📌予定 を選択</li>
+      <li><b>登録する</b>ボタンで送信</li>
+    </ol>
+  </div>
+
+  <div class="help-section">
+    <h3>🏷 モードの使い分け</h3>
+    <ul>
+      <li><b>🏭倉庫</b>: 倉庫作業の日</li>
+      <li><b>🌙夜勤</b>: 夜勤（日中の予定とも併存可）</li>
+      <li><b>🏖️休み</b>: 休暇・欠勤（人工は0としてカウント）</li>
+      <li><b>📌予定</b>: まだ確定していない予定（人工にはカウントしない）</li>
+    </ul>
+  </div>
+
+  <div class="help-section">
+    <h3>🔍 現場名の重複チェック</h3>
+    <p>似た現場名が既にある場合、送信時に確認ダイアログが表示されます。</p>
+    <ul>
+      <li><b>既存の現場をタップ</b> → その現場に紐付けて登録</li>
+      <li><b>「はい、新規として登録」</b> → 新しい現場として登録</li>
+    </ul>
+  </div>
+
+  <div class="help-section">
+    <h3>🔢 工番事業部セレクタ（グローライズのみ）</h3>
+    <p>新規現場を入力すると「新規現場の工番事業部」セレクタが表示されます。</p>
+    <ul>
+      <li>デフォルトは<b>代表者の事業部</b></li>
+      <li>初日だけ他事業部の人が代表する場合は手動で変更OK</li>
+      <li>選んだ事業部が工番の頭文字になります（例: ICT-26-001）</li>
+    </ul>
+  </div>
+
+  <div class="help-section">
+    <h3>⚠️ 異常値の警告</h3>
+    <ul>
+      <li><b>退勤 ≤ 出勤</b>（夜勤以外）→ 送信ブロック、時間を確認してください</li>
+      <li><b>人工 &gt; 2.0</b> → 確認ダイアログが出ます</li>
+    </ul>
+  </div>
+
+  <div class="help-section">
+    <h3>📅 カレンダータブ</h3>
+    <p>月単位で予定をカレンダー表示。</p>
+    <ul>
+      <li><b>日付をタップ</b> → その日の予定を一覧表示</li>
+      <li>予定をタップ → 編集・削除</li>
+      <li>画面外側のタップで閉じる</li>
+    </ul>
+  </div>
+
+  <div class="help-section">
+    <h3>👥 空き確認タブ</h3>
+    <p>指定日・期間の全職人の空き状況を一覧表示。休み・予定は色分け表示。</p>
+  </div>
+
+  <div class="help-section">
+    <h3>🏗️ 現場管理タブ</h3>
+    <p>既存の現場別に登録内容をまとめて確認・編集。複数日まとめて修正する「一括編集」も可能。</p>
+  </div>
+
+  <div class="help-section">
+    <h3>🆘 困ったら</h3>
+    <ul>
+      <li><b>入力が反映されない</b> → 「現在他の人が更新中」の表示が出ていたら数秒待って再送信</li>
+      <li><b>間違えた日報を消したい</b> → カレンダー → 該当日をタップ → 編集 → 削除</li>
+      <li><b>予定を実績に変更</b> → 編集画面で 📌予定 を解除して保存</li>
+    </ul>
+  </div>
+
+  <button class="btn btn-secondary" style="width:100%;margin-top:8px" onclick="document.getElementById('help-modal').classList.remove('active')">閉じる</button>
+</div>
+</div>
+
 <div id="similar-loc-modal" class="modal-bg">
 <div class="modal">
   <div class="modal-title">現場名の確認</div>
@@ -422,7 +518,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 
 <script>
-const GAS_URL='https://script.google.com/macros/s/AKfycbxuTC52RIE3HAvLJGhIKgS-APraqft_Wq5MmPh2HKiARoHbZDfKbsFDoyYeUbujKUYdlA/exec';
+const GAS_URL='https://script.google.com/macros/s/AKfycbz7GqjqHu70-snJ52Kap7rypBHrIOE7ykI5904Bmu-wsd6f0hv9h7O0zwESBw-1MkQ8Hw/exec';
 
 const COMPANIES=['グローライズ','和信カインド','ビジネスサポート','ラーテル','GRHD','GRミツマ'];
 const MODES=['souko','yakin','yasumi','yotei'];
@@ -432,6 +528,8 @@ const DIVISIONS=['ICT','INF','MSC','GRB'];
 // URLパラメータ解析（スクリプト冒頭で確定）
 const urlParams=new URLSearchParams(window.location.search);
 const isAdminMode=urlParams.get('mode')==='admin';
+
+function openHelp(){document.getElementById('help-modal').classList.add('active');}
 
 // 全モーダル共通: 背景クリックで閉じる
 document.addEventListener('click',function(e){
