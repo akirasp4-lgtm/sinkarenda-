@@ -24,7 +24,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;bac
 #app{display:none}
 #app.unlocked{display:block}
 .lock-btn{position:fixed;top:10px;right:10px;z-index:110;background:rgba(0,0,0,0.1);border:none;border-radius:16px;padding:4px 10px;font-size:12px;color:#555;cursor:pointer}
-.help-btn{position:fixed;top:10px;right:90px;z-index:110;background:#1D9E75;color:#fff;border:none;border-radius:16px;padding:4px 10px;font-size:12px;cursor:pointer}
+.help-btn{position:fixed;bottom:calc(70px + env(safe-area-inset-bottom));right:14px;z-index:105;background:#1D9E75;color:#fff;border:none;border-radius:50%;width:48px;height:48px;font-size:20px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center}
 .help-section{margin-bottom:20px;border-left:3px solid #1D9E75;padding-left:12px}
 .help-section h3{margin:0 0 8px;font-size:15px;color:#1D9E75}
 .help-section p,.help-section li{font-size:13px;color:#333;line-height:1.6;margin:4px 0}
@@ -186,7 +186,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 
 <!-- ===== メインアプリ ===== -->
 <div id="app">
-<button class="help-btn" onclick="openHelp()">❓ 使い方</button>
+<button class="help-btn" onclick="openHelp()" title="使い方">❓</button>
 <button class="lock-btn" onclick="lockScreen()">🔒 ロック</button>
 <div class="company-bar" id="company-bar"></div>
 <div class="loading-bar" id="loading-bar"></div>
