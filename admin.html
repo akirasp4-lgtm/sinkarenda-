@@ -232,8 +232,6 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="toggle-row toggle-yakin" id="s-yakin-toggle" onclick="setMode('s','yakin')"><span class="t-icon">🌙</span><span class="t-label">夜勤</span></div>
   <div class="toggle-row toggle-yasumi" id="s-yasumi-toggle" onclick="setMode('s','yasumi')"><span class="t-icon">🏖️</span><span class="t-label">休み</span></div>
   <div class="toggle-row toggle-yotei" id="s-yotei-toggle" onclick="setMode('s','yotei')"><span class="t-icon">📌</span><span class="t-label">予定</span></div>
-  <label>人工（ひとり当たり）</label>
-  <select id="s-kosu"><option value="1.0">1人工</option><option value="1.5">1.5人工</option><option value="2.0">2人工</option></select>
   <div class="leader-select-wrap">
     <label>代表者<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
     <div class="select-add-wrap" style="margin-bottom:0">
@@ -414,8 +412,6 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="toggle-row toggle-yakin" id="e-yakin-toggle" onclick="setMode('e','yakin')"><span class="t-icon">🌙</span><span class="t-label">夜勤</span></div>
   <div class="toggle-row toggle-yasumi" id="e-yasumi-toggle" onclick="setMode('e','yasumi')"><span class="t-icon">🏖️</span><span class="t-label">休み</span></div>
   <div class="toggle-row toggle-yotei" id="e-yotei-toggle" onclick="setMode('e','yotei')"><span class="t-icon">📌</span><span class="t-label">予定</span></div>
-  <label>人工（ひとり当たり）</label>
-  <select id="e-kosu"><option value="1.0">1人工</option><option value="1.5">1.5人工</option><option value="2.0">2人工</option></select>
   <div class="leader-select-wrap"><label>代表者</label><select id="e-leader"><option value="">代表者を選択してください</option></select></div>
   <div class="member-section"><div class="member-label">同行メンバー（タップで選択）</div><div id="e-member-selector" class="member-grid"></div></div>
   <label>メモ</label><textarea id="e-memo"></textarea>
@@ -872,7 +868,7 @@ async function submitNippo(){
   const dateStart=document.getElementById('s-date').value;const dateEnd=document.getElementById('s-date-end').value;
   const genba=getGenbaValue('s');let loc=document.getElementById('s-location').value.trim();
   const start=document.getElementById('s-start').value;const end=document.getElementById('s-end').value;
-  const kosu=parseFloat(document.getElementById('s-kosu').value);const memo=document.getElementById('s-memo').value;
+  const kosu=1.0;const memo=document.getElementById('s-memo').value;
   const leader=document.getElementById('s-leader').value;const mode=modeState.s;
   const yasumi=mode==='yasumi';const yakin=mode==='yakin';const souko=mode==='souko';const yotei=mode==='yotei';
   const effectiveKosu=yasumi?0:kosu;
@@ -881,7 +877,6 @@ async function submitNippo(){
   // 異常値検出
   if(!yasumi){
     if(!yakin&&start&&end&&start>=end){showAlert('退勤時刻が出勤時刻以下です。時間を確認してください','err');return;}
-    if(kosu>2.0){if(!confirm(`人工が${kosu}と大きい値です。送信してもよろしいですか？`))return;}
   }
   if(loc){
     const exact=allNippos.some(n=>n.genba===genba&&n.loc===loc);
@@ -1009,7 +1004,7 @@ function calCopyToInput(idx){
   document.getElementById('cal-day-modal').classList.remove('active');switchTab('input');
   setGenbaValue('s',g.genba);document.getElementById('s-location').value=g.loc||'';
   document.getElementById('s-start').value=g.start||'08:00';document.getElementById('s-end').value=g.end||'17:00';
-  document.getElementById('s-kosu').value=(g.kosu>0?g.kosu:1.0).toFixed(1);document.getElementById('s-memo').value=g.memo||'';
+  document.getElementById('s-memo').value=g.memo||'';
   document.getElementById('s-date').value=calSelectedDate;document.getElementById('s-date-end').value='';
   applyMode('s',g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'');
   const leader=g.members.find(m=>m.role==='代表');document.getElementById('s-leader').value=leader?leader.name:'';
@@ -1034,7 +1029,7 @@ function openEditModal(idx,groupsOverride){
   editIds=[...new Set(g.ids)];editDate=g.date;
   setGenbaValue('e',g.genba);document.getElementById('e-location').value=g.loc||'';
   document.getElementById('e-start').value=g.start||'08:00';document.getElementById('e-end').value=g.end||'17:00';
-  document.getElementById('e-kosu').value=(g.kosu>0?g.kosu:1.0).toFixed(1);document.getElementById('e-memo').value=g.memo||'';
+  document.getElementById('e-memo').value=g.memo||'';
   document.getElementById('edit-title').textContent=`編集：${formatDate(g.date)} ${g.genba}`;
   applyMode('e',g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'');
   const leader=g.members.find(m=>m.role==='代表');document.getElementById('e-leader').value=leader?leader.name:'';
@@ -1049,14 +1044,13 @@ async function saveEdit(){
   const btn=document.getElementById('save-edit-btn');if(btn.disabled)return;
   const genba=getGenbaValue('e');const loc=document.getElementById('e-location').value.trim();
   const start=document.getElementById('e-start').value;const end=document.getElementById('e-end').value;
-  const kosu=parseFloat(document.getElementById('e-kosu').value);const memo=document.getElementById('e-memo').value;
+  const kosu=1.0;const memo=document.getElementById('e-memo').value;
   const leader=document.getElementById('e-leader').value;const mode=modeState.e;
   const yasumi=mode==='yasumi';const yakin=mode==='yakin';const souko=mode==='souko';const yotei=mode==='yotei';
   if(!genba){alert('元請名は必須です');return;}if(!leader){alert('代表者を選択してください');return;}
   if(!getUsername()){alert('編集者の名前が未設定です。事務タブの「操作者名」から名前を設定してください');openUsernameModal();return;}
   if(!yasumi){
     if(!yakin&&start&&end&&start>=end){alert('退勤時刻が出勤時刻以下です。時間を確認してください');return;}
-    if(kosu>2.0){if(!confirm(`人工が${kosu}と大きい値です。保存してもよろしいですか？`))return;}
   }
   const members=[{name:leader,role:'代表'}];const shokunin=getShokunin();
   editSelectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
@@ -1127,7 +1121,7 @@ function openBulkEditModal(){
   bulkEditMode=true;editIds=[...new Set(targets.flatMap(g=>g.ids))];editDates=targets.map(g=>g.date);
   const g=targets[0];setGenbaValue('e',g.genba);document.getElementById('e-location').value=g.loc||'';
   document.getElementById('e-start').value=g.start||'08:00';document.getElementById('e-end').value=g.end||'17:00';
-  document.getElementById('e-kosu').value=(g.kosu>0?g.kosu:1.0).toFixed(1);document.getElementById('e-memo').value=g.memo||'';
+  document.getElementById('e-memo').value=g.memo||'';
   document.getElementById('edit-title').textContent=`一括編集：${targets.length}日分`;
   applyMode('e',g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'');
   const leader=g.members.find(m=>m.role==='代表');document.getElementById('e-leader').value=leader?leader.name:'';
