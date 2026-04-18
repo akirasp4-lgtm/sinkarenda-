@@ -1053,6 +1053,7 @@ async function saveEdit(){
   const leader=document.getElementById('e-leader').value;const mode=modeState.e;
   const yasumi=mode==='yasumi';const yakin=mode==='yakin';const souko=mode==='souko';const yotei=mode==='yotei';
   if(!genba){alert('元請名は必須です');return;}if(!leader){alert('代表者を選択してください');return;}
+  if(!getUsername()){alert('編集者の名前が未設定です。事務タブの「操作者名」から名前を設定してください');openUsernameModal();return;}
   if(!yasumi){
     if(!yakin&&start&&end&&start>=end){alert('退勤時刻が出勤時刻以下です。時間を確認してください');return;}
     if(kosu>2.0){if(!confirm(`人工が${kosu}と大きい値です。保存してもよろしいですか？`))return;}

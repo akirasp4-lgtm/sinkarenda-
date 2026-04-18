@@ -1301,6 +1301,7 @@ async function saveEdit(){
   const effectiveKosu=yasumi?0:kosu;
   if(!genba){alert('元請名は必須です');return;}
   if(!leader){alert('代表者を選択してください');return;}
+  if(!getUsername()){alert('編集者の名前が未設定です。右下の「変更」から名前を設定してください');openUsernameModal();return;}
   if(!yasumi){
     if(!yakin&&start&&end&&start>=end){alert('退勤時刻が出勤時刻以下です。時間を確認してください');return;}
     if(kosu>2.0){if(!confirm(`人工が${kosu}と大きい値です。保存してもよろしいですか？`))return;}
