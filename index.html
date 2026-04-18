@@ -518,7 +518,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 
 <script>
-const GAS_URL='https://script.google.com/macros/s/AKfycbz7GqjqHu70-snJ52Kap7rypBHrIOE7ykI5904Bmu-wsd6f0hv9h7O0zwESBw-1MkQ8Hw/exec';
+const GAS_URL='https://script.google.com/macros/s/AKfycbz7EZ9yesmHcZeDWuANm1RLD4t5RqBXE1eSEucKa7tXc2zGUQUJnjCmfP8AF9PNgm3RRw/exec';
 
 const COMPANIES=['グローライズ','和信カインド','ビジネスサポート','ラーテル','GRHD','GRミツマ'];
 const MODES=['souko','yakin','yasumi','yotei'];
@@ -1590,7 +1590,7 @@ function renderSettings(){
       <option value=""${!div?' selected':''}>（なし）</option>
       ${DIVISIONS.map(d=>`<option value="${d}"${d===div?' selected':''}>${d}</option>`).join('')}
     </select>`:'';
-    const deleteBtn=isAdminMode?`<button class="btn btn-secondary btn-sm" onclick="removeShokunin(${i})">削除</button>`:'';
+    const deleteBtn=`<button class="btn btn-danger btn-sm" onclick="removeShokunin(${i})">削除</button>`;
     return`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee;gap:6px">
       <span style="font-size:15px;flex:1">${esc(s)}</span>
       <div style="display:flex;align-items:center;gap:6px">${divSelect}${deleteBtn}</div>
@@ -1705,7 +1705,7 @@ function getGenbaForCompany(){
 function renderGenbaSettings(){
   document.getElementById('genba-settings-company-name').textContent=currentCompany;
   const list=getGenbaForCompany();
-  const deleteBtn=idx=>isAdminMode?`<button class="btn btn-secondary btn-sm" onclick="removeGenbaMaster(${idx})">削除</button>`:'';
+  const deleteBtn=idx=>`<button class="btn btn-danger btn-sm" onclick="removeGenbaMaster(${idx})">削除</button>`;
   document.getElementById('genba-master-list').innerHTML=list.map((g,i)=>
     `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee">
       <span style="font-size:15px">${esc(g.name)}${!g.company?'<span style="font-size:11px;color:#999;margin-left:6px">（共通）</span>':''}</span>
