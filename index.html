@@ -168,7 +168,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="jobno-hint" id="s-jobno-hint"></div>
   <div id="s-jobno-div-wrap" style="display:none;margin-bottom:12px">
     <label style="font-size:12px;color:#666">新規現場の工番事業部</label>
-    <select id="s-jobno-division">
+    <select id="s-jobno-division" onchange="this.dataset.userSet='1'">
       <option value="ICT">ICT</option>
       <option value="INF">INF</option>
       <option value="MSC">MSC</option>
@@ -188,7 +188,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="leader-select-wrap">
     <label>代表者<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
     <div class="select-add-wrap" style="margin-bottom:0">
-      <select id="s-leader"><option value="">代表者を選択してください</option></select>
+      <select id="s-leader" onchange="checkLocationJobNo()"><option value="">代表者を選択してください</option></select>
       <button class="btn btn-secondary btn-sm add-inline-btn" onclick="openSettingsFor('s-leader')">➕</button>
     </div>
   </div>
@@ -396,6 +396,19 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 </div>
 
+<div id="similar-loc-modal" class="modal-bg">
+<div class="modal">
+  <div class="modal-title">現場名の確認</div>
+  <p style="margin:0 0 12px;font-size:14px;color:#333">候補に一致する現場がありますが、これは新規の現場ですか？</p>
+  <div style="font-size:12px;color:#666;margin-bottom:6px">既存の現場から選ぶ（タップ）:</div>
+  <div id="similar-loc-list" style="margin-bottom:16px"></div>
+  <div style="display:flex;gap:8px">
+    <button class="btn btn-secondary btn-sm" style="flex:1" onclick="cancelSimilarLoc()">キャンセル</button>
+    <button class="btn btn-sm" style="flex:1;background:#1D9E75;color:#fff" onclick="confirmNewLoc()">はい、新規として登録</button>
+  </div>
+</div>
+</div>
+
 <div id="genba-settings-modal" class="modal-bg">
 <div class="modal">
   <div class="modal-title">元請の管理 <span id="genba-settings-company-name" style="font-size:14px;color:#1D9E75"></span></div>
@@ -409,7 +422,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 
 <script>
-const GAS_URL='https://script.google.com/macros/s/AKfycby_4pfnFzIPlE8VcSvjxhuWglsjSfBW3UhIvf_R4o4pqgGZUWzhiIcEBOXjn-37NwnZbg/exec';
+const GAS_URL='https://script.google.com/macros/s/AKfycbxuTC52RIE3HAvLJGhIKgS-APraqft_Wq5MmPh2HKiARoHbZDfKbsFDoyYeUbujKUYdlA/exec';
 
 const COMPANIES=['グローライズ','和信カインド','ビジネスサポート','ラーテル','GRHD','GRミツマ'];
 const MODES=['souko','yakin','yasumi','yotei'];
@@ -424,8 +437,44 @@ const isAdminMode=urlParams.get('mode')==='admin';
 document.addEventListener('click',function(e){
   if(e.target.classList&&e.target.classList.contains('modal-bg')&&e.target.classList.contains('active')){
     e.target.classList.remove('active');
+    if(e.target.id==='similar-loc-modal'&&_similarLocResolve){_similarLocResolve({action:'cancel'});_similarLocResolve=null;}
   }
 });
+
+// 現場名類似チェック
+let _similarLocResolve=null;
+function findSimilarLocs(genba,inputLoc){
+  if(!inputLoc||!genba)return [];
+  const existing=[...new Set(allNippos.filter(n=>n.genba===genba&&n.loc).map(n=>n.loc))];
+  const norm=inputLoc.toLowerCase().replace(/\s+/g,'');
+  return existing.filter(l=>{
+    if(l===inputLoc)return false;
+    const ln=l.toLowerCase().replace(/\s+/g,'');
+    return ln.includes(norm)||norm.includes(ln);
+  });
+}
+function confirmSimilarLoc(genba,loc){
+  return new Promise(resolve=>{
+    const similar=findSimilarLocs(genba,loc);
+    if(similar.length===0){resolve({action:'new'});return;}
+    const list=document.getElementById('similar-loc-list');
+    list.innerHTML=similar.map(l=>`<button class="btn btn-secondary btn-sm" style="display:block;width:100%;margin-bottom:6px;text-align:left" onclick="pickSimilarLoc(this.dataset.loc)" data-loc="${esc(l)}">${esc(l)}</button>`).join('');
+    _similarLocResolve=resolve;
+    document.getElementById('similar-loc-modal').classList.add('active');
+  });
+}
+function pickSimilarLoc(loc){
+  document.getElementById('similar-loc-modal').classList.remove('active');
+  if(_similarLocResolve){_similarLocResolve({action:'existing',loc});_similarLocResolve=null;}
+}
+function confirmNewLoc(){
+  document.getElementById('similar-loc-modal').classList.remove('active');
+  if(_similarLocResolve){_similarLocResolve({action:'new'});_similarLocResolve=null;}
+}
+function cancelSimilarLoc(){
+  document.getElementById('similar-loc-modal').classList.remove('active');
+  if(_similarLocResolve){_similarLocResolve({action:'cancel'});_similarLocResolve=null;}
+}
 
 let selectedColor={s:'#1D9E75',e:'#1D9E75'};
 
@@ -654,11 +703,11 @@ function checkLocationJobNo(){
     }else{
       hint.style.display='none';
       if(divWrap){
-        const operator=document.getElementById('s-operator').value;
-        const member=allMembers.find(m=>m.name===operator&&m.company===currentCompany);
-        const opDiv=(member&&member.division)||'ICT';
+        const leader=document.getElementById('s-leader').value;
+        const member=allMembers.find(m=>m.name===leader&&m.company===currentCompany);
+        const ldDiv=(member&&member.division)||'ICT';
         const sel=document.getElementById('s-jobno-division');
-        if(sel&&!sel.dataset.userSet)sel.value=DIVISIONS.includes(opDiv)?opDiv:'ICT';
+        if(sel&&!sel.dataset.userSet)sel.value=DIVISIONS.includes(ldDiv)?ldDiv:'ICT';
         divWrap.style.display='block';
       }
     }
@@ -711,7 +760,7 @@ async function submitNippo(){
   const dateStart=document.getElementById('s-date').value;
   const dateEnd=document.getElementById('s-date-end').value;
   const genba=getGenbaValue('s');
-  const loc=document.getElementById('s-location').value.trim();
+  let loc=document.getElementById('s-location').value.trim();
   const start=document.getElementById('s-start').value;
   const end=document.getElementById('s-end').value;
   const kosu=parseFloat(document.getElementById('s-kosu').value);
@@ -725,6 +774,28 @@ async function submitNippo(){
   const effectiveKosu=yasumi?0:kosu;
   if(!dateStart||!genba){showAlert('開始日と元請名は必須です','err');return;}
   if(!leader){showAlert('代表者を選択してください','err');return;}
+  // 異常値検出
+  if(!yasumi){
+    if(!yakin&&start&&end&&start>=end){showAlert('退勤時刻が出勤時刻以下です。時間を確認してください','err');return;}
+    if(kosu>2.0){if(!confirm(`人工が${kosu}と大きい値です。送信してもよろしいですか？`))return;}
+  }
+
+  // 現場名の重複チェック（既存と完全一致しない場合、類似候補を確認）
+  if(loc){
+    const exact=allNippos.some(n=>n.genba===genba&&n.loc===loc);
+    if(!exact){
+      isSubmitting=true;
+      const result=await confirmSimilarLoc(genba,loc);
+      isSubmitting=false;
+      if(result.action==='cancel')return;
+      if(result.action==='existing'){
+        loc=result.loc;
+        document.getElementById('s-location').value=loc;
+        checkLocationJobNo();
+      }
+    }
+  }
+
   const members=[{name:leader,role:'代表'}];
   const shokunin=getShokunin();
   selectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
@@ -763,6 +834,8 @@ async function submitNippo(){
       document.getElementById('s-memo').value='';document.getElementById('s-leader').value='';
       document.getElementById('s-date-end').value='';
       document.getElementById('s-jobno-hint').style.display='none';
+      document.getElementById('s-jobno-div-wrap').style.display='none';
+      const _jnSel=document.getElementById('s-jobno-division');if(_jnSel){delete _jnSel.dataset.userSet;_jnSel.value='ICT';}
       applyMode('s','');selectedMembers=[];renderMemberChips('member-selector',selectedMembers,toggleMember);
       await loadData();
     }else showAlert('エラー：'+json.message,'err');
@@ -1130,6 +1203,10 @@ async function saveEdit(){
   const effectiveKosu=yasumi?0:kosu;
   if(!genba){alert('元請名は必須です');return;}
   if(!leader){alert('代表者を選択してください');return;}
+  if(!yasumi){
+    if(!yakin&&start&&end&&start>=end){alert('退勤時刻が出勤時刻以下です。時間を確認してください');return;}
+    if(kosu>2.0){if(!confirm(`人工が${kosu}と大きい値です。保存してもよろしいですか？`))return;}
+  }
   const members=[{name:leader,role:'代表'}];
   const shokunin=getShokunin();
   editSelectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});

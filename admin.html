@@ -210,7 +210,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="jobno-hint" id="s-jobno-hint"></div>
   <div id="s-jobno-div-wrap" style="display:none;margin-bottom:12px">
     <label style="font-size:12px;color:#666">新規現場の工番事業部</label>
-    <select id="s-jobno-division">
+    <select id="s-jobno-division" onchange="this.dataset.userSet='1'">
       <option value="ICT">ICT</option>
       <option value="INF">INF</option>
       <option value="MSC">MSC</option>
@@ -230,7 +230,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="leader-select-wrap">
     <label>代表者<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
     <div class="select-add-wrap" style="margin-bottom:0">
-      <select id="s-leader"><option value="">代表者を選択してください</option></select>
+      <select id="s-leader" onchange="checkLocationJobNo()"><option value="">代表者を選択してください</option></select>
       <button class="btn btn-secondary btn-sm add-inline-btn" onclick="openSettingsFor('s-leader')">➕</button>
     </div>
   </div>
@@ -336,12 +336,19 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="職人マスタ">職人マスタ</option><option value="元請マスタ">元請マスタ</option>
     <option value="現場マスタ">現場マスタ</option>
     <option value="月別確認表">月別確認表</option><option value="元請別請求集計">元請別請求集計</option>
+    <option value="事業部別按分">事業部別按分</option>
+    <option value="操作ログ">操作ログ</option>
   </select>
   <button class="btn btn-secondary" id="csv-btn" onclick="downloadSheetCSV()">ダウンロード</button>
 </div>
 <div style="display:flex;gap:8px;margin-top:8px">
   <button class="btn btn-secondary" style="flex:1" onclick="openSettings()">職人を管理</button>
   <button class="btn btn-secondary" style="flex:1" onclick="openGenbaSettings()">元請を管理</button>
+</div>
+<div class="archive-section" style="background:#FFF4E5;border-color:#F59E0B;margin-top:8px">
+  <div class="archive-title" style="color:#92400E">🔧 工番事業部の修正</div>
+  <div class="archive-desc" style="color:#92400E">既存の工番の事業部を変更します。新事業部×年度で連番max+1の工番が新規発番され、現場マスタと日報データを一括更新します。</div>
+  <button class="btn btn-secondary btn-sm" onclick="openJobNoFix()">工番を修正する</button>
 </div>
 <div class="archive-section" style="background:#E8F4FD;border-color:#85B7EB">
   <div class="archive-title" style="color:#0C447C">📊 スプレッドシート集計</div>
@@ -437,6 +444,28 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 
 <!-- 元請管理モーダル -->
+<div id="jobno-fix-modal" class="modal-bg">
+<div class="modal" style="max-width:720px">
+  <div class="modal-title">工番事業部の修正</div>
+  <p style="margin:0 0 12px;font-size:12px;color:#666">各現場の事業部を選び直して「更新」で反映。新事業部×年度の次連番で新工番を発番し、現場マスタ＋日報データ＋アーカイブを一括更新します。旧工番は欠番として残ります。</p>
+  <div id="jobno-fix-list" style="margin-bottom:16px;max-height:60vh;overflow-y:auto"></div>
+  <button class="btn btn-secondary" style="width:100%" onclick="document.getElementById('jobno-fix-modal').classList.remove('active')">閉じる</button>
+</div>
+</div>
+
+<div id="similar-loc-modal" class="modal-bg">
+<div class="modal">
+  <div class="modal-title">現場名の確認</div>
+  <p style="margin:0 0 12px;font-size:14px;color:#333">候補に一致する現場がありますが、これは新規の現場ですか？</p>
+  <div style="font-size:12px;color:#666;margin-bottom:6px">既存の現場から選ぶ（タップ）:</div>
+  <div id="similar-loc-list" style="margin-bottom:16px"></div>
+  <div style="display:flex;gap:8px">
+    <button class="btn btn-secondary btn-sm" style="flex:1" onclick="cancelSimilarLoc()">キャンセル</button>
+    <button class="btn btn-sm" style="flex:1;background:#1D9E75;color:#fff" onclick="confirmNewLoc()">はい、新規として登録</button>
+  </div>
+</div>
+</div>
+
 <div id="genba-settings-modal" class="modal-bg">
 <div class="modal">
   <div class="modal-title">元請の管理 <span id="genba-settings-company-name" style="font-size:14px;color:#1D9E75"></span></div>
@@ -457,7 +486,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 const ADMIN_PIN = '8800';
 // ============================================================
 
-const GAS_URL='https://script.google.com/macros/s/AKfycby_4pfnFzIPlE8VcSvjxhuWglsjSfBW3UhIvf_R4o4pqgGZUWzhiIcEBOXjn-37NwnZbg/exec';
+const GAS_URL='https://script.google.com/macros/s/AKfycbxuTC52RIE3HAvLJGhIKgS-APraqft_Wq5MmPh2HKiARoHbZDfKbsFDoyYeUbujKUYdlA/exec';
 const COMPANIES=['グローライズ','和信カインド','ビジネスサポート','ラーテル','GRHD','GRミツマ'];
 const MODES=['souko','yakin','yasumi','yotei'];
 const CAL_COLORS=['#1D9E75','#3B82F6','#E8384F','#F59E0B','#8B5CF6','#EC4899','#2C2C5A','#8B5E3C','#64748B','#0EA5E9'];
@@ -469,8 +498,44 @@ const isAdminMode = true;
 document.addEventListener('click',function(e){
   if(e.target.classList&&e.target.classList.contains('modal-bg')&&e.target.classList.contains('active')){
     e.target.classList.remove('active');
+    if(e.target.id==='similar-loc-modal'&&_similarLocResolve){_similarLocResolve({action:'cancel'});_similarLocResolve=null;}
   }
 });
+
+// 現場名類似チェック
+let _similarLocResolve=null;
+function findSimilarLocs(genba,inputLoc){
+  if(!inputLoc||!genba)return [];
+  const existing=[...new Set(allNippos.filter(n=>n.genba===genba&&n.loc).map(n=>n.loc))];
+  const norm=inputLoc.toLowerCase().replace(/\s+/g,'');
+  return existing.filter(l=>{
+    if(l===inputLoc)return false;
+    const ln=l.toLowerCase().replace(/\s+/g,'');
+    return ln.includes(norm)||norm.includes(ln);
+  });
+}
+function confirmSimilarLoc(genba,loc){
+  return new Promise(resolve=>{
+    const similar=findSimilarLocs(genba,loc);
+    if(similar.length===0){resolve({action:'new'});return;}
+    const list=document.getElementById('similar-loc-list');
+    list.innerHTML=similar.map(l=>`<button class="btn btn-secondary btn-sm" style="display:block;width:100%;margin-bottom:6px;text-align:left" onclick="pickSimilarLoc(this.dataset.loc)" data-loc="${esc(l)}">${esc(l)}</button>`).join('');
+    _similarLocResolve=resolve;
+    document.getElementById('similar-loc-modal').classList.add('active');
+  });
+}
+function pickSimilarLoc(loc){
+  document.getElementById('similar-loc-modal').classList.remove('active');
+  if(_similarLocResolve){_similarLocResolve({action:'existing',loc});_similarLocResolve=null;}
+}
+function confirmNewLoc(){
+  document.getElementById('similar-loc-modal').classList.remove('active');
+  if(_similarLocResolve){_similarLocResolve({action:'new'});_similarLocResolve=null;}
+}
+function cancelSimilarLoc(){
+  document.getElementById('similar-loc-modal').classList.remove('active');
+  if(_similarLocResolve){_similarLocResolve({action:'cancel'});_similarLocResolve=null;}
+}
 
 // ===== PINロック =====
 let pinBuffer='';
@@ -701,11 +766,11 @@ function checkLocationJobNo(){
     else{
       hint.style.display='none';
       if(divWrap){
-        const operator=document.getElementById('s-operator').value;
-        const member=allMembers.find(m=>m.name===operator&&m.company===currentCompany);
-        const opDiv=(member&&member.division)||'ICT';
+        const leader=document.getElementById('s-leader').value;
+        const member=allMembers.find(m=>m.name===leader&&m.company===currentCompany);
+        const ldDiv=(member&&member.division)||'ICT';
         const sel=document.getElementById('s-jobno-division');
-        if(sel&&!sel.dataset.userSet)sel.value=DIVISIONS.includes(opDiv)?opDiv:'ICT';
+        if(sel&&!sel.dataset.userSet)sel.value=DIVISIONS.includes(ldDiv)?ldDiv:'ICT';
         divWrap.style.display='block';
       }
     }
@@ -729,7 +794,7 @@ async function submitNippo(){
   if(currentCompany==='全社'){showAlert('会社を選択してから登録してください','err');return;}
   const operator=document.getElementById('s-operator').value;if(!operator){showAlert('操作者を選択してください','err');return;}
   const dateStart=document.getElementById('s-date').value;const dateEnd=document.getElementById('s-date-end').value;
-  const genba=getGenbaValue('s');const loc=document.getElementById('s-location').value.trim();
+  const genba=getGenbaValue('s');let loc=document.getElementById('s-location').value.trim();
   const start=document.getElementById('s-start').value;const end=document.getElementById('s-end').value;
   const kosu=parseFloat(document.getElementById('s-kosu').value);const memo=document.getElementById('s-memo').value;
   const leader=document.getElementById('s-leader').value;const mode=modeState.s;
@@ -737,6 +802,21 @@ async function submitNippo(){
   const effectiveKosu=yasumi?0:kosu;
   if(!dateStart||!genba){showAlert('開始日と元請名は必須です','err');return;}
   if(!leader){showAlert('代表者を選択してください','err');return;}
+  // 異常値検出
+  if(!yasumi){
+    if(!yakin&&start&&end&&start>=end){showAlert('退勤時刻が出勤時刻以下です。時間を確認してください','err');return;}
+    if(kosu>2.0){if(!confirm(`人工が${kosu}と大きい値です。送信してもよろしいですか？`))return;}
+  }
+  if(loc){
+    const exact=allNippos.some(n=>n.genba===genba&&n.loc===loc);
+    if(!exact){
+      isSubmitting=true;
+      const result=await confirmSimilarLoc(genba,loc);
+      isSubmitting=false;
+      if(result.action==='cancel')return;
+      if(result.action==='existing'){loc=result.loc;document.getElementById('s-location').value=loc;checkLocationJobNo();}
+    }
+  }
   const members=[{name:leader,role:'代表'}];
   const shokunin=getShokunin();selectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
   const color=selectedColor.s||CAL_COLORS[0];const dates=getDateRange(dateStart,dateEnd);
@@ -752,6 +832,8 @@ async function submitNippo(){
       document.getElementById('s-genba').value='';document.getElementById('s-genba-select').value='';document.getElementById('s-genba').style.display='none';
       document.getElementById('s-location').value='';document.getElementById('s-memo').value='';document.getElementById('s-leader').value='';
       document.getElementById('s-date-end').value='';document.getElementById('s-jobno-hint').style.display='none';
+      document.getElementById('s-jobno-div-wrap').style.display='none';
+      const _jnSel=document.getElementById('s-jobno-division');if(_jnSel){delete _jnSel.dataset.userSet;_jnSel.value='ICT';}
       applyMode('s','');selectedMembers=[];renderMemberChips('member-selector',selectedMembers,toggleMember);
       await loadData();
     }else showAlert('エラー：'+json.message,'err');
@@ -895,6 +977,10 @@ async function saveEdit(){
   const leader=document.getElementById('e-leader').value;const mode=modeState.e;
   const yasumi=mode==='yasumi';const yakin=mode==='yakin';const souko=mode==='souko';const yotei=mode==='yotei';
   if(!genba){alert('元請名は必須です');return;}if(!leader){alert('代表者を選択してください');return;}
+  if(!yasumi){
+    if(!yakin&&start&&end&&start>=end){alert('退勤時刻が出勤時刻以下です。時間を確認してください');return;}
+    if(kosu>2.0){if(!confirm(`人工が${kosu}と大きい値です。保存してもよろしいですか？`))return;}
+  }
   const members=[{name:leader,role:'代表'}];const shokunin=getShokunin();
   editSelectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
   const company=currentCompany==='全社'?'':currentCompany;const color=selectedColor.e||CAL_COLORS[0];
@@ -1061,8 +1147,83 @@ async function runSummary(){
 }
 async function archiveOldData(){
   if(!confirm('3ヶ月以上前のデータをアーカイブします。よろしいですか？'))return;
-  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'archive',months:3}),headers:{'Content-Type':'text/plain'}});
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'archive',months:3,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){alert(`${json.archived}件をアーカイブしました`);await loadData();}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+}
+
+// ===== 工番修正 =====
+async function openJobNoFix(){
+  document.getElementById('jobno-fix-modal').classList.add('active');
+  const list=document.getElementById('jobno-fix-list');
+  list.innerHTML='<div style="text-align:center;color:#999;padding:20px">読み込み中...</div>';
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'get_sheet',sheet:'現場マスタ'}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status!=='ok'){list.innerHTML='<div style="color:#c00">エラー：'+esc(json.message||'')+'</div>';return;}
+    const rows=(json.data||[]).slice(1);
+    if(rows.length===0){list.innerHTML='<div style="text-align:center;color:#999;padding:20px">現場マスタにデータがありません</div>';return;}
+    // 代表者の逆引き: 元請|現場 → 最初の代表者
+    const leaderMap={};
+    allNippos.forEach(n=>{
+      if(n.role==='代表'&&n.genba&&n.name){
+        const k=n.genba+'|||'+(n.loc||'');
+        if(!leaderMap[k])leaderMap[k]={name:n.name,date:n.date};
+        else if(n.date<leaderMap[k].date)leaderMap[k]={name:n.name,date:n.date};
+      }
+    });
+    const html=rows.map((r,idx)=>{
+      const genba=String(r[0]||''),loc=String(r[1]||''),jobNo=String(r[2]||''),div=String(r[3]||''),revenue=Number(r[6]||0);
+      const ldK=leaderMap[genba+'|||'+loc];
+      const ldName=ldK?ldK.name:'';
+      const ldMember=ldName?allMembers.find(m=>m.name===ldName&&m.company==='グローライズ'):null;
+      const ldDiv=ldMember?ldMember.division:'';
+      const divOpts=DIVISIONS.map(d=>`<option value="${d}"${d===div?' selected':''}>${d}</option>`).join('');
+      return `<div style="border:1px solid #ddd;border-radius:8px;padding:10px;margin-bottom:8px;background:#fafafa">
+        <div style="font-size:13px;margin-bottom:4px"><b>${esc(genba)}</b> / ${esc(loc||'（現場名なし）')}</div>
+        <div style="font-size:12px;color:#666;margin-bottom:6px">現在: <b>${esc(jobNo)}</b>（${esc(div)}）${ldName?`　代表: ${esc(ldName)}${ldDiv?`（${esc(ldDiv)}）`:''}`:''}</div>
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+          <label style="font-size:11px;color:#666;white-space:nowrap;margin:0">事業部:</label>
+          <select id="jnfix-div-${idx}" style="flex:1;margin-bottom:0">${divOpts}</select>
+          <button class="btn btn-sm" style="flex-shrink:0;background:#1D9E75;color:#fff" onclick="saveJobNoFix(${idx},this.dataset.genba,this.dataset.loc)" data-genba="${esc(genba)}" data-loc="${esc(loc)}">工番更新</button>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <label style="font-size:11px;color:#666;white-space:nowrap;margin:0">売上(円):</label>
+          <input type="number" id="jnfix-rev-${idx}" value="${revenue||''}" placeholder="0" style="flex:1;margin:0">
+          <button class="btn btn-sm" style="flex-shrink:0;background:#3B82F6;color:#fff" onclick="saveSiteRevenue(${idx},this.dataset.genba,this.dataset.loc)" data-genba="${esc(genba)}" data-loc="${esc(loc)}">売上保存</button>
+        </div>
+      </div>`;
+    }).join('');
+    list.innerHTML=html;
+  }catch(e){list.innerHTML='<div style="color:#c00">読み込みエラー：'+esc(e.message)+'</div>';}
+}
+
+async function saveSiteRevenue(idx,genba,loc){
+  const inp=document.getElementById('jnfix-rev-'+idx);
+  if(!inp)return;
+  const revenue=Number(inp.value||0);
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_site_revenue',genba,loc,revenue}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){showAlert('売上を保存しました（'+(json.jobNo||'')+'）','ok');}
+    else alert('エラー：'+json.message);
+  }catch(e){alert('エラー：'+e.message);}
+}
+
+async function saveJobNoFix(idx,genba,loc){
+  const sel=document.getElementById('jnfix-div-'+idx);
+  if(!sel)return;
+  const newDiv=sel.value;
+  if(!confirm(`${genba} / ${loc||'（現場名なし）'} の事業部を ${newDiv} に変更して工番を再発番します。よろしいですか？`))return;
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'reassign_jobno',genba,loc,newDivision:newDiv}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){
+      if(json.message){alert(json.message);return;}
+      alert(`更新完了\n旧: ${json.oldJobNo}\n新: ${json.newJobNo}\n日報: ${json.updatedRows}行 / アーカイブ: ${json.archivedUpdated||0}行`);
+      await loadData();
+      await openJobNoFix();
+    }else alert('エラー：'+json.message);
+  }catch(e){alert('エラー：'+e.message);}
 }
 
 // ===== 元請セレクト =====
@@ -1102,12 +1263,13 @@ function renderSettings(){
   const isGrowise=currentCompany==='グローライズ';
   const divField=document.getElementById('division-field');if(divField)divField.style.display=isGrowise?'':'none';
   document.getElementById('shokunin-list').innerHTML=getShokunin().map((s,i)=>{
-    const member=allMembers.find(m=>m.name===s&&m.company===currentCompany);const div=(member&&member.division)||'';
+    const member=allMembers.find(m=>m.name===s&&m.company===currentCompany);const div=(member&&member.division)||'';const rate=(member&&member.rate)||0;
     const divSelect=isGrowise?`<select onchange="updateMemberDivision('${esc(s)}',this.value)" style="width:auto;margin:0;padding:4px 8px;font-size:12px;border:1px solid #ddd;border-radius:6px;background:#f9f9f9">
       <option value=""${!div?' selected':''}>（なし）</option>${DIVISIONS.map(d=>`<option value="${d}"${d===div?' selected':''}>${d}</option>`).join('')}</select>`:'';
+    const rateInput=`<input type="number" value="${rate||''}" placeholder="単価" onchange="updateMemberRate('${esc(s)}',this.value)" style="width:80px;margin:0;padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:6px">`;
     return`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee;gap:6px">
       <span style="font-size:15px;flex:1">${esc(s)}</span>
-      <div style="display:flex;align-items:center;gap:6px">${divSelect}<button class="btn btn-danger btn-sm" onclick="removeShokunin(${i})">削除</button></div>
+      <div style="display:flex;align-items:center;gap:6px">${divSelect}${rateInput}<button class="btn btn-danger btn-sm" onclick="removeShokunin(${i})">削除</button></div>
     </div>`;
   }).join('')||'<div style="color:#999;padding:12px;text-align:center">職人が登録されていません</div>';
 }
@@ -1129,6 +1291,11 @@ async function removeShokunin(i){
 async function updateMemberDivision(name,division){
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_division',name,company:currentCompany,division}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.division=division;}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+}
+async function updateMemberRate(name,rateStr){
+  const rate=Number(rateStr||0);
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_rate',name,company:currentCompany,rate}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();if(json.status==='ok'){const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.rate=rate;}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 
 // ===== 元請管理 =====
