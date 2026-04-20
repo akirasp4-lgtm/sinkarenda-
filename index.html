@@ -716,17 +716,18 @@ function initCompanyBar(){
   if(currentCompany==='全社'&&!isAdmin)currentCompany=allowedCompanies[0];
   if(companyBarHidden){
     currentCompany=allowedCompanies[0];
-    document.getElementById('company-bar').style.display='none';
-    document.getElementById('loading-bar').style.top='0';
-    document.querySelectorAll('.screen').forEach(s=>s.style.paddingTop='12px');
   }
   renderCompanyBar();updateNoticeBar();
 }
 
 function renderCompanyBar(){
   let html='';
-  if(isAdmin)html+='<div class="company-chip'+(currentCompany==='全社'?' active':'')+'" onclick="switchCompany(\'全社\')">全社</div>';
-  html+=allowedCompanies.map(c=>`<div class="company-chip${c===currentCompany?' active':''}" onclick="switchCompany('${esc(c)}')">${esc(c)}</div>`).join('');
+  if(companyBarHidden){
+    html=`<div class="company-chip active" style="pointer-events:none;background:#1D9E75;color:#fff">🏢 ${esc(currentCompany)}</div>`;
+  }else{
+    if(isAdmin)html+='<div class="company-chip'+(currentCompany==='全社'?' active':'')+'" onclick="switchCompany(\'全社\')">全社</div>';
+    html+=allowedCompanies.map(c=>`<div class="company-chip${c===currentCompany?' active':''}" onclick="switchCompany('${esc(c)}')">${esc(c)}</div>`).join('');
+  }
   document.getElementById('company-bar').innerHTML=html;
 }
 
