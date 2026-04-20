@@ -8,8 +8,19 @@
 <link rel="apple-touch-icon" href="icon.png">
 <link rel="manifest" href="manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="現場管理">
+<meta name="apple-mobile-web-app-title" id="app-title-meta" content="現場管理">
 <meta name="theme-color" content="#1D9E75">
+<script>
+(function(){
+  var c = new URLSearchParams(location.search).get('c');
+  if (c) {
+    var t = c + '予定表';
+    document.title = t;
+    var m = document.getElementById('app-title-meta');
+    if (m) m.setAttribute('content', t);
+  }
+})();
+</script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;background:#f2f2f7;color:#1a1a1a;min-height:100vh}
