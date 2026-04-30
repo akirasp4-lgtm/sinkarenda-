@@ -159,6 +159,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 .select-add-wrap select{flex:1;margin-bottom:0}
 .add-inline-btn{flex-shrink:0;padding:10px 12px;font-size:16px;line-height:1;width:auto}
 .jobno-hint{font-size:12px;color:#1D9E75;margin-top:-8px;margin-bottom:10px;padding:4px 8px;background:#EAF3DE;border-radius:6px;display:none}
+.worktype-tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#FFF1B8;color:#7C5800;margin-left:6px;vertical-align:middle}
 /* PC表示: カレンダー大きめ・コンテナ拡張 */
 @media (min-width:1024px){
   .screen{max-width:1000px;padding:60px 24px 80px}
@@ -230,6 +231,15 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <label>現場名</label>
   <input type="text" id="s-location" list="s-location-list" placeholder="例：〇〇ビル新築工事" oninput="checkLocationJobNo()">
   <datalist id="s-location-list"></datalist>
+  <label>作業区分</label>
+  <select id="s-work-type">
+    <option value="現場作業">現場作業</option>
+    <option value="現調">現調</option>
+    <option value="着打ち">着打ち</option>
+    <option value="カギ借用">カギ借用</option>
+    <option value="材料引き取り">材料引き取り</option>
+    <option value="その他">その他</option>
+  </select>
   <div class="jobno-hint" id="s-jobno-hint"></div>
   <div id="s-jobno-div-wrap" style="display:none;margin-bottom:12px">
     <label style="font-size:12px;color:#666">新規現場の工番事業部</label>
@@ -421,6 +431,15 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <input type="text" id="e-genba" style="display:none;margin-bottom:12px">
   <label>現場名</label><input type="text" id="e-location" list="e-location-list">
   <datalist id="e-location-list"></datalist>
+  <label>作業区分</label>
+  <select id="e-work-type">
+    <option value="現場作業">現場作業</option>
+    <option value="現調">現調</option>
+    <option value="着打ち">着打ち</option>
+    <option value="カギ借用">カギ借用</option>
+    <option value="材料引き取り">材料引き取り</option>
+    <option value="その他">その他</option>
+  </select>
   <div class="grid2">
     <div><label>出勤</label><input type="time" id="e-start"></div>
     <div><label>退勤</label><input type="time" id="e-end"></div>
@@ -818,7 +837,8 @@ function parseRows(rows,company){
     yakin:String(r['夜勤']||'')==='夜勤',yasumi:String(r['夜勤']||'')==='休み',
     yotei:String(r['夜勤']||'')==='予定',souko:String(r['夜勤']||'')==='倉庫',
     company:String(r['会社']||'')||company,updatedBy:String(r['更新者']||''),
-    color:String(r['色']||''),division:String(r['事業部']||''),jobNo:String(r['工番']||'')
+    color:String(r['色']||''),division:String(r['事業部']||''),jobNo:String(r['工番']||''),
+    workType:String(r['作業区分']||'')
   }));
 }
 async function loadData(){
@@ -922,8 +942,9 @@ async function submitNippo(){
   const shokunin=getShokunin();selectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
   const color=selectedColor.s||CAL_COLORS[0];const dates=getDateRange(dateStart,dateEnd);
   const jobNoDivision=(currentCompany==='グローライズ'&&document.getElementById('s-jobno-div-wrap').style.display!=='none')?document.getElementById('s-jobno-division').value:'';
+  const workType=(document.getElementById('s-work-type')||{}).value||'現場作業';
   const rows=[];
-  dates.forEach(date=>{const dayId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company:currentCompany,id:dayId,updatedBy:operator,color,jobNoDivision});});});
+  dates.forEach(date=>{const dayId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company:currentCompany,id:dayId,updatedBy:operator,color,jobNoDivision,workType});});});
   const btn=document.getElementById('submit-btn');isSubmitting=true;btn.textContent=`送信中...`;btn.disabled=true;
   try{
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'add',rows}),headers:{'Content-Type':'text/plain'}});
@@ -951,7 +972,7 @@ function groupNippos(nippos){
   const groups={};
   nippos.forEach(n=>{
     const key=n.id||`${n.date}__${n.genba}__${n.loc}__${n.start}__${n.end}__${n.kosu}__${n.memo}`;
-    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,color:n.color,jobNo:n.jobNo};
+    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,color:n.color,jobNo:n.jobNo,workType:n.workType||''};
     groups[key].members.push({name:n.name,role:n.role});if(n.id)groups[key].ids.push(n.id);
   });
   return Object.values(groups).sort((a,b)=>a.date.localeCompare(b.date));
@@ -1011,7 +1032,7 @@ function openCalDay(dateStr){
         <div class="yotei-header"><div><div class="yotei-date">${badges}${companyBadge}</div><div class="yotei-genba">${esc(g.genba)}</div></div>
         <div style="font-size:13px;color:#666">${(g.kosu*g.members.length).toFixed(1)}人工</div></div>
         <div class="yotei-body">
-          ${g.loc?`<div class="yotei-loc">📍 ${esc(g.loc)}</div>`:''}
+          ${g.loc?`<div class="yotei-loc">📍 ${esc(g.loc)}${(g.workType&&g.workType!=='現場作業')?` <span class="worktype-tag">${esc(g.workType)}</span>`:''}</div>`:((g.workType&&g.workType!=='現場作業')?`<div class="yotei-loc"><span class="worktype-tag">${esc(g.workType)}</span></div>`:'')}
           <div class="yotei-members">${memberTags}</div>
           <div class="yotei-time">🕐 ${esc(g.start)}〜${esc(g.end)}</div>
           ${g.memo?`<div class="yotei-memo">📝 ${esc(g.memo)}</div>`:''}
@@ -1035,6 +1056,7 @@ function calCopyToInput(idx){
   setGenbaValue('s',g.genba);document.getElementById('s-location').value=g.loc||'';
   document.getElementById('s-start').value=g.start||'08:00';document.getElementById('s-end').value=g.end||'17:00';
   document.getElementById('s-memo').value=g.memo||'';
+  const sWT=document.getElementById('s-work-type');if(sWT)sWT.value=g.workType||'現場作業';
   document.getElementById('s-date').value=calSelectedDate;document.getElementById('s-date-end').value='';
   applyMode('s',g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'');
   const leader=g.members.find(m=>m.role==='代表');document.getElementById('s-leader').value=leader?leader.name:'';
@@ -1060,6 +1082,7 @@ function openEditModal(idx,groupsOverride){
   setGenbaValue('e',g.genba);document.getElementById('e-location').value=g.loc||'';
   document.getElementById('e-start').value=g.start||'08:00';document.getElementById('e-end').value=g.end||'17:00';
   document.getElementById('e-memo').value=g.memo||'';
+  const eWT=document.getElementById('e-work-type');if(eWT)eWT.value=g.workType||'現場作業';
   document.getElementById('edit-title').textContent=`編集：${formatDate(g.date)} ${g.genba}`;
   applyMode('e',g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'');
   const leader=g.members.find(m=>m.role==='代表');document.getElementById('e-leader').value=leader?leader.name:'';
@@ -1085,8 +1108,9 @@ async function saveEdit(){
   const members=[{name:leader,role:'代表'}];const shokunin=getShokunin();
   editSelectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
   const company=currentCompany==='全社'?'':currentCompany;const color=selectedColor.e||CAL_COLORS[0];
+  const workType=(document.getElementById('e-work-type')||{}).value||'現場作業';
   const dates=bulkEditMode?editDates:[editDate];const rows=[];
-  dates.forEach(date=>{const newId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:yasumi?0:kosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color});});});
+  dates.forEach(date=>{const newId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:yasumi?0:kosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType});});});
   btn.textContent='保存中...';btn.disabled=true;
   try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update',ids:editIds,rows}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){closeEditModal();bulkEditMode=false;await loadData();renderGmList();}
