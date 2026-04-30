@@ -160,6 +160,16 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 .add-inline-btn{flex-shrink:0;padding:10px 12px;font-size:16px;line-height:1;width:auto}
 /* 工番ヒント */
 .jobno-hint{font-size:12px;color:#1D9E75;margin-top:-8px;margin-bottom:10px;padding:4px 8px;background:#EAF3DE;border-radius:6px;display:none}
+/* PC表示: カレンダー大きめ・コンテナ拡張 */
+@media (min-width:1024px){
+  .screen{max-width:1000px;padding:60px 24px 80px}
+  .cal-cell{min-height:120px;padding:6px 5px}
+  .cal-day-num{font-size:14px;margin-bottom:4px}
+  .cal-event{font-size:11px;padding:2px 5px;margin-bottom:2px}
+  .cal-overflow{font-size:11px}
+  .cal-header-cell{font-size:13px;padding:6px 0}
+  .week-table th,.week-table td{font-size:13px}
+}
 </style>
 </head>
 <body>
@@ -374,7 +384,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <label>元請名</label>
   <select id="e-genba-select" onchange="onGenbaSelect('e')"><option value="">選択してください</option><option value="__manual__">直接入力する</option></select>
   <input type="text" id="e-genba" style="display:none;margin-bottom:12px">
-  <label>現場名</label><input type="text" id="e-location">
+  <label>現場名</label><input type="text" id="e-location" list="e-location-list">
+  <datalist id="e-location-list"></datalist>
   <div class="grid2">
     <div><label>出勤</label><input type="time" id="e-start"></div>
     <div><label>退勤</label><input type="time" id="e-end"></div>
@@ -791,12 +802,24 @@ function toggleEditMember(i){const x=editSelectedMembers.indexOf(i);if(x>=0)edit
 
 // ========== 現場名サジェスト ==========
 function updateLocationSuggestions(){
+  // 入力フォーム用 (s-location-list): 元請選択時はその元請、未選択や全社時は全社の現場を候補に
   const dl=document.getElementById('s-location-list');
-  if(!dl)return;
-  const genba=getGenbaValue('s');
-  if(!genba||currentCompany==='全社'){dl.innerHTML='';return;}
-  const locs=[...new Set(allNippos.filter(n=>n.genba===genba&&n.company===currentCompany&&n.loc).map(n=>n.loc))].sort();
-  dl.innerHTML=locs.map(l=>`<option value="${esc(l)}">`).join('');
+  if(dl){
+    const genba=getGenbaValue('s');
+    let pool=allNippos;
+    if(currentCompany!=='全社')pool=pool.filter(n=>n.company===currentCompany);
+    if(genba)pool=pool.filter(n=>n.genba===genba);
+    const locs=[...new Set(pool.filter(n=>n.loc).map(n=>n.loc))].sort();
+    dl.innerHTML=locs.map(l=>`<option value="${esc(l)}">`).join('');
+  }
+  // 編集モーダル用 (e-location-list): 同じく現場名候補をすべて
+  const edl=document.getElementById('e-location-list');
+  if(edl){
+    let pool=allNippos;
+    if(currentCompany!=='全社')pool=pool.filter(n=>n.company===currentCompany);
+    const locs=[...new Set(pool.filter(n=>n.loc).map(n=>n.loc))].sort();
+    edl.innerHTML=locs.map(l=>`<option value="${esc(l)}">`).join('');
+  }
 }
 
 function checkLocationJobNo(){
