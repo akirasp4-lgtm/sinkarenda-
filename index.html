@@ -13,7 +13,9 @@
 <script>
 (function(){
   var c = new URLSearchParams(location.search).get('c');
-  if (c) {
+  // URLパラメータが無ければlocalStorageから復元（ホーム画面追加時にc=が消えるケース対策）
+  if (!c) { try { c = localStorage.getItem('genba-c-param') || ''; } catch(e) {} }
+  if (c && c.indexOf(',') < 0) {
     var t = c + '予定表';
     document.title = t;
     var m = document.getElementById('app-title-meta');
@@ -727,7 +729,13 @@ let isAdmin=false;
 let companyBarHidden=false;
 
 function parseCompanyParam(){
-  const c=urlParams.get('c');
+  let c=urlParams.get('c');
+  // URLにcパラメータがある時は保存、無い時はlocalStorageから復元
+  // （ホーム画面追加時に start_url がパラメータを失うケースの対策）
+  try{
+    if(c)localStorage.setItem('genba-c-param',c);
+    else c=localStorage.getItem('genba-c-param')||'';
+  }catch(e){}
   if(isAdminMode){
     allowedCompanies=[...COMPANIES];isAdmin=true;companyBarHidden=false;
   }else if(c&&c!=='all'){
