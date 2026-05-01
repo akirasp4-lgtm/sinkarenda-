@@ -728,6 +728,7 @@ let allowedCompanies=[];
 let isAdmin=false;
 let companyBarHidden=false;
 
+let needsCompanyPicker=false;
 function parseCompanyParam(){
   let c=urlParams.get('c');
   // URLにcパラメータがある時は保存、無い時はlocalStorageから復元
@@ -743,8 +744,34 @@ function parseCompanyParam(){
     if(allowedCompanies.length===0)allowedCompanies=[COMPANIES[0]];
     isAdmin=false;companyBarHidden=allowedCompanies.length===1;
   }else{
+    // 会社情報がまったく無い → 起動時に会社選択を促す
     allowedCompanies=[...COMPANIES];isAdmin=false;companyBarHidden=false;
+    needsCompanyPicker=true;
   }
+}
+
+function showCompanyPicker(){
+  if(!needsCompanyPicker)return;
+  const overlay=document.createElement('div');
+  overlay.id='company-picker-overlay';
+  overlay.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(15,56,48,0.96);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML=
+    '<div style="background:#fff;border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 8px 24px rgba(0,0,0,0.3)">'+
+    '<div style="font-size:20px;font-weight:600;color:#0F3830;margin-bottom:8px;text-align:center">会社を選択してください</div>'+
+    '<div style="font-size:13px;color:#666;margin-bottom:20px;text-align:center;line-height:1.5">所属する会社をタップしてください。<br>選択は次回以降記憶されます。</div>'+
+    '<div id="picker-list" style="display:flex;flex-direction:column;gap:10px"></div>'+
+    '</div>';
+  document.body.appendChild(overlay);
+  const list=overlay.querySelector('#picker-list');
+  list.innerHTML=COMPANIES.map(c=>
+    '<button onclick="pickCompany(\''+c+'\')" style="padding:14px 16px;font-size:16px;font-weight:600;background:#1D9E75;color:#fff;border:none;border-radius:10px;cursor:pointer">'+c+'</button>'
+  ).join('');
+}
+
+function pickCompany(c){
+  try{localStorage.setItem('genba-c-param',c);}catch(e){}
+  // URLパラメータ付きで再読み込み（タイトル・PWAも正しい状態で起動）
+  location.replace(location.pathname+'?c='+encodeURIComponent(c));
 }
 parseCompanyParam();
 
@@ -1814,7 +1841,10 @@ async function removeGenbaMaster(i){
 }
 
 // ========== 初期化 ==========
-initCompanyBar();initSelects();initAvailWeek();initUsername();initColorPicker('s');renderList();loadData();
+initCompanyBar();initSelects();initAvailWeek();initUsername();initColorPicker('s');renderList();
+// 会社が未設定の場合は会社選択ピッカーを表示し、データロードはスキップ
+if(needsCompanyPicker)showCompanyPicker();
+else loadData();
 
 // 管理者モード以外では事務タブを非表示
 if(!isAdminMode){
