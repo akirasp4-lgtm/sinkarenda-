@@ -1840,8 +1840,30 @@ async function removeGenbaMaster(i){
   }catch(e){alert('削除エラー：'+e.message);}
 }
 
+// カレンダー横スワイプで月切替
+function initCalSwipe(){
+  const grid=document.getElementById('cal-grid');
+  if(!grid)return;
+  let startX=0,startY=0,active=false;
+  grid.addEventListener('touchstart',e=>{
+    if(e.touches.length!==1){active=false;return;}
+    startX=e.touches[0].clientX;startY=e.touches[0].clientY;active=true;
+  },{passive:true});
+  grid.addEventListener('touchend',e=>{
+    if(!active||!e.changedTouches.length)return;
+    const dx=e.changedTouches[0].clientX-startX;
+    const dy=e.changedTouches[0].clientY-startY;
+    // 横の動きが縦より優勢で、かつ50px以上動いたら月切替
+    if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)*1.5){
+      if(dx<0)changeListMonth(1);
+      else changeListMonth(-1);
+    }
+    active=false;
+  },{passive:true});
+}
+
 // ========== 初期化 ==========
-initCompanyBar();initSelects();initAvailWeek();initUsername();initColorPicker('s');renderList();
+initCompanyBar();initSelects();initAvailWeek();initUsername();initColorPicker('s');renderList();initCalSwipe();
 // 会社が未設定の場合は会社選択ピッカーを表示し、データロードはスキップ
 if(needsCompanyPicker)showCompanyPicker();
 else loadData();

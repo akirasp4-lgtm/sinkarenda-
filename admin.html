@@ -694,6 +694,27 @@ function setLoading(on){document.getElementById('loading-bar').classList.toggle(
 function getGasUrl(){return GAS_URL;}
 function getUsername(){return currentUsername;}
 
+// カレンダー横スワイプで月切替
+function initCalSwipe(){
+  const grid=document.getElementById('cal-grid');
+  if(!grid)return;
+  let startX=0,startY=0,active=false;
+  grid.addEventListener('touchstart',e=>{
+    if(e.touches.length!==1){active=false;return;}
+    startX=e.touches[0].clientX;startY=e.touches[0].clientY;active=true;
+  },{passive:true});
+  grid.addEventListener('touchend',e=>{
+    if(!active||!e.changedTouches.length)return;
+    const dx=e.changedTouches[0].clientX-startX;
+    const dy=e.changedTouches[0].clientY-startY;
+    if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)*1.5){
+      if(dx<0)changeListMonth(1);
+      else changeListMonth(-1);
+    }
+    active=false;
+  },{passive:true});
+}
+
 function initApp(){
   initCompanyBar();
   initSelects();
@@ -701,6 +722,7 @@ function initApp(){
   initUsername();
   initColorPicker('s');
   renderList();
+  initCalSwipe();
   loadData();
   switchTab('jimu');
 }
