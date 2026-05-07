@@ -1872,8 +1872,8 @@ function initCalSwipe(){
     ()=>changeAvailWeek(1),
     ()=>changeAvailWeek(-1)
   );
-  // ③ カレンダー日別モーダル: 左→翌日、右→前日
-  attachSwipe(document.getElementById('cal-day-content'),
+  // ③ カレンダー日別モーダル: モーダル全体で左→翌日、右→前日
+  attachSwipe(document.getElementById('cal-day-modal'),
     ()=>shiftCalDay(1),
     ()=>shiftCalDay(-1)
   );
