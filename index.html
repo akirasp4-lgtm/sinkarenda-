@@ -1336,6 +1336,7 @@ function calCopyToInput(idx){
   document.getElementById('s-start').value=g.start||'08:00';
   document.getElementById('s-end').value=g.end||'17:00';
   document.getElementById('s-memo').value=g.memo||'';
+  const sWT=document.getElementById('s-work-type');if(sWT)sWT.value=g.workType||'現場作業';
   document.getElementById('s-date').value=calSelectedDate;
   document.getElementById('s-date-end').value='';
   const mode=g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'';
