@@ -1380,39 +1380,7 @@ async function calDeleteGroup(idx){
   setLoading(false);
 }
 
-function renderListWithDate(groups){
-  const filtered=currentDateFilter?groups.filter(g=>g.date===currentDateFilter):groups;
-  const con=document.getElementById('list-container');
-  if(filtered.length===0){con.innerHTML='<div class="empty">データがありません</div>';return;}
-  con.innerHTML=filtered.map((g,idx)=>{
-    const memberTags=g.members.map(m=>`<span class="member-tag ${m.role==='代表'?'tag-leader':'tag-member'}">${esc(m.name)}</span>`).join('');
-    const totalKo=(g.kosu*g.members.length).toFixed(1);
-    const yakinBadge=g.yakin?'<span class="yakin-badge">🌙 夜勤</span>':'';
-    const yasumiBadge=g.yasumi?'<span class="yasumi-badge">🏖️ 休み</span>':'';
-    const soukoBadge=g.souko?'<span class="souko-badge">🏭 倉庫</span>':'';
-    const yoteiBadge=g.yotei?'<span class="yotei-badge-tag">📌 予定</span>':'';
-    const companyBadge=(currentCompany==='全社'&&g.company)?`<span class="company-badge">${esc(g.company)}</span>`:'';
-    const updaterHtml = g.updatedBy ? `<div class="yotei-updated-by">🔄 更新: ${esc(g.updatedBy)}</div>` : '';
-    return`<div class="yotei-card">
-      <div class="yotei-header"><div>
-        <div class="yotei-date">${formatDate(g.date)}${soukoBadge}${yakinBadge}${yasumiBadge}${yoteiBadge}${companyBadge}</div>
-        <div class="yotei-genba">${esc(g.genba)}</div>
-      </div><div style="font-size:13px;color:#666">${totalKo}人工</div></div>
-      <div class="yotei-body">
-        ${g.loc?`<div class="yotei-loc">📍 ${esc(g.loc)}</div>`:''}
-        <div class="yotei-members">${memberTags}</div>
-        <div class="yotei-time">🕐 ${esc(g.start)}〜${esc(g.end)}</div>
-        ${g.memo?`<div class="yotei-memo">📝 ${esc(g.memo)}</div>`:''}
-        ${updaterHtml}
-      </div>
-      <div class="yotei-actions">
-        <button class="btn btn-secondary btn-sm" onclick="copyToInput(${idx})">コピー</button>
-        <button class="btn btn-secondary btn-sm" onclick="openEditModal(${idx},null)">編集</button>
-        <button class="btn btn-sm" style="background:#ff3b30" onclick="deleteGroup(${idx})">削除</button>
-      </div>
-    </div>`;
-  }).join('');
-}
+// renderListWithDate は旧UI用の死コードだったため削除（list-container 要素は存在しない）
 
 function getDisplayedGroups(){
   const groups=groupNippos(filteredNippos()).filter(g=>g.date.startsWith(listMonth));
