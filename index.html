@@ -163,6 +163,26 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 /* 工番ヒント */
 .jobno-hint{font-size:12px;color:#1D9E75;margin-top:-8px;margin-bottom:10px;padding:4px 8px;background:#EAF3DE;border-radius:6px;display:none}
 .worktype-tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#FFF1B8;color:#7C5800;margin-left:6px;vertical-align:middle}
+/* 予定詳細フルスクリーン */
+.detail-fullscreen{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#fff;z-index:300;flex-direction:column;overflow:hidden}
+.detail-fullscreen.active{display:flex}
+.detail-fs-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #eee;flex-shrink:0;padding-top:calc(14px + env(safe-area-inset-top))}
+.detail-fs-back{background:transparent;border:none;font-size:22px;color:#1D9E75;cursor:pointer;padding:4px 8px}
+.detail-fs-title{font-size:14px;color:#666;flex:1;text-align:center}
+.detail-fs-trash{background:transparent;border:none;font-size:20px;color:#ff3b30;cursor:pointer;padding:4px 8px}
+.detail-fs-body{flex:1;overflow-y:auto;padding:20px 16px 100px;-webkit-overflow-scrolling:touch}
+.detail-color-bar{width:6px;border-radius:3px;align-self:stretch;margin-right:12px;flex-shrink:0}
+.detail-title-row{display:flex;align-items:flex-start;margin-bottom:8px}
+.detail-title{font-size:24px;font-weight:600;color:#1a1a1a;line-height:1.3;flex:1}
+.detail-period{font-size:14px;color:#666;margin-bottom:16px;padding-left:18px}
+.detail-row{display:flex;align-items:flex-start;padding:14px 0;border-top:1px solid #f0f0f0;gap:12px}
+.detail-row-icon{font-size:18px;color:#666;width:24px;text-align:center;flex-shrink:0}
+.detail-row-content{flex:1;font-size:15px;color:#1a1a1a;word-break:break-word}
+.detail-row-label{font-size:12px;color:#888;margin-bottom:4px}
+.detail-fs-footer{display:flex;gap:8px;padding:12px 16px;border-top:1px solid #eee;background:#fff;flex-shrink:0;padding-bottom:calc(12px + env(safe-area-inset-bottom))}
+.detail-fs-footer button{flex:1}
+.yotei-tap-area{cursor:pointer;-webkit-tap-highlight-color:transparent}
+.yotei-tap-area:active{background:rgba(0,0,0,0.03)}
 /* PC表示: カレンダー大きめ・コンテナ拡張 */
 @media (min-width:1024px){
   .screen{max-width:1000px;padding:60px 24px 80px}
@@ -269,6 +289,20 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <button class="btn btn-sm" style="flex:2" onclick="calGoToInput()">＋ この日の予定を入力</button>
   </div>
 </div>
+</div>
+
+<!-- 予定詳細フルスクリーン -->
+<div id="cal-detail-modal" class="detail-fullscreen">
+  <div class="detail-fs-header">
+    <button class="detail-fs-back" onclick="closeEventDetail()" aria-label="戻る">←</button>
+    <div class="detail-fs-title" id="detail-fs-title">予定の詳細</div>
+    <button class="detail-fs-trash" onclick="deleteFromDetail()" aria-label="削除">🗑️</button>
+  </div>
+  <div class="detail-fs-body" id="detail-fs-body"></div>
+  <div class="detail-fs-footer">
+    <button class="btn btn-secondary btn-sm" onclick="copyFromDetail()">コピー</button>
+    <button class="btn btn-sm" onclick="editFromDetail()">編集</button>
+  </div>
 </div>
 
 <div id="screen-avail" class="screen">
@@ -1193,16 +1227,18 @@ function openCalDay(dateStr){
       const updaterHtml=g.updatedBy?`<div class="yotei-updated-by">🔄 更新: ${esc(g.updatedBy)}</div>`:'';
       const kosuHtml=(g.yasumi||g.yotei)?'':`<div style="font-size:13px;color:#666">${totalKo}人工</div>`;
       return`<div class="yotei-card" style="margin-bottom:10px">
-        <div class="yotei-header"><div>
-          <div class="yotei-date">${soukoBadge}${yakinBadge}${yasumiBadge}${yoteiBadge}${companyBadge}</div>
-          <div class="yotei-genba">${esc(g.genba)}</div>
-        </div>${kosuHtml}</div>
-        <div class="yotei-body">
-          ${g.loc?`<div class="yotei-loc">📍 ${esc(g.loc)}${(g.workType&&g.workType!=='現場作業')?` <span class="worktype-tag">${esc(g.workType)}</span>`:''}</div>`:((g.workType&&g.workType!=='現場作業')?`<div class="yotei-loc"><span class="worktype-tag">${esc(g.workType)}</span></div>`:'')}
-          <div class="yotei-members">${memberTags}</div>
-          <div class="yotei-time">🕐 ${esc(g.start)}〜${esc(g.end)}</div>
-          ${g.memo?`<div class="yotei-memo">📝 ${esc(g.memo)}</div>`:''}
-          ${updaterHtml}
+        <div class="yotei-tap-area" onclick="openEventDetail(${idx})">
+          <div class="yotei-header"><div>
+            <div class="yotei-date">${soukoBadge}${yakinBadge}${yasumiBadge}${yoteiBadge}${companyBadge}</div>
+            <div class="yotei-genba">${esc(g.genba)}</div>
+          </div>${kosuHtml}</div>
+          <div class="yotei-body">
+            ${g.loc?`<div class="yotei-loc">📍 ${esc(g.loc)}${(g.workType&&g.workType!=='現場作業')?` <span class="worktype-tag">${esc(g.workType)}</span>`:''}</div>`:((g.workType&&g.workType!=='現場作業')?`<div class="yotei-loc"><span class="worktype-tag">${esc(g.workType)}</span></div>`:'')}
+            <div class="yotei-members">${memberTags}</div>
+            <div class="yotei-time">🕐 ${esc(g.start)}〜${esc(g.end)}</div>
+            ${g.memo?`<div class="yotei-memo">📝 ${esc(g.memo)}</div>`:''}
+            ${updaterHtml}
+          </div>
         </div>
         <div class="yotei-actions">
           <button class="btn btn-secondary btn-sm" onclick="calCopyToInput(${idx})">コピー</button>
@@ -1217,6 +1253,89 @@ function openCalDay(dateStr){
 
 function getCalDayGroups(){
   return groupNippos(filteredNippos()).filter(g=>g.date===calSelectedDate);
+}
+
+// ===== 予定詳細フルスクリーン =====
+let detailGroups=[],detailIdx=-1;
+function openEventDetail(idx){
+  detailGroups=getCalDayGroups();
+  if(idx<0||idx>=detailGroups.length)return;
+  detailIdx=idx;
+  renderEventDetail();
+  document.getElementById('cal-detail-modal').classList.add('active');
+}
+function closeEventDetail(){
+  document.getElementById('cal-detail-modal').classList.remove('active');
+}
+function renderEventDetail(){
+  const g=detailGroups[detailIdx];if(!g)return;
+  const lp=g.date.split('-').map(Number);
+  const dt=new Date(lp[0],lp[1]-1,lp[2]);
+  const DOW=['日','月','火','水','木','金','土'];
+  const dateStr=`${lp[0]}年${lp[1]}月${lp[2]}日 (${DOW[dt.getDay()]})`;
+  const color=g.color||'#1D9E75';
+  document.getElementById('detail-fs-title').textContent=`${detailIdx+1} / ${detailGroups.length}`;
+  const leader=g.members.find(m=>m.role==='代表');
+  const fellows=g.members.filter(m=>m.role==='同行');
+  const memberLine=(leader?`<b>${esc(leader.name)}</b>（代表）`:'')+(fellows.length>0?(leader?'<br>':'')+fellows.map(m=>esc(m.name)).join('　'):'');
+  const totalKo=(g.kosu*g.members.length).toFixed(1);
+  const badges=[];
+  if(g.souko)badges.push('🏭 倉庫');
+  if(g.yakin)badges.push('🌙 夜勤');
+  if(g.yasumi)badges.push('🏖️ 休み');
+  if(g.yotei)badges.push('📌 予定');
+  const wt=g.workType&&g.workType!=='現場作業'?g.workType:'現場作業';
+  const html=`
+    <div class="detail-title-row">
+      <div class="detail-color-bar" style="background:${esc(color)}"></div>
+      <div class="detail-title">${esc(g.genba)}</div>
+    </div>
+    <div class="detail-period">${dateStr}　${esc(g.start||'')}〜${esc(g.end||'')}</div>
+    ${badges.length?`<div style="padding:0 0 8px 18px">${badges.map(b=>`<span style="display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;background:#f2f2f7;margin-right:6px">${b}</span>`).join('')}</div>`:''}
+    ${g.loc?`<div class="detail-row"><div class="detail-row-icon">📍</div><div class="detail-row-content"><div class="detail-row-label">現場名</div>${esc(g.loc)}</div></div>`:''}
+    <div class="detail-row"><div class="detail-row-icon">🏷️</div><div class="detail-row-content"><div class="detail-row-label">作業区分</div>${esc(wt)}</div></div>
+    <div class="detail-row"><div class="detail-row-icon">👥</div><div class="detail-row-content"><div class="detail-row-label">メンバー（${g.members.length}人）</div>${memberLine||'—'}</div></div>
+    ${(g.yasumi||g.yotei)?'':`<div class="detail-row"><div class="detail-row-icon">🔢</div><div class="detail-row-content"><div class="detail-row-label">人工</div>${totalKo}</div></div>`}
+    ${g.company?`<div class="detail-row"><div class="detail-row-icon">🏢</div><div class="detail-row-content"><div class="detail-row-label">会社</div>${esc(g.company)}</div></div>`:''}
+    ${g.jobNo?`<div class="detail-row"><div class="detail-row-icon">🔖</div><div class="detail-row-content"><div class="detail-row-label">工番</div>${esc(g.jobNo)}</div></div>`:''}
+    ${g.memo?`<div class="detail-row"><div class="detail-row-icon">📝</div><div class="detail-row-content"><div class="detail-row-label">メモ</div>${esc(g.memo).replace(/\n/g,'<br>')}</div></div>`:''}
+    ${g.updatedBy?`<div class="detail-row"><div class="detail-row-icon">🔄</div><div class="detail-row-content"><div class="detail-row-label">最終更新者</div>${esc(g.updatedBy)}</div></div>`:''}
+    <div style="text-align:center;color:#bbb;font-size:11px;padding:20px 0 8px">← 右スワイプで戻る　/　左スワイプで次の予定 →</div>
+  `;
+  document.getElementById('detail-fs-body').innerHTML=html;
+}
+function shiftDetailEvent(delta){
+  if(!detailGroups.length)return;
+  // 同じ日の中で次/前の予定にループ
+  detailIdx=(detailIdx+delta+detailGroups.length)%detailGroups.length;
+  renderEventDetail();
+}
+function editFromDetail(){
+  const idx=detailIdx;
+  closeEventDetail();
+  // 日別モーダルが既に開いている前提で、その index で編集モーダルを開く
+  openEditModal(idx,detailGroups);
+}
+function copyFromDetail(){
+  const idx=detailIdx;
+  closeEventDetail();
+  document.getElementById('cal-day-modal').classList.remove('active');
+  calCopyToInput(idx);
+}
+async function deleteFromDetail(){
+  const g=detailGroups[detailIdx];if(!g)return;
+  if(!confirm('この日報を削除しますか？'))return;
+  setLoading(true);
+  try{
+    const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'delete',ids:[...new Set(g.ids)],updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){
+      closeEventDetail();
+      document.getElementById('cal-day-modal').classList.remove('active');
+      await loadData();
+    }else alert('削除エラー：'+json.message);
+  }catch(e){alert('削除エラー：'+e.message);}
+  setLoading(false);
 }
 
 function calGoToInput(){
@@ -1876,6 +1995,11 @@ function initCalSwipe(){
   attachSwipe(document.getElementById('cal-day-modal'),
     ()=>shiftCalDay(1),
     ()=>shiftCalDay(-1)
+  );
+  // ④ 予定詳細フルスクリーン: 左→次の予定、右→戻る
+  attachSwipe(document.getElementById('cal-detail-modal'),
+    ()=>shiftDetailEvent(1),
+    ()=>closeEventDetail()
   );
 }
 
