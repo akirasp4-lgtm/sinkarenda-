@@ -728,6 +728,7 @@ let settingsOpenedForSelect=null;
 let genbaSettingsOpenedForSelect=null;
 
 function esc(s){const d=document.createElement('div');d.textContent=String(s||'');return d.innerHTML;}
+function linkify(escapedHtml){return String(escapedHtml||'').replace(/(https?:\/\/[^\s<]+)/g,u=>`<a href="${u}" target="_blank" rel="noopener noreferrer" style="color:#1D9E75;text-decoration:underline;word-break:break-all">${u}</a>`);}
 function uuid(){return 'xxxx-xxxx-xxxx'.replace(/x/g,()=>Math.floor(Math.random()*16).toString(16))+'-'+Date.now().toString(36);}
 function setLoading(on){document.getElementById('loading-bar').classList.toggle('active',on);}
 function getGasUrl(){return GAS_URL;}
@@ -1161,7 +1162,7 @@ function renderEventDetail(){
     ${(g.yasumi||g.yotei)?'':`<div class="detail-row"><div class="detail-row-icon">🔢</div><div class="detail-row-content"><div class="detail-row-label">人工</div>${totalKo}</div></div>`}
     ${g.company?`<div class="detail-row"><div class="detail-row-icon">🏢</div><div class="detail-row-content"><div class="detail-row-label">会社</div>${esc(g.company)}</div></div>`:''}
     ${g.jobNo?`<div class="detail-row"><div class="detail-row-icon">🔖</div><div class="detail-row-content"><div class="detail-row-label">工番</div>${esc(g.jobNo)}</div></div>`:''}
-    ${g.memo?`<div class="detail-row"><div class="detail-row-icon">📝</div><div class="detail-row-content"><div class="detail-row-label">メモ</div>${esc(g.memo).replace(/\n/g,'<br>')}</div></div>`:''}
+    ${g.memo?`<div class="detail-row"><div class="detail-row-icon">📝</div><div class="detail-row-content"><div class="detail-row-label">メモ</div>${linkify(esc(g.memo).replace(/\n/g,'<br>'))}</div></div>`:''}
     ${g.updatedBy?`<div class="detail-row"><div class="detail-row-icon">🔄</div><div class="detail-row-content"><div class="detail-row-label">最終更新者</div>${esc(g.updatedBy)}</div></div>`:''}
     <div style="text-align:center;color:#bbb;font-size:11px;padding:20px 0 8px">← 右スワイプで戻る　/　左スワイプで次の予定 →</div>
   `;
