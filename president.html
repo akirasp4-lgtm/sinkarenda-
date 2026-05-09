@@ -85,6 +85,21 @@ button{font-family:inherit}
 .field input,.field textarea,.field select{width:100%;border:1px solid #ddd;border-radius:8px;padding:10px;font-size:14px;outline:none;font-family:inherit}
 .field input:focus,.field textarea:focus,.field select:focus{border-color:#1a1a2e}
 .field textarea{resize:vertical;min-height:60px}
+/* iOS Safari の date/time ネイティブボタン化を解除し他inputと統一 */
+.field input[type="date"],.field input[type="time"]{
+  -webkit-appearance:none;appearance:none;
+  background:#fff;
+  font-size:16px; /* 16px未満だとiOSで自動ズームが発生する */
+  min-height:44px;
+  text-align:left;
+  color:#222;
+  padding:10px 12px;
+  font-family:inherit;
+}
+.field input[type="date"]::-webkit-date-and-time-value,
+.field input[type="time"]::-webkit-date-and-time-value{text-align:left}
+/* 値が未入力のときの placeholder 風表示 */
+.field input[type="date"]:invalid,.field input[type="time"]:invalid{color:#999}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .color-picker{display:flex;gap:8px;flex-wrap:wrap}
 .color-chip{width:32px;height:32px;border-radius:50%;border:3px solid transparent;cursor:pointer}
