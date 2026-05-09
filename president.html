@@ -757,6 +757,49 @@ document.querySelectorAll('.tab').forEach(t => {
 });
 
 // ============================================================
+// スワイプ操作（月切替・日切替）
+// ============================================================
+function attachSwipe(el, onLeft, onRight){
+  if(!el) return;
+  let sx=0, sy=0, active=false;
+  el.addEventListener('touchstart', e => {
+    if(e.touches.length !== 1){ active=false; return; }
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; active=true;
+  }, {passive:true});
+  el.addEventListener('touchend', e => {
+    if(!active || !e.changedTouches.length) return;
+    const dx = e.changedTouches[0].clientX - sx;
+    const dy = e.changedTouches[0].clientY - sy;
+    if(Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5){
+      if(dx < 0) onLeft && onLeft();
+      else onRight && onRight();
+    }
+    active=false;
+  }, {passive:true});
+}
+
+function shiftMonth(delta){
+  const { y, m } = state.viewYM;
+  const dt = new Date(y, m + delta, 1);
+  state.viewYM = { y: dt.getFullYear(), m: dt.getMonth() };
+  renderCalendar();
+}
+
+function shiftDayModal(delta){
+  const cur = $('dayModal').dataset.date;
+  if(!cur) return;
+  const p = cur.split('-').map(Number);
+  const d = new Date(p[0], p[1]-1, p[2] + delta);
+  const next = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  openDayModal(next);
+}
+
+// カレンダー本体: 左→次月 / 右→前月
+attachSwipe($('tabCal'), () => shiftMonth(1), () => shiftMonth(-1));
+// 日付モーダル全体: 左→翌日 / 右→前日
+attachSwipe($('dayModal'), () => shiftDayModal(1), () => shiftDayModal(-1));
+
+// ============================================================
 // 起動
 // ============================================================
 if (checkPinStored()) {
