@@ -66,6 +66,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 .yotei-body{padding:12px 16px}
 .yotei-loc{font-size:13px;color:#666;margin-bottom:8px}
 .yotei-members{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.yotei-vehicle{font-size:12px;color:#444;background:#F1F5F9;border-radius:6px;padding:3px 8px;margin-top:6px;display:inline-block}
 .member-tag{padding:4px 10px;border-radius:20px;font-size:13px}
 .tag-leader{background:#E6F1FB;color:#0C447C}
 .tag-member{background:#EAF3DE;color:#3B6D11}
@@ -218,8 +219,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <button class="btn btn-secondary btn-sm add-inline-btn" onclick="openSettingsFor('s-operator')">➕</button>
   </div>
   <div class="grid2">
-    <div><label>開始日<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label><input type="date" id="s-date"></div>
-    <div><label>終了日（連続入力）</label><input type="date" id="s-date-end"></div>
+    <div><label>開始日<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label><input type="date" id="s-date" onchange="refreshVehicleSelect('s')"></div>
+    <div><label>終了日（連続入力）</label><input type="date" id="s-date-end" onchange="refreshVehicleSelect('s')"></div>
   </div>
   <label>元請名<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
   <div class="select-add-wrap">
@@ -239,6 +240,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="材料引き取り">材料引き取り</option>
     <option value="その他">その他</option>
   </select>
+  <label>🚗 車両（任意）</label>
+  <select id="s-vehicle"><option value="">使用しない</option></select>
   <div class="jobno-hint" id="s-jobno-hint"></div>
   <div id="s-jobno-div-wrap" style="display:none;margin-bottom:12px">
     <label style="font-size:12px;color:#666">新規現場の工番事業部</label>
@@ -449,6 +452,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="材料引き取り">材料引き取り</option>
     <option value="その他">その他</option>
   </select>
+  <label>🚗 車両（任意）</label>
+  <select id="e-vehicle"><option value="">使用しない</option></select>
   <div class="grid2">
     <div><label>出勤</label><input type="time" id="e-start"></div>
     <div><label>退勤</label><input type="time" id="e-end"></div>
@@ -670,6 +675,18 @@ const GAS_URL='https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3eg
 
 const COMPANIES=['グローライズ','和信カインド','ラーテル','GRHD','GRミツマ'];
 const MODES=['souko','yakin','yasumi','yotei'];
+const VEHICLES=[
+  {name:'ダブルキャブ',plate:'なにわ432せ8800'},
+  {name:'ユニック',plate:'なにわ432す8800'},
+  {name:'高所作業車',plate:'なにわ830ぬ8800'},
+  {name:'ハイエース（白）',plate:'なにわ432そ8800'},
+  {name:'ハイエース（シルバー）',plate:'なにわ432つ8800'},
+  {name:'ハイエース（白2）',plate:'なにわ432な8800'},
+  {name:'タウンエース',plate:'なにわ432は8800'},
+  {name:'ProBox',plate:'なにわ432ひ8800'},
+  {name:'ジムニー',plate:'なにわ586す8800'},
+  {name:'クリッパー（シルバー）',plate:'なにわ484け8800'}
+];
 const CAL_COLORS=['#1D9E75','#3B82F6','#E8384F','#F59E0B','#8B5CF6','#EC4899','#2C2C5A','#8B5E3C','#64748B','#0EA5E9'];
 const DIVISIONS=['ICT','INF','MSC','GRB'];
 
@@ -832,7 +849,7 @@ function applyYasumiLock(p,clearValues){
   const isLocked=modeState[p]==='yasumi'||modeState[p]==='souko';
   const fieldIds=[
     p+'-genba-select',p+'-genba',p+'-location',p+'-work-type',
-    p+'-start',p+'-end',p+'-memo'
+    p+'-start',p+'-end',p+'-memo',p+'-vehicle'
   ];
   fieldIds.forEach(id=>{
     const el=document.getElementById(id);
@@ -859,11 +876,57 @@ function applyYasumiLock(p,clearValues){
     if(endEl)endEl.value='17:00';
     const memoEl=document.getElementById(p+'-memo');
     if(memoEl)memoEl.value='';
+    const vehEl=document.getElementById(p+'-vehicle');
+    if(vehEl)vehEl.value='';
     const hint=document.getElementById(p+'-jobno-hint');
     if(hint)hint.style.display='none';
     const divWrap=document.getElementById(p+'-jobno-div-wrap');
     if(divWrap)divWrap.style.display='none';
   }
+}
+
+// 車両セレクタ: 指定日に他の予定で使用中の車両は disabled で表示する
+function getVehicleUsageMap(dates,excludeIds){
+  const exclude=new Set(excludeIds||[]);
+  const used={};
+  (allNippos||[]).forEach(n=>{
+    if(!n.vehicle)return;
+    if(n.isGhost)return;
+    if(exclude.has(n.id))return;
+    if(!dates.includes(n.date))return;
+    if(!used[n.vehicle])used[n.vehicle]={name:'',dates:new Set()};
+    used[n.vehicle].dates.add(n.date);
+    used[n.vehicle].name=n.name||used[n.vehicle].name;
+  });
+  return used;
+}
+function renderVehicleOptions(selectId,dates,currentValue,excludeIds){
+  const sel=document.getElementById(selectId);if(!sel)return;
+  const used=getVehicleUsageMap(dates||[],excludeIds||[]);
+  let html='<option value="">使用しない</option>';
+  VEHICLES.forEach(v=>{
+    const u=used[v.name];
+    const isUsed=!!u&&v.name!==currentValue;
+    const label=esc(v.name)+(isUsed?'  ／  使用中':'');
+    const dis=isUsed?' disabled':'';
+    const sel_=v.name===currentValue?' selected':'';
+    html+=`<option value="${esc(v.name)}"${sel_}${dis}>${label}</option>`;
+  });
+  sel.innerHTML=html;
+}
+function getInputDates(p){
+  const ds=document.getElementById(p+'-date');
+  const de=document.getElementById(p+'-date-end');
+  if(!ds||!ds.value)return [];
+  if(de&&de.value)return getDateRange(ds.value,de.value);
+  return [ds.value];
+}
+function refreshVehicleSelect(p){
+  const dates=p==='s'?getInputDates('s'):(window._editDates||(window.editDate?[window.editDate]:[]));
+  const sel=document.getElementById(p+'-vehicle');
+  const cur=sel?sel.value:'';
+  const excludeIds=p==='e'?(window._editIds||[]):[];
+  renderVehicleOptions(p+'-vehicle',dates,cur,excludeIds);
 }
 
 function getShokunin(){
@@ -1155,10 +1218,19 @@ async function submitNippo(){
 
   const jobNoDivision=(currentCompany==='グローライズ'&&document.getElementById('s-jobno-div-wrap').style.display!=='none')?document.getElementById('s-jobno-division').value:'';
   const workType=(document.getElementById('s-work-type')||{}).value||'現場作業';
+  const vehicle=(document.getElementById('s-vehicle')||{}).value||'';
+  // 車両のダブルブッキング再チェック（他のユーザーが同時に登録した場合の保険）
+  if(vehicle){
+    const conflictDates=dates.filter(d=>allNippos.some(n=>!n.isGhost&&n.vehicle===vehicle&&n.date===d));
+    if(conflictDates.length>0){
+      const proceed=confirm(`車両「${vehicle}」は以下の日に既に予約があります:\n${conflictDates.map(formatDate).join('\n')}\nそれでも登録しますか？`);
+      if(!proceed){isSubmitting=false;return;}
+    }
+  }
   const rows=[];
   dates.forEach(date=>{
     const dayId=uuid();
-    members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company:currentCompany,id:dayId,updatedBy:operator,color,jobNoDivision,workType});});
+    members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company:currentCompany,id:dayId,updatedBy:operator,color,jobNoDivision,workType,vehicle});});
   });
   const btn=document.getElementById('submit-btn');
   isSubmitting=true;btn.textContent=`送信中（${dates.length}日分）...`;btn.disabled=true;
@@ -1170,6 +1242,7 @@ async function submitNippo(){
       document.getElementById('s-genba').value='';document.getElementById('s-genba-select').value='';document.getElementById('s-genba').style.display='none';document.getElementById('s-location').value='';
       document.getElementById('s-memo').value='';document.getElementById('s-leader').value='';
       document.getElementById('s-date-end').value='';
+      const _v=document.getElementById('s-vehicle');if(_v)_v.value='';
       document.getElementById('s-jobno-hint').style.display='none';
       document.getElementById('s-jobno-div-wrap').style.display='none';
       const _jnSel=document.getElementById('s-jobno-division');if(_jnSel){delete _jnSel.dataset.userSet;_jnSel.value='ICT';}
@@ -1216,7 +1289,8 @@ function parseRows(rows,company){
     color:String(r['色']||''),
     division:String(r['事業部']||''),
     jobNo:String(r['工番']||''),
-    workType:String(r['作業区分']||'')
+    workType:String(r['作業区分']||''),
+    vehicle:String(r['車両']||'')
   }));
 }
 
@@ -1260,6 +1334,7 @@ async function loadData(){
     }
     initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();updateGmSelects();
     updateLocationSuggestions();
+    refreshVehicleSelect('s');
     checkUsername();
   }catch(e){console.error(e);}
   setLoading(false);
@@ -1269,7 +1344,7 @@ function groupNippos(nippos){
   const groups={};
   nippos.forEach(n=>{
     const key=n.id||`${n.date}__${n.genba}__${n.loc}__${n.start}__${n.end}__${n.kosu}__${n.memo}__${n.yakin}__${n.yasumi}__${n.yotei}__${n.souko}`;
-    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,color:n.color,jobNo:n.jobNo,workType:n.workType||'',isGhost:!!n.isGhost,originalId:n.originalId||''};
+    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,color:n.color,jobNo:n.jobNo,workType:n.workType||'',vehicle:n.vehicle||'',isGhost:!!n.isGhost,originalId:n.originalId||''};
     groups[key].members.push({name:n.name,role:n.role});
     if(n.id)groups[key].ids.push(n.id);
   });
@@ -1386,9 +1461,11 @@ function openCalDay(dateStr){
         }
       }
       const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
+      const vehicleLine=g.vehicle?`<div class="yotei-vehicle">🚗 ${esc(g.vehicle)}</div>`:'';
       return`<div class="yotei-card yotei-card-min${g.isGhost?' yotei-card-ghost':''}" style="border-left:4px solid ${esc(color)}" onclick="openEventDetail(${idx})">
         <div class="yotei-card-title">${titleLine}</div>
         <div class="yotei-members">${memberTags}</div>
+        ${vehicleLine}
       </div>`;
     }).join('');
   }
@@ -1466,6 +1543,7 @@ function renderEventDetail(){
     <div class="detail-row"><div class="detail-row-icon">👥</div><div class="detail-row-content"><div class="detail-row-label">メンバー（${g.members.length}人）</div>${memberLine||'—'}</div></div>
     ${(g.yasumi||g.yotei)?'':`<div class="detail-row"><div class="detail-row-icon">🔢</div><div class="detail-row-content"><div class="detail-row-label">人工</div>${totalKo}</div></div>`}
     ${g.company?`<div class="detail-row"><div class="detail-row-icon">🏢</div><div class="detail-row-content"><div class="detail-row-label">会社</div>${esc(g.company)}</div></div>`:''}
+    ${g.vehicle?`<div class="detail-row"><div class="detail-row-icon">🚗</div><div class="detail-row-content"><div class="detail-row-label">車両</div>${esc(g.vehicle)}</div></div>`:''}
     ${g.jobNo?`<div class="detail-row"><div class="detail-row-icon">🔖</div><div class="detail-row-content"><div class="detail-row-label">工番</div>${esc(g.jobNo)}</div></div>`:''}
     ${g.memo?`<div class="detail-row"><div class="detail-row-icon">📝</div><div class="detail-row-content"><div class="detail-row-label">メモ</div>${linkify(esc(g.memo).replace(/\n/g,'<br>'))}</div></div>`:''}
     ${g.updatedBy?`<div class="detail-row"><div class="detail-row-icon">🔄</div><div class="detail-row-content"><div class="detail-row-label">最終更新者</div>${esc(g.updatedBy)}</div></div>`:''}
@@ -1637,12 +1715,14 @@ function openEditModal(idx,groupsOverride){
   const groups=groupsOverride!==null?groupsOverride:getDisplayedGroups();
   const g=groups[idx];if(!g)return;
   editIds=[...new Set(g.ids)];editDate=g.date;
+  window._editIds=editIds;window._editDates=[editDate];
   setGenbaValue('e',g.genba);
   document.getElementById('e-location').value=g.loc||'';
   document.getElementById('e-start').value=g.start||'08:00';
   document.getElementById('e-end').value=g.end||'17:00';
   document.getElementById('e-memo').value=g.memo||'';
   const eWT=document.getElementById('e-work-type');if(eWT)eWT.value=g.workType||'現場作業';
+  renderVehicleOptions('e-vehicle',[editDate],g.vehicle||'',editIds);
   document.getElementById('edit-title').textContent=`編集：${formatDate(g.date)} ${g.genba}`;
   const mode=g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'';
   applyMode('e',mode);
@@ -1683,11 +1763,21 @@ async function saveEdit(){
   const company=currentCompany==='全社'?'':currentCompany;
   const color=selectedColor.e||CAL_COLORS[0];
   const workType=(document.getElementById('e-work-type')||{}).value||'現場作業';
+  const vehicle=(document.getElementById('e-vehicle')||{}).value||'';
   const dates=bulkEditMode?editDates:[editDate];
+  // 車両ダブルブッキング再チェック（編集中グループのIDは除外）
+  if(vehicle){
+    const excludeIds=new Set(editIds||[]);
+    const conflictDates=dates.filter(d=>allNippos.some(n=>!n.isGhost&&n.vehicle===vehicle&&n.date===d&&!excludeIds.has(n.id)));
+    if(conflictDates.length>0){
+      const proceed=confirm(`車両「${vehicle}」は以下の日に他の予定で予約があります:\n${conflictDates.map(formatDate).join('\n')}\nそれでも保存しますか？`);
+      if(!proceed){return;}
+    }
+  }
   const rows=[];
   dates.forEach(date=>{
     const newId=uuid();
-    members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType});});
+    members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle});});
   });
   btn.textContent='保存中...';btn.disabled=true;
   try{
