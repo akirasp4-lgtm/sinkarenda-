@@ -1207,16 +1207,17 @@ function renderCalendar(){
     shown.forEach(g=>{
       const type=g.yakin?'yakin':g.yasumi?'yasumi':g.souko?'souko':g.yotei?'yotei':'';
       const map={yakin:'#2C2C5A',yasumi:'#E8384F',souko:'#8B5E3C',yotei:'#3B82F6','':'#1D9E75'};
-      let label=g.loc||g.genba;
-      if(!label){
-        if(g.yasumi)label='🏖️ 休み';
-        else if(g.souko)label='🏭 倉庫';
-        else if(g.yotei)label='📌 予定';
-        else if(g.yakin)label='🌙 夜勤';
-        else label='（現場名なし）';
-      }else{
-        if(g.yasumi)label='🏖️ '+label;
-        else if(g.souko)label='🏭 '+label;
+      // 休み/倉庫は元請名の有無に関わらず統一表示
+      let label;
+      if(g.yasumi)label='🏖️ 休み';
+      else if(g.souko)label='🏭 倉庫';
+      else{
+        label=g.loc||g.genba;
+        if(!label){
+          if(g.yotei)label='📌 予定';
+          else if(g.yakin)label='🌙 夜勤';
+          else label='（現場名なし）';
+        }
       }
       eventsHtml+=`<div class="cal-event" style="background:${g.color||map[type]}">${esc(label)}</div>`;
     });
@@ -1242,12 +1243,16 @@ function openCalDay(dateStr){
       const modeBadges=(g.souko?'🏭':'')+(g.yakin?'🌙':'')+(g.yasumi?'🏖️':'')+(g.yotei?'📌':'');
       const ghostMarker=g.isGhost?`<span class="ghost-marker">⏰前日から</span>`:'';
       const badgesHtml=modeBadges?` <span class="card-mode-badges">${modeBadges}</span>`:'';
-      let titleText=esc(g.genba)+(g.loc?'　'+esc(g.loc):'');
-      if(!titleText){
-        if(g.yasumi)titleText='休み';
-        else if(g.souko)titleText='倉庫';
-        else if(g.yotei)titleText='予定';
-        else if(g.yakin)titleText='夜勤';
+      // 休み/倉庫は元請名を表示せず「休み」「倉庫」で統一
+      let titleText;
+      if(g.yasumi)titleText='休み';
+      else if(g.souko)titleText='倉庫';
+      else{
+        titleText=esc(g.genba)+(g.loc?'　'+esc(g.loc):'');
+        if(!titleText){
+          if(g.yotei)titleText='予定';
+          else if(g.yakin)titleText='夜勤';
+        }
       }
       const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
       return`<div class="yotei-card yotei-card-min${g.isGhost?' yotei-card-ghost':''}" style="border-left:4px solid ${esc(color)}" onclick="openEventDetail(${idx})">
@@ -1292,12 +1297,16 @@ function renderEventDetail(){
   const totalKo=(g.kosu*g.members.length).toFixed(1);
   const badges=[];if(g.souko)badges.push('🏭 倉庫');if(g.yakin)badges.push('🌙 夜勤');if(g.yasumi)badges.push('🏖️ 休み');if(g.yotei)badges.push('📌 予定');
   const wt=g.workType&&g.workType!=='現場作業'?g.workType:'現場作業';
-  let detailTitle=esc(g.genba);
-  if(!detailTitle){
-    if(g.yasumi)detailTitle='🏖️ 休み';
-    else if(g.souko)detailTitle='🏭 倉庫';
-    else if(g.yotei)detailTitle='📌 予定';
-    else if(g.yakin)detailTitle='🌙 夜勤';
+  // 休み/倉庫は元請名を表示せず統一ラベル
+  let detailTitle;
+  if(g.yasumi)detailTitle='🏖️ 休み';
+  else if(g.souko)detailTitle='🏭 倉庫';
+  else{
+    detailTitle=esc(g.genba);
+    if(!detailTitle){
+      if(g.yotei)detailTitle='📌 予定';
+      else if(g.yakin)detailTitle='🌙 夜勤';
+    }
   }
   const html=`
     <div class="detail-title-row">
