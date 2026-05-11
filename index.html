@@ -1051,7 +1051,8 @@ async function submitNippo(){
   const souko=mode==='souko';
   const yotei=mode==='yotei';
   const effectiveKosu=yasumi?0:kosu;
-  if(!dateStart||!genba){showAlert('開始日と元請名は必須です','err');return;}
+  if(!dateStart){showAlert('開始日は必須です','err');return;}
+  if(!yasumi && !genba){showAlert('元請名は必須です（休みモード時は不要）','err');return;}
   if(!leader){showAlert('代表者を選択してください','err');return;}
   // 異常値検出
   if(!yasumi){
@@ -1580,7 +1581,7 @@ async function saveEdit(){
   const mode=modeState.e;
   const yasumi=mode==='yasumi';const yakin=mode==='yakin';const souko=mode==='souko';const yotei=mode==='yotei';
   const effectiveKosu=yasumi?0:kosu;
-  if(!genba){alert('元請名は必須です');return;}
+  if(!yasumi && !genba){alert('元請名は必須です（休みモード時は不要）');return;}
   if(!leader){alert('代表者を選択してください');return;}
   if(!getUsername()){alert('編集者の名前が未設定です。右下の「変更」から名前を設定してください');openUsernameModal();return;}
   if(!yasumi){
