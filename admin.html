@@ -917,20 +917,20 @@ function applyMode(p,mode){
   MODES.forEach(m=>{const el=document.getElementById(p+'-'+m+'-toggle');if(el)el.classList.toggle('active',m===modeState[p]);});
   applyYasumiLock(p,false);
 }
-// 休みモード時は入力欄を無効化。clearValues=true なら入力済みの値もクリア
+// 休み/倉庫モード時は入力欄を無効化。clearValues=true なら入力済みの値もクリア
 function applyYasumiLock(p,clearValues){
-  const isYasumi=modeState[p]==='yasumi';
+  const isLocked=modeState[p]==='yasumi'||modeState[p]==='souko';
   const fieldIds=[p+'-genba-select',p+'-genba',p+'-location',p+'-work-type',p+'-start',p+'-end',p+'-memo'];
   fieldIds.forEach(id=>{
     const el=document.getElementById(id);
     if(!el)return;
-    el.disabled=isYasumi;
-    el.style.opacity=isYasumi?'0.45':'';
-    el.style.cursor=isYasumi?'not-allowed':'';
+    el.disabled=isLocked;
+    el.style.opacity=isLocked?'0.45':'';
+    el.style.cursor=isLocked?'not-allowed':'';
   });
   const cp=document.getElementById(p+'-color-picker');
-  if(cp){cp.style.pointerEvents=isYasumi?'none':'';cp.style.opacity=isYasumi?'0.45':'';}
-  if(isYasumi&&clearValues){
+  if(cp){cp.style.pointerEvents=isLocked?'none':'';cp.style.opacity=isLocked?'0.45':'';}
+  if(isLocked&&clearValues){
     const sel=document.getElementById(p+'-genba-select');if(sel)sel.value='';
     const gm=document.getElementById(p+'-genba');if(gm){gm.value='';gm.style.display='none';}
     const locEl=document.getElementById(p+'-location');if(locEl)locEl.value='';
