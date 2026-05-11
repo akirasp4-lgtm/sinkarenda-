@@ -800,6 +800,7 @@ function setMode(p,mode){
     const el=document.getElementById(p+'-'+m+'-toggle');
     if(el)el.classList.toggle('active',m===next);
   });
+  applyYasumiLock(p,true);
 }
 function applyMode(p,mode){
   modeState[p]=mode||'';
@@ -807,6 +808,45 @@ function applyMode(p,mode){
     const el=document.getElementById(p+'-'+m+'-toggle');
     if(el)el.classList.toggle('active',m===modeState[p]);
   });
+  applyYasumiLock(p,false);
+}
+// 休みモード時は入力欄を無効化。clearValues=true なら入力済みの値もクリア（ユーザーがトグルを押した時）
+function applyYasumiLock(p,clearValues){
+  const isYasumi=modeState[p]==='yasumi';
+  const fieldIds=[
+    p+'-genba-select',p+'-genba',p+'-location',p+'-work-type',
+    p+'-start',p+'-end',p+'-memo'
+  ];
+  fieldIds.forEach(id=>{
+    const el=document.getElementById(id);
+    if(!el)return;
+    el.disabled=isYasumi;
+    el.style.opacity=isYasumi?'0.45':'';
+    el.style.cursor=isYasumi?'not-allowed':'';
+  });
+  // カラーピッカーもロック
+  const cp=document.getElementById(p+'-color-picker');
+  if(cp){cp.style.pointerEvents=isYasumi?'none':'';cp.style.opacity=isYasumi?'0.45':'';}
+  if(isYasumi&&clearValues){
+    const sel=document.getElementById(p+'-genba-select');
+    if(sel)sel.value='';
+    const gm=document.getElementById(p+'-genba');
+    if(gm){gm.value='';gm.style.display='none';}
+    const locEl=document.getElementById(p+'-location');
+    if(locEl)locEl.value='';
+    const wt=document.getElementById(p+'-work-type');
+    if(wt)wt.value='現場作業';
+    const startEl=document.getElementById(p+'-start');
+    if(startEl)startEl.value='08:00';
+    const endEl=document.getElementById(p+'-end');
+    if(endEl)endEl.value='17:00';
+    const memoEl=document.getElementById(p+'-memo');
+    if(memoEl)memoEl.value='';
+    const hint=document.getElementById(p+'-jobno-hint');
+    if(hint)hint.style.display='none';
+    const divWrap=document.getElementById(p+'-jobno-div-wrap');
+    if(divWrap)divWrap.style.display='none';
+  }
 }
 
 function getShokunin(){
@@ -1052,7 +1092,7 @@ async function submitNippo(){
   const yotei=mode==='yotei';
   const effectiveKosu=yasumi?0:kosu;
   if(!dateStart){showAlert('開始日は必須です','err');return;}
-  if(!yasumi && !genba){showAlert('元請名は必須です（休みモード時は不要）','err');return;}
+  if(!yasumi && !souko && !genba){showAlert('元請名は必須です（休み・倉庫モード時は不要）','err');return;}
   if(!leader){showAlert('代表者を選択してください','err');return;}
   // 異常値検出
   if(!yasumi){
@@ -1275,7 +1315,17 @@ function renderCalendar(){
       const type=g.yakin?'yakin':g.yasumi?'yasumi':g.souko?'souko':g.yotei?'yotei':'';
       const defaultColorMap={yakin:'#2C2C5A',yasumi:'#E8384F',souko:'#8B5E3C',yotei:'#3B82F6','':'#1D9E75'};
       const bg=g.color||defaultColorMap[type]||'#1D9E75';
-      const label=g.loc||g.genba||'（現場名なし）';
+      let label=g.loc||g.genba;
+      if(!label){
+        if(g.yasumi)label='🏖️ 休み';
+        else if(g.souko)label='🏭 倉庫';
+        else if(g.yotei)label='📌 予定';
+        else if(g.yakin)label='🌙 夜勤';
+        else label='（現場名なし）';
+      }else{
+        if(g.yasumi)label='🏖️ '+label;
+        else if(g.souko)label='🏭 '+label;
+      }
       eventsHtml+=`<div class="cal-event" style="background:${bg}">${esc(label)}</div>`;
     });
     if(overflow>0)eventsHtml+=`<div class="cal-overflow">+${overflow}</div>`;
@@ -1306,7 +1356,14 @@ function openCalDay(dateStr){
       const modeBadges=(g.souko?'🏭':'')+(g.yakin?'🌙':'')+(g.yasumi?'🏖️':'')+(g.yotei?'📌':'');
       const ghostMarker=g.isGhost?`<span class="ghost-marker">⏰前日から</span>`:'';
       const badgesHtml=modeBadges?` <span class="card-mode-badges">${modeBadges}</span>`:'';
-      const titleLine=`${ghostMarker}${esc(g.genba)}${g.loc?'　'+esc(g.loc):''}${badgesHtml}`;
+      let titleText=esc(g.genba)+(g.loc?'　'+esc(g.loc):'');
+      if(!titleText){
+        if(g.yasumi)titleText='休み';
+        else if(g.souko)titleText='倉庫';
+        else if(g.yotei)titleText='予定';
+        else if(g.yakin)titleText='夜勤';
+      }
+      const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
       return`<div class="yotei-card yotei-card-min${g.isGhost?' yotei-card-ghost':''}" style="border-left:4px solid ${esc(color)}" onclick="openEventDetail(${idx})">
         <div class="yotei-card-title">${titleLine}</div>
         <div class="yotei-members">${memberTags}</div>
@@ -1364,10 +1421,17 @@ function renderEventDetail(){
   if(g.yasumi)badges.push('🏖️ 休み');
   if(g.yotei)badges.push('📌 予定');
   const wt=g.workType&&g.workType!=='現場作業'?g.workType:'現場作業';
+  let detailTitle=esc(g.genba);
+  if(!detailTitle){
+    if(g.yasumi)detailTitle='🏖️ 休み';
+    else if(g.souko)detailTitle='🏭 倉庫';
+    else if(g.yotei)detailTitle='📌 予定';
+    else if(g.yakin)detailTitle='🌙 夜勤';
+  }
   const html=`
     <div class="detail-title-row">
       <div class="detail-color-bar" style="background:${esc(color)}"></div>
-      <div class="detail-title">${esc(g.genba)}</div>
+      <div class="detail-title">${detailTitle}</div>
     </div>
     <div class="detail-period">${dateStr}　${esc(g.start||'')}〜${esc(g.end||'')}</div>
     ${badges.length?`<div style="padding:0 0 8px 18px">${badges.map(b=>`<span style="display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;background:#f2f2f7;margin-right:6px">${b}</span>`).join('')}</div>`:''}
@@ -1581,7 +1645,7 @@ async function saveEdit(){
   const mode=modeState.e;
   const yasumi=mode==='yasumi';const yakin=mode==='yakin';const souko=mode==='souko';const yotei=mode==='yotei';
   const effectiveKosu=yasumi?0:kosu;
-  if(!yasumi && !genba){alert('元請名は必須です（休みモード時は不要）');return;}
+  if(!yasumi && !souko && !genba){alert('元請名は必須です（休み・倉庫モード時は不要）');return;}
   if(!leader){alert('代表者を選択してください');return;}
   if(!getUsername()){alert('編集者の名前が未設定です。右下の「変更」から名前を設定してください');openUsernameModal();return;}
   if(!yasumi){
