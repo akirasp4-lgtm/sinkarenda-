@@ -77,6 +77,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 .yotei-loc{font-size:13px;color:#666;margin-bottom:8px}
 .yotei-members{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
 .yotei-vehicle{font-size:12px;color:#444;background:#F1F5F9;border-radius:6px;padding:3px 8px;margin-top:6px;display:inline-block}
+.worktype-chip{display:inline-block;font-size:11px;font-weight:600;color:#92400E;background:#FEF3C7;border-radius:8px;padding:2px 8px;margin-left:6px;vertical-align:middle}
 .member-tag{padding:4px 10px;border-radius:20px;font-size:13px}
 .tag-leader{background:#E6F1FB;color:#0C447C}
 .tag-member{background:#EAF3DE;color:#3B6D11}
@@ -1612,9 +1613,11 @@ function openCalDay(dateStr){
         }
       }
       const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
+      const wtLabel=(g.workType&&g.workType!=='現場作業')?g.workType:'';
+      const wtChip=wtLabel?`<span class="worktype-chip">🏷️ ${esc(wtLabel)}</span>`:'';
       const vehicleLine=g.vehicle?`<div class="yotei-vehicle">🚗 ${esc(g.vehicle)}</div>`:'';
       return`<div class="yotei-card yotei-card-min${g.isGhost?' yotei-card-ghost':''}" style="border-left:4px solid ${esc(color)}" onclick="openEventDetail(${idx})">
-        <div class="yotei-card-title">${titleLine}</div>
+        <div class="yotei-card-title">${titleLine}${wtChip}</div>
         <div class="yotei-members">${memberTags}</div>
         ${vehicleLine}
       </div>`;
