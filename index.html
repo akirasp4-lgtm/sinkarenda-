@@ -129,6 +129,11 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 .week-cell.busy{background:#FAECE7;color:#993C1D}
 .week-cell.yasumi{background:#FFF9E6;color:#8B7000}
 .week-cell.souko{background:#F3EAE0;color:#8B5E3C}
+.veh-cell{border-radius:4px;padding:3px 2px;font-size:10px;font-weight:500;line-height:1.25;min-height:34px;display:flex;flex-direction:column;justify-content:center}
+.veh-cell.free{background:#EAF3DE;color:#3B6D11}
+.veh-cell.busy{background:#FAECE7;color:#993C1D}
+.veh-cell .veh-driver{font-weight:700}
+.veh-cell .veh-dest{font-size:10px;opacity:0.85;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .week-sun th,.week-sun{color:#E8384F!important}
 .week-sat th,.week-sat{color:#3B82F6!important}
 .gm-day-row{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid #f0f0f0}
@@ -2008,24 +2013,23 @@ function renderVehicleWeek(){
     html+='<tr><td class="name-col">'+esc(v.name)+'</td>';
     days.forEach(d=>{
       const entries=cn.filter(n=>n.vehicle===v.name&&n.date===d.date);
-      // 同一グループの同行メンバー行は重複するのでIDで集約
       const byGroup={};
       entries.forEach(e=>{const gid=e.id||(e.date+'__'+e.start+'__'+e.genba);if(!byGroup[gid])byGroup[gid]={leader:'',members:[],genba:e.genba,loc:e.loc};
         if(e.role==='代表')byGroup[gid].leader=e.name;
         byGroup[gid].members.push(e.name);
       });
       const groups=Object.values(byGroup);
-      let cls='free',label='○',title='';
-      if(groups.length>0){
-        cls='busy';
+      const dowCls=d.dow===0?' week-sun':d.dow===6?' week-sat':'';
+      if(groups.length===0){
+        html+=`<td class="${dowCls}"><div class="veh-cell free">○</div></td>`;
+      }else{
         const g=groups[0];
         const repName=g.leader||(g.members[0]||'');
-        label=esc(repName.slice(0,3));
-        title=`${repName}\n${g.genba||''}${g.loc?' / '+g.loc:''}`;
-        if(groups.length>1)label+='＋';
+        const dest=g.loc||g.genba||'ー';
+        const multi=groups.length>1?'＋':'';
+        const title=`${repName}\n${g.genba||''}${g.loc?' / '+g.loc:''}${groups.length>1?'\n（他 '+(groups.length-1)+' 件）':''}`;
+        html+=`<td class="${dowCls}"><div class="veh-cell busy" title="${esc(title)}"><div class="veh-driver">${esc(repName.slice(0,4))}${multi}</div><div class="veh-dest">${esc(dest)}</div></div></td>`;
       }
-      const dowCls=d.dow===0?' week-sun':d.dow===6?' week-sat':'';
-      html+=`<td class="${dowCls}"><div class="week-cell ${cls}" title="${esc(title)}">${label}</div></td>`;
     });
     html+='</tr>';
   });
