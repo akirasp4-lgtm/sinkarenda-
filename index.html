@@ -301,6 +301,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="着打ち">着打ち</option>
     <option value="カギ借用">カギ借用</option>
     <option value="材料引き取り">材料引き取り</option>
+    <option value="撤去品返却">撤去品返却</option>
     <option value="その他">その他</option>
   </select>
   <div id="s-vehicle-wrap">
@@ -547,6 +548,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="着打ち">着打ち</option>
     <option value="カギ借用">カギ借用</option>
     <option value="材料引き取り">材料引き取り</option>
+    <option value="撤去品返却">撤去品返却</option>
     <option value="その他">その他</option>
   </select>
   <div id="e-vehicle-wrap">
@@ -1611,7 +1613,7 @@ function openCalDay(dateStr){
         }
       }
       const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
-      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','その他':'📋'};
+      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','撤去品返却':'♻️','その他':'📋'};
       const wt=g.workType||'現場作業';
       const wtEmoji=wtMap[wt]||'🏷️';
       const wtCls=wt==='現場作業'?'worktype-chip worktype-default':'worktype-chip';
