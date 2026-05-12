@@ -794,7 +794,11 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <div id="jobno-fix-modal" class="modal-bg">
 <div class="modal" style="max-width:720px">
   <div class="modal-title">工番事業部の修正</div>
-  <p style="margin:0 0 12px;font-size:12px;color:#666">各現場の事業部を選び直して「更新」で反映。新事業部×年度の次連番で新工番を発番し、現場マスタ＋日報データ＋アーカイブを一括更新します。旧工番は欠番として残ります。</p>
+  <p style="margin:0 0 8px;font-size:12px;color:#666">各現場の事業部を選び直して「更新」で反映。新事業部×年度の次連番で新工番を発番し、現場マスタ＋日報データ＋アーカイブを一括更新します。旧工番は欠番として残ります。</p>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+    <input type="text" id="jnfix-search" placeholder="🔍 元請名・現場名・工番で検索" oninput="filterJobNoFix()" style="flex:1;margin:0;font-size:14px">
+    <span id="jnfix-count" style="font-size:12px;color:#666;white-space:nowrap"></span>
+  </div>
   <div id="jobno-fix-list" style="margin-bottom:16px;max-height:60vh;overflow-y:auto"></div>
   <button class="btn btn-secondary" style="width:100%" onclick="document.getElementById('jobno-fix-modal').classList.remove('active')">閉じる</button>
 </div>
@@ -2125,6 +2129,8 @@ async function archiveOldData(){
 async function openJobNoFix(){
   document.getElementById('jobno-fix-modal').classList.add('active');
   const list=document.getElementById('jobno-fix-list');
+  const searchInp=document.getElementById('jnfix-search');if(searchInp)searchInp.value='';
+  const counter=document.getElementById('jnfix-count');if(counter)counter.textContent='';
   list.innerHTML='<div style="text-align:center;color:#999;padding:20px">読み込み中...</div>';
   try{
     const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'get_sheet',sheet:'現場マスタ'}),headers:{'Content-Type':'text/plain'}});
@@ -2148,7 +2154,8 @@ async function openJobNoFix(){
       const ldMember=ldName?allMembers.find(m=>m.name===ldName&&m.company==='グローライズ'):null;
       const ldDiv=ldMember?ldMember.division:'';
       const divOpts=DIVISIONS.map(d=>`<option value="${d}"${d===div?' selected':''}>${d}</option>`).join('');
-      return `<div style="border:1px solid #ddd;border-radius:8px;padding:10px;margin-bottom:8px;background:#fafafa">
+      const searchText=[genba,loc,jobNo,div,ldName].filter(Boolean).join(' ').toLowerCase();
+      return `<div data-search="${esc(searchText)}" style="border:1px solid #ddd;border-radius:8px;padding:10px;margin-bottom:8px;background:#fafafa">
         <div style="font-size:13px;margin-bottom:4px"><b>${esc(genba)}</b> / ${esc(loc||'（現場名なし）')}</div>
         <div style="font-size:12px;color:#666;margin-bottom:6px">現在: <b>${esc(jobNo)}</b>（${esc(div)}）${ldName?`　代表: ${esc(ldName)}${ldDiv?`（${esc(ldDiv)}）`:''}`:''}</div>
         <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
@@ -2164,7 +2171,23 @@ async function openJobNoFix(){
       </div>`;
     }).join('');
     list.innerHTML=html;
+    const counter=document.getElementById('jnfix-count');
+    if(counter)counter.textContent=`全 ${rows.length} 件`;
   }catch(e){list.innerHTML='<div style="color:#c00">読み込みエラー：'+esc(e.message)+'</div>';}
+}
+
+function filterJobNoFix(){
+  const q=(document.getElementById('jnfix-search').value||'').trim().toLowerCase();
+  const items=document.querySelectorAll('#jobno-fix-list > [data-search]');
+  let shown=0;
+  items.forEach(it=>{
+    const s=(it.dataset.search||'').toLowerCase();
+    const match=!q||s.includes(q);
+    it.style.display=match?'':'none';
+    if(match)shown++;
+  });
+  const counter=document.getElementById('jnfix-count');
+  if(counter)counter.textContent=q?`${shown} / ${items.length} 件`:`全 ${items.length} 件`;
 }
 
 async function saveSiteRevenue(idx,genba,loc){
