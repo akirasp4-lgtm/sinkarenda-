@@ -1423,6 +1423,23 @@ async function submitNippo(){
   const members=[{name:leader,role:'代表'}];
   const shokunin=getShokunin();selectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
   const color=selectedColor.s||CAL_COLORS[0];const dates=getDateRange(dateStart,dateEnd);
+  // メンバー被りチェック（予定モード以外）
+  if(!yotei){
+    const conflicts=[];
+    dates.forEach(date=>{
+      members.forEach(m=>{
+        const existing=allNippos.filter(n=>!n.isGhost&&n.date===date&&n.name===m.name&&n.company===currentCompany&&!n.yotei);
+        if(existing.length>0&&!conflicts.find(c=>c.date===date&&c.name===m.name)){
+          conflicts.push({date,name:m.name});
+        }
+      });
+    });
+    if(conflicts.length>0){
+      const lines=conflicts.map(c=>`・${formatDate(c.date)}　${c.name}`).join('\n');
+      const proceed=confirm(`以下のメンバーは既に予定が入っています。\n\n${lines}\n\nそれでも登録しますか？`);
+      if(!proceed)return;
+    }
+  }
   const jobNoDivision=(currentCompany==='グローライズ'&&document.getElementById('s-jobno-div-wrap').style.display!=='none')?document.getElementById('s-jobno-division').value:'';
   const workType=(document.getElementById('s-work-type')||{}).value||'現場作業';
   const vehicle=(document.getElementById('s-vehicle')||{}).value||'';
@@ -1735,8 +1752,25 @@ async function saveEdit(){
   const workType=(document.getElementById('e-work-type')||{}).value||'現場作業';
   const vehicle=(document.getElementById('e-vehicle')||{}).value||'';
   const dates=bulkEditMode?editDates:[editDate];
+  const excludeIds=new Set(editIds||[]);
+  // メンバー被りチェック（編集中グループ自身は除外、予定モードレコードは除外）
+  if(!yotei){
+    const conflicts=[];
+    dates.forEach(date=>{
+      members.forEach(m=>{
+        const existing=allNippos.filter(n=>!n.isGhost&&!excludeIds.has(n.id)&&n.date===date&&n.name===m.name&&!n.yotei&&(company?n.company===company:true));
+        if(existing.length>0&&!conflicts.find(c=>c.date===date&&c.name===m.name)){
+          conflicts.push({date,name:m.name});
+        }
+      });
+    });
+    if(conflicts.length>0){
+      const lines=conflicts.map(c=>`・${formatDate(c.date)}　${c.name}`).join('\n');
+      const proceed=confirm(`以下のメンバーは既に他の予定が入っています。\n\n${lines}\n\nそれでも保存しますか？`);
+      if(!proceed)return;
+    }
+  }
   if(vehicle){
-    const excludeIds=new Set(editIds||[]);
     const conflictDates=dates.filter(d=>allNippos.some(n=>!n.isGhost&&n.vehicle===vehicle&&n.date===d&&!excludeIds.has(n.id)));
     if(conflictDates.length>0){
       const proceed=confirm(`車両「${vehicle}」は以下の日に他の予定で予約があります:\n${conflictDates.map(formatDate).join('\n')}\nそれでも保存しますか？`);
@@ -1807,9 +1841,12 @@ function openBulkEditModal(){
   const groups=getGmGroups();const checked=[...document.querySelectorAll('.gm-day-check:checked')];if(checked.length===0)return;
   const targets=checked.map(c=>groups[Number(c.dataset.idx)]).filter(Boolean);if(targets.length===0)return;
   bulkEditMode=true;editIds=[...new Set(targets.flatMap(g=>g.ids))];editDates=targets.map(g=>g.date);
+  window._editIds=editIds;window._editDates=editDates;
   const g=targets[0];setGenbaValue('e',g.genba);document.getElementById('e-location').value=g.loc||'';
   document.getElementById('e-start').value=g.start||'08:00';document.getElementById('e-end').value=g.end||'17:00';
   document.getElementById('e-memo').value=g.memo||'';
+  const eWT=document.getElementById('e-work-type');if(eWT)eWT.value=g.workType||'現場作業';
+  renderVehicleOptions('e-vehicle',editDates,g.vehicle||'',editIds);
   document.getElementById('edit-title').textContent=`一括編集：${targets.length}日分`;
   applyMode('e',g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'');
   const leader=g.members.find(m=>m.role==='代表');document.getElementById('e-leader').value=leader?leader.name:'';
