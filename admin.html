@@ -514,6 +514,11 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="archive-desc" style="color:#92400E">既存の工番の事業部を変更します。新事業部×年度で連番max+1の工番が新規発番され、現場マスタと日報データを一括更新します。</div>
   <button class="btn btn-secondary btn-sm" onclick="openJobNoFix()">工番を修正する</button>
 </div>
+<div class="archive-section" style="background:#FEF2F2;border-color:#FCA5A5;margin-top:8px">
+  <div class="archive-title" style="color:#991B1B">🧹 おかしい工番をクリア</div>
+  <div class="archive-desc" style="color:#991B1B">休み・倉庫・予定モードのレコードに残っている工番・事業部をクリアします（旧仕様時代のデータ清掃用）。</div>
+  <button class="btn btn-secondary btn-sm" onclick="runJobNoCleanup()">休み・倉庫・予定の工番をクリア</button>
+</div>
 <div class="archive-section" style="background:#E8F4FD;border-color:#85B7EB">
   <div class="archive-title" style="color:#0C447C">📊 スプレッドシート集計</div>
   <div class="archive-desc" style="color:#0C447C">会社別・月別の出勤日数・人工をスプレッドシートに自動集計します。毎朝6時にも自動更新されます。</div>
@@ -2123,6 +2128,21 @@ async function archiveOldData(){
   if(!confirm('3ヶ月以上前のデータをアーカイブします。よろしいですか？'))return;
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'archive',months:3,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){alert(`${json.archived}件をアーカイブしました`);await loadData();}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+}
+
+// ===== 工番クリーンアップ =====
+async function runJobNoCleanup(){
+  if(!confirm('休み・倉庫・予定モードのレコードから工番・事業部をクリアします。\n（新規登録時は既に空のまま保存されています。旧データの清掃です）\n\n実行しますか？'))return;
+  try{
+    setLoading(true);
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'cleanup_orphan_jobnos',updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){
+      alert(`✓ ${json.cleaned}件の工番・事業部をクリアしました`);
+      await loadData();
+    }else alert('エラー: '+json.message);
+  }catch(e){alert('エラー: '+e.message);}
+  finally{setLoading(false);}
 }
 
 // ===== 工番修正 =====
