@@ -36,9 +36,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;bac
 .company-chip{padding:6px 14px;border-radius:20px;font-size:13px;font-weight:500;white-space:nowrap;border:1.5px solid #ddd;background:#fff;color:#666;cursor:pointer;flex-shrink:0;transition:all 0.15s}
 .company-chip.active{background:#1D9E75;color:#fff;border-color:#1D9E75}
 .tab-bar{position:fixed;bottom:0;left:0;right:0;display:flex;background:#fff;border-top:1px solid #ddd;z-index:100;padding-bottom:env(safe-area-inset-bottom)}
-.tab{flex:1;padding:10px 0 6px;text-align:center;font-size:10px;color:#999;border:none;background:none;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px}
+.tab{flex:1;padding:8px 0 5px;text-align:center;font-size:10px;color:#999;border:none;background:none;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0}
 .tab.active{color:#1D9E75}
-.tab-icon{font-size:22px;line-height:1}
+.tab-icon{font-size:20px;line-height:1}
 .screen{display:none;padding:12px 12px 80px;max-width:600px;margin:0 auto;padding-top:52px}
 .screen.active{display:block}
 .page-title{font-size:20px;font-weight:600;margin-bottom:16px;padding-top:8px}
@@ -206,7 +206,6 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </head>
 <body>
 <div class="company-bar" id="company-bar"></div>
-<button class="help-btn" onclick="openHelp()" title="使い方">❓</button>
 <div class="loading-bar" id="loading-bar"></div>
 <div class="notice-bar" id="notice-bar">会社を選択して入力してください</div>
 
@@ -335,6 +334,23 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <button class="btn btn-secondary" onclick="loadData()">更新</button>
 </div>
 
+<div id="screen-vehicle" class="screen">
+<div class="page-title">車確認</div>
+<div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:12px">
+  <button class="btn btn-secondary btn-sm" onclick="changeVehicleWeek(-1)">◀</button>
+  <span id="vehicle-week-label" style="font-size:15px;font-weight:600;min-width:180px;text-align:center"></span>
+  <button class="btn btn-secondary btn-sm" onclick="changeVehicleWeek(1)">▶</button>
+</div>
+<div class="card" style="overflow-x:auto">
+  <div id="vehicle-weekly" style="min-width:600px"></div>
+  <div style="display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:#999;margin-top:8px">
+    <span><span style="display:inline-block;width:10px;height:10px;background:#EAF3DE;border:1px solid #97C459;border-radius:2px;margin-right:3px"></span>空き</span>
+    <span><span style="display:inline-block;width:10px;height:10px;background:#FAECE7;border:1px solid #F0997B;border-radius:2px;margin-right:3px"></span>予約済</span>
+  </div>
+</div>
+<button class="btn btn-secondary" onclick="loadData()">更新</button>
+</div>
+
 <div id="screen-genba" class="screen">
 <div class="page-title">現場別管理</div>
 <div class="card">
@@ -420,7 +436,9 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <button class="tab active" onclick="switchTab('list')"><span class="tab-icon">📅</span>カレンダー</button>
   <button class="tab" onclick="switchTab('avail')"><span class="tab-icon">👥</span>空き確認</button>
   <button class="tab" onclick="switchTab('genba')"><span class="tab-icon">🏗️</span>現場管理</button>
+  <button class="tab" onclick="switchTab('vehicle')"><span class="tab-icon">🚗</span>車確認</button>
   <button class="tab" id="tab-jimu" onclick="switchTab('jimu')"><span class="tab-icon">📊</span>事務</button>
+  <button class="tab" onclick="openHelp()"><span class="tab-icon">❓</span>使い方</button>
 </div>
 
 <div id="username-modal" class="modal-bg">
@@ -1043,13 +1061,18 @@ function filteredNippos(){
 
 function switchTab(t){
   if(t==='jimu'&&!isAdminMode)return;
-  const tabs=['list','avail','genba','jimu'];
-  document.querySelectorAll('.tab').forEach((el,i)=>el.classList.toggle('active',tabs[i]===t));
+  const tabs=['list','avail','genba','vehicle','jimu'];
+  document.querySelectorAll('.tab').forEach((el,i)=>{
+    if(tabs[i])el.classList.toggle('active',tabs[i]===t);
+    else el.classList.remove('active'); // 使い方タブはアクティブにしない
+  });
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
-  document.getElementById('screen-'+t).classList.add('active');
+  const target=document.getElementById('screen-'+t);
+  if(target)target.classList.add('active');
   if(t==='genba')updateGmSelects();
   if(t==='list')renderList();
   if(t==='input')initColorPicker('s',selectedColor.s);
+  if(t==='vehicle'){if(!vehicleWeekStart)initVehicleWeek();renderVehicleWeek();}
 }
 
 function initMemberUI(){
@@ -1962,7 +1985,53 @@ function renderAvailWeek(){
   document.getElementById('avail-weekly').innerHTML=html;
 }
 
-function updateAvailability(){renderAvailWeek();}
+function updateAvailability(){renderAvailWeek();if(vehicleWeekStart)renderVehicleWeek();}
+
+// ========== 車確認 ==========
+let vehicleWeekStart=null;
+function initVehicleWeek(){vehicleWeekStart=getMonday(new Date());}
+function changeVehicleWeek(delta){if(!vehicleWeekStart)initVehicleWeek();vehicleWeekStart=new Date(vehicleWeekStart.getFullYear(),vehicleWeekStart.getMonth(),vehicleWeekStart.getDate()+delta*7);renderVehicleWeek();}
+function renderVehicleWeek(){
+  if(!vehicleWeekStart)return;
+  const days=[];
+  for(let i=0;i<7;i++){
+    const d=new Date(vehicleWeekStart.getFullYear(),vehicleWeekStart.getMonth(),vehicleWeekStart.getDate()+i);
+    days.push({date:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),label:(d.getMonth()+1)+'/'+d.getDate(),dow:d.getDay()});
+  }
+  const dayNames=['日','月','火','水','木','金','土'];
+  document.getElementById('vehicle-week-label').textContent=days[0].label+'〜'+days[6].label;
+  const cn=(allNippos||[]).filter(n=>!n.isGhost&&n.vehicle);
+  let html='<table class="week-table"><thead><tr><th></th>';
+  days.forEach(d=>{const cls=d.dow===0?' class="week-sun"':d.dow===6?' class="week-sat"':'';html+=`<th${cls}>${d.label}<br>${dayNames[d.dow]}</th>`;});
+  html+='</tr></thead><tbody>';
+  VEHICLES.forEach(v=>{
+    html+='<tr><td class="name-col">'+esc(v.name)+'</td>';
+    days.forEach(d=>{
+      const entries=cn.filter(n=>n.vehicle===v.name&&n.date===d.date);
+      // 同一グループの同行メンバー行は重複するのでIDで集約
+      const byGroup={};
+      entries.forEach(e=>{const gid=e.id||(e.date+'__'+e.start+'__'+e.genba);if(!byGroup[gid])byGroup[gid]={leader:'',members:[],genba:e.genba,loc:e.loc};
+        if(e.role==='代表')byGroup[gid].leader=e.name;
+        byGroup[gid].members.push(e.name);
+      });
+      const groups=Object.values(byGroup);
+      let cls='free',label='○',title='';
+      if(groups.length>0){
+        cls='busy';
+        const g=groups[0];
+        const repName=g.leader||(g.members[0]||'');
+        label=esc(repName.slice(0,3));
+        title=`${repName}\n${g.genba||''}${g.loc?' / '+g.loc:''}`;
+        if(groups.length>1)label+='＋';
+      }
+      const dowCls=d.dow===0?' week-sun':d.dow===6?' week-sat':'';
+      html+=`<td class="${dowCls}"><div class="week-cell ${cls}" title="${esc(title)}">${label}</div></td>`;
+    });
+    html+='</tr>';
+  });
+  html+='</tbody></table>';
+  document.getElementById('vehicle-weekly').innerHTML=html;
+}
 
 function updateGenbaFilter(){
   const gs=[...new Set(filteredNippos().map(n=>n.genba).filter(Boolean))].sort();
@@ -2259,6 +2328,11 @@ function initCalSwipe(){
     ()=>changeAvailWeek(1),
     ()=>changeAvailWeek(-1)
   );
+  // ②-2 車確認の週テーブル: 左→次週、右→前週
+  attachSwipe(document.getElementById('vehicle-weekly'),
+    ()=>changeVehicleWeek(1),
+    ()=>changeVehicleWeek(-1)
+  );
   // ③ カレンダー日別モーダル: モーダル全体で左→翌日、右→前日
   attachSwipe(document.getElementById('cal-day-modal'),
     ()=>shiftCalDay(1),
@@ -2281,7 +2355,7 @@ function shiftCalDay(delta){
 }
 
 // ========== 初期化 ==========
-initCompanyBar();initSelects();initAvailWeek();initUsername();initColorPicker('s');renderList();initCalSwipe();
+initCompanyBar();initSelects();initAvailWeek();initVehicleWeek();initUsername();initColorPicker('s');renderList();initCalSwipe();
 // 会社が未設定の場合は会社選択ピッカーを表示し、データロードはスキップ
 if(needsCompanyPicker)showCompanyPicker();
 else loadData();
