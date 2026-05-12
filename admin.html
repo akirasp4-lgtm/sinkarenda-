@@ -30,7 +30,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;bac
 #app{display:none}
 #app.unlocked{display:block}
 .lock-btn{position:fixed;top:10px;right:10px;z-index:110;background:rgba(0,0,0,0.1);border:none;border-radius:16px;padding:4px 10px;font-size:12px;color:#555;cursor:pointer}
-.help-btn{position:fixed;top:calc(env(safe-area-inset-top) + 8px);right:110px;z-index:105;background:#1D9E75;color:#fff;border:none;border-radius:16px;height:28px;padding:0 12px;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.2);display:flex;align-items:center;gap:4px}
+.help-btn-inline{background:#1D9E75;color:#fff;border:none;border-radius:16px;height:30px;padding:0 12px;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,0.15);display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.help-btn-inline:active{transform:scale(0.96)}
+.page-title-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:8px}
+.page-title-row .page-title{margin:0}
 .help-section{margin-bottom:20px;border-left:3px solid #1D9E75;padding-left:12px}
 .help-section h3{margin:0 0 8px;font-size:15px;color:#1D9E75}
 .help-section p,.help-section li{font-size:13px;color:#333;line-height:1.6;margin:4px 0}
@@ -128,11 +131,15 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 .week-cell.busy{background:#FAECE7;color:#993C1D}
 .week-cell.yasumi{background:#FFF9E6;color:#8B7000}
 .week-cell.souko{background:#F3EAE0;color:#8B5E3C}
-.veh-cell{border-radius:4px;padding:3px 2px;font-size:10px;font-weight:500;line-height:1.25;min-height:34px;display:flex;flex-direction:column;justify-content:center}
+.veh-cell{border-radius:4px;padding:4px 3px;font-size:11px;font-weight:500;line-height:1.3;min-height:40px;display:flex;flex-direction:column;justify-content:center;text-align:center}
 .veh-cell.free{background:#EAF3DE;color:#3B6D11}
 .veh-cell.busy{background:#FAECE7;color:#993C1D}
-.veh-cell .veh-driver{font-weight:700}
-.veh-cell .veh-dest{font-size:10px;opacity:0.85;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.veh-cell .veh-driver{font-weight:700;font-size:11px}
+.veh-cell .veh-dest{font-size:10px;opacity:0.9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;margin-top:1px}
+.veh-table{font-size:11px}
+.veh-table th{padding:6px 3px;text-align:center;font-weight:600;border-bottom:2px solid #ddd;font-size:11px;color:#666;white-space:nowrap}
+.veh-table td{padding:3px;text-align:center;border-bottom:1px solid #f0f0f0}
+.veh-table .name-col{text-align:left;font-weight:500;padding-left:6px;min-width:80px;white-space:nowrap;font-size:11px;background:#fafafa}
 .week-sun th,.week-sun{color:#E8384F!important}
 .week-sat th,.week-sat{color:#3B82F6!important}
 .gm-day-row{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid #f0f0f0}
@@ -238,7 +245,6 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <!-- ===== メインアプリ ===== -->
 <div id="app">
 <button class="lock-btn" onclick="lockScreen()">🔒 ロック</button>
-<button class="help-btn" onclick="openHelp()" title="使い方">❓ 使い方</button>
 <div class="company-bar" id="company-bar"></div>
 <div class="loading-bar" id="loading-bar"></div>
 <div class="notice-bar" id="notice-bar">会社を選択して入力してください</div>
@@ -312,7 +318,10 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 
 <!-- カレンダー -->
 <div id="screen-list" class="screen active">
-<div class="page-title">カレンダー</div>
+<div class="page-title-row">
+  <div class="page-title">カレンダー</div>
+  <button class="help-btn-inline" onclick="openHelp()">❓ 使い方</button>
+</div>
 <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:12px">
   <button class="btn btn-secondary btn-sm" onclick="changeListMonth(-1)">◀</button>
   <span id="list-month-label" style="font-size:15px;font-weight:600;min-width:100px;text-align:center"></span>
@@ -859,19 +868,22 @@ function setLoading(on){document.getElementById('loading-bar').classList.toggle(
 function getGasUrl(){return GAS_URL;}
 function getUsername(){return currentUsername;}
 
-// 横スワイプ汎用ハンドラ（左→onLeft、右→onRight）
-function attachSwipe(el,onLeft,onRight){
+// 横スワイプ汎用ハンドラ（左→onLeft、右→onRight）。scrollableEl内で横スクロールが起きた場合は発火しない
+function attachSwipe(el,onLeft,onRight,scrollableEl){
   if(!el)return;
-  let startX=0,startY=0,active=false;
+  let startX=0,startY=0,active=false,startScrollLeft=0;
   el.addEventListener('touchstart',e=>{
     if(e.touches.length!==1){active=false;return;}
-    startX=e.touches[0].clientX;startY=e.touches[0].clientY;active=true;
+    startX=e.touches[0].clientX;startY=e.touches[0].clientY;
+    startScrollLeft=scrollableEl?scrollableEl.scrollLeft:0;
+    active=true;
   },{passive:true});
   el.addEventListener('touchend',e=>{
     if(!active||!e.changedTouches.length)return;
     const dx=e.changedTouches[0].clientX-startX;
     const dy=e.changedTouches[0].clientY-startY;
-    if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)*1.5){
+    const scrolled=scrollableEl?(scrollableEl.scrollLeft!==startScrollLeft):false;
+    if(!scrolled&&Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)*1.5){
       if(dx<0)onLeft&&onLeft();
       else onRight&&onRight();
     }
@@ -884,14 +896,12 @@ function initCalSwipe(){
     ()=>changeListMonth(1),
     ()=>changeListMonth(-1)
   );
-  attachSwipe(document.getElementById('vehicle-weekly'),
-    ()=>changeVehicleWeek(1),
-    ()=>changeVehicleWeek(-1)
-  );
-  attachSwipe(document.getElementById('avail-weekly'),
-    ()=>changeAvailWeek(1),
-    ()=>changeAvailWeek(-1)
-  );
+  const _avScreen=document.getElementById('screen-avail');
+  const _avCard=_avScreen?_avScreen.querySelector('.card'):null;
+  const _vhScreen=document.getElementById('screen-vehicle');
+  const _vhCard=_vhScreen?_vhScreen.querySelector('.card'):null;
+  attachSwipe(_vhScreen,()=>changeVehicleWeek(1),()=>changeVehicleWeek(-1),_vhCard);
+  attachSwipe(_avScreen,()=>changeAvailWeek(1),()=>changeAvailWeek(-1),_avCard);
   attachSwipe(document.getElementById('cal-day-modal'),
     ()=>shiftCalDay(1),
     ()=>shiftCalDay(-1)
@@ -1694,7 +1704,7 @@ function renderVehicleWeek(){
   const dayNames=['日','月','火','水','木','金','土'];
   document.getElementById('vehicle-week-label').textContent=days[0].label+'〜'+days[6].label;
   const cn=(allNippos||[]).filter(n=>!n.isGhost&&n.vehicle);
-  let html='<table class="week-table"><thead><tr><th></th>';
+  let html='<table class="week-table veh-table"><thead><tr><th></th>';
   days.forEach(d=>{const cls=d.dow===0?' class="week-sun"':d.dow===6?' class="week-sat"':'';html+=`<th${cls}>${d.label}<br>${dayNames[d.dow]}</th>`;});
   html+='</tr></thead><tbody>';
   VEHICLES.forEach(v=>{
