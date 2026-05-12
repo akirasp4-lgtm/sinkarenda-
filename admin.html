@@ -444,8 +444,11 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <div id="screen-genba" class="screen">
 <div class="page-title">現場別管理</div>
 <div class="card">
-  <label>元請名</label>
-  <select id="gm-genba" onchange="onGmGenbaChange()" style="margin-bottom:8px"><option value="">元請を選択</option></select>
+  <label>元請名 / 月</label>
+  <div style="display:flex;gap:8px;margin-bottom:8px">
+    <select id="gm-genba" onchange="onGmGenbaChange()" style="flex:2;margin-bottom:0"><option value="">元請を選択</option></select>
+    <select id="gm-month" onchange="onGmGenbaChange()" style="flex:1;margin-bottom:0"><option value="">全期間</option></select>
+  </div>
   <label>現場名</label>
   <select id="gm-location" onchange="renderGmList()" style="margin-bottom:0"><option value="">現場を選択</option></select>
 </div>
@@ -1788,14 +1791,26 @@ async function saveEdit(){
 
 // ===== 現場別管理 =====
 function updateGmSelects(){
-  const genbas=[...new Set(filteredNippos().map(n=>n.genba).filter(Boolean))].sort();
+  const nippos=filteredNippos().filter(n=>!n.isGhost);
+  const genbas=[...new Set(nippos.map(n=>n.genba).filter(Boolean))].sort();
   const gSel=document.getElementById('gm-genba');const curG=gSel.value;
   gSel.innerHTML='<option value="">元請を選択</option>'+genbas.map(g=>`<option value="${esc(g)}"${g===curG?' selected':''}>${esc(g)}</option>`).join('');
+  const mSel=document.getElementById('gm-month');
+  if(mSel){
+    const curM=mSel.value;
+    const months=[...new Set(nippos.map(n=>(n.date||'').slice(0,7)).filter(Boolean))].sort().reverse();
+    mSel.innerHTML='<option value="">全期間</option>'+months.map(m=>{
+      const p=m.split('-');
+      return `<option value="${m}"${m===curM?' selected':''}>${p[0]}年${Number(p[1])}月</option>`;
+    }).join('');
+  }
   onGmGenbaChange();
 }
 function onGmGenbaChange(){
   const genba=document.getElementById('gm-genba').value;
-  const nippos=filteredNippos().filter(n=>n.genba===genba);
+  const month=(document.getElementById('gm-month')||{}).value||'';
+  let nippos=filteredNippos().filter(n=>!n.isGhost&&n.genba===genba);
+  if(month)nippos=nippos.filter(n=>(n.date||'').startsWith(month));
   const locs=[...new Set(nippos.map(n=>n.loc).filter(Boolean))].sort();
   const hasNoLoc=nippos.some(n=>!n.loc);
   const lSel=document.getElementById('gm-location');const curL=lSel.value;
@@ -1806,8 +1821,10 @@ function onGmGenbaChange(){
 }
 function getGmGroups(){
   const genba=document.getElementById('gm-genba').value;const loc=document.getElementById('gm-location').value;
+  const month=(document.getElementById('gm-month')||{}).value||'';
   if(!genba||!loc)return[];
-  const nippos=loc==='__noloc__'?filteredNippos().filter(n=>n.genba===genba&&!n.loc):filteredNippos().filter(n=>n.genba===genba&&n.loc===loc);
+  let nippos=loc==='__noloc__'?filteredNippos().filter(n=>!n.isGhost&&n.genba===genba&&!n.loc):filteredNippos().filter(n=>!n.isGhost&&n.genba===genba&&n.loc===loc);
+  if(month)nippos=nippos.filter(n=>(n.date||'').startsWith(month));
   return groupNippos(nippos).sort((a,b)=>a.date.localeCompare(b.date));
 }
 function renderGmList(){
