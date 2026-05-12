@@ -322,8 +322,10 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="材料引き取り">材料引き取り</option>
     <option value="その他">その他</option>
   </select>
-  <label>🚗 車両</label>
-  <select id="s-vehicle"><option value="">使用しない</option></select>
+  <div id="s-vehicle-wrap">
+    <label>🚗 車両</label>
+    <select id="s-vehicle"><option value="">使用しない</option></select>
+  </div>
   <div class="jobno-hint" id="s-jobno-hint"></div>
   <div id="s-jobno-div-wrap" style="display:none;margin-bottom:12px">
     <label style="font-size:12px;color:#666">新規現場の工番事業部</label>
@@ -571,8 +573,10 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="材料引き取り">材料引き取り</option>
     <option value="その他">その他</option>
   </select>
-  <label>🚗 車両</label>
-  <select id="e-vehicle"><option value="">使用しない</option></select>
+  <div id="e-vehicle-wrap">
+    <label>🚗 車両</label>
+    <select id="e-vehicle"><option value="">使用しない</option></select>
+  </div>
   <div class="grid2">
     <div><label>出勤</label><input type="time" id="e-start"></div>
     <div><label>退勤</label><input type="time" id="e-end"></div>
@@ -832,17 +836,22 @@ const GAS_URL='https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3eg
 const COMPANIES=['グローライズ','和信カインド','ラーテル','GRHD','GRミツマ'];
 const MODES=['souko','yakin','yasumi','yotei'];
 const VEHICLES=[
-  {name:'ダブルキャブ',plate:'なにわ432せ8800'},
-  {name:'ユニック',plate:'なにわ432す8800'},
-  {name:'高所作業車',plate:'なにわ830ぬ8800'},
-  {name:'ハイエース（白）',plate:'なにわ432そ8800'},
-  {name:'ハイエース（シルバー）',plate:'なにわ432つ8800'},
-  {name:'ハイエース（白2）',plate:'なにわ432な8800'},
-  {name:'タウンエース',plate:'なにわ432は8800'},
-  {name:'ProBox',plate:'なにわ432ひ8800'},
-  {name:'ジムニー',plate:'なにわ586す8800'},
-  {name:'クリッパー（シルバー）',plate:'なにわ484け8800'}
+  {name:'ダブルキャブ',plate:'なにわ432せ8800',company:'グローライズ'},
+  {name:'ユニック',plate:'なにわ432す8800',company:'グローライズ'},
+  {name:'高所作業車',plate:'なにわ830ぬ8800',company:'グローライズ'},
+  {name:'ハイエース（白）',plate:'なにわ432そ8800',company:'グローライズ'},
+  {name:'ハイエース（シルバー）',plate:'なにわ432つ8800',company:'グローライズ'},
+  {name:'ハイエース（白2）',plate:'なにわ432な8800',company:'グローライズ'},
+  {name:'タウンエース',plate:'なにわ432は8800',company:'グローライズ'},
+  {name:'ProBox',plate:'なにわ432ひ8800',company:'グローライズ'},
+  {name:'ジムニー',plate:'なにわ586す8800',company:'グローライズ'},
+  {name:'クリッパー（シルバー）',plate:'なにわ484け8800',company:'グローライズ'}
 ];
+function getCompanyVehicles(){
+  if(typeof currentCompany==='undefined'||!currentCompany)return [];
+  if(currentCompany==='全社')return VEHICLES;
+  return VEHICLES.filter(v=>v.company===currentCompany);
+}
 const CAL_COLORS=['#1D9E75','#3B82F6','#E8384F','#F59E0B','#8B5CF6','#EC4899','#2C2C5A','#8B5E3C','#64748B','#0EA5E9'];
 const DIVISIONS=['ICT','INF','MSC','GRB'];
 // 管理画面は常にadminモード
@@ -1115,6 +1124,8 @@ function switchCompany(c){
   currentCompany=c;
   selectedMembers=[];editSelectedMembers=[];
   initCompanyBar();initMemberUI();renderList();updateAvailability();updateJimu();updateGenbaFilter();updateGmSelects();updateNoticeBar();
+  refreshVehicleSelect('s');
+  if(typeof renderVehicleWeek==='function'){renderVehicleWeek();renderVehicleList();}
 }
 
 function updateNoticeBar(){
@@ -1236,9 +1247,12 @@ function getVehicleUsageMap(dates,excludeIds){
 }
 function renderVehicleOptions(selectId,dates,currentValue,excludeIds){
   const sel=document.getElementById(selectId);if(!sel)return;
+  const list=getCompanyVehicles();
+  const wrap=document.getElementById(selectId+'-wrap');
+  if(wrap)wrap.style.display=list.length>0?'':'none';
   const used=getVehicleUsageMap(dates||[],excludeIds||[]);
   let html='<option value="">使用しない</option>';
-  VEHICLES.forEach(v=>{
+  list.forEach(v=>{
     const u=used[v.name];
     const isUsed=!!u&&v.name!==currentValue;
     const label=esc(v.name)+(isUsed?'  ／  使用中':'');
@@ -1956,13 +1970,19 @@ function renderAvailList(){
 function renderVehicleList(){
   if(!vehicleWeekStart)return;
   const el=document.getElementById('vehicle-list');if(!el)return;
+  const list=getCompanyVehicles();
+  if(list.length===0){
+    el.innerHTML='<div style="color:#999;text-align:center;padding:20px;font-size:13px">この会社に登録された車両はありません</div>';
+    return;
+  }
+  const vehicleNames=new Set(list.map(v=>v.name));
   const days=[];
   for(let i=0;i<7;i++){
     const d=new Date(vehicleWeekStart.getFullYear(),vehicleWeekStart.getMonth(),vehicleWeekStart.getDate()+i);
     days.push({date:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),m:d.getMonth()+1,dd:d.getDate(),dow:d.getDay()});
   }
   const dayNames=['日','月','火','水','木','金','土'];
-  const cn=(allNippos||[]).filter(n=>!n.isGhost&&n.vehicle);
+  const cn=(allNippos||[]).filter(n=>!n.isGhost&&n.vehicle&&vehicleNames.has(n.vehicle));
   let html='';
   days.forEach(d=>{
     const dayEntries=cn.filter(n=>n.date===d.date);
@@ -1974,11 +1994,11 @@ function renderVehicleList(){
     const groups=Object.values(byKey);
     const dowCls=d.dow===0?' sun':d.dow===6?' sat':'';
     const usedCount=new Set(groups.map(g=>g.vehicle)).size;
-    html+=`<div class="day-block"><div class="day-block-header"><div class="day-block-date${dowCls}">${d.m}/${d.dd}（${dayNames[d.dow]}）</div><div class="day-block-count">${usedCount} / ${VEHICLES.length} 台</div></div>`;
+    html+=`<div class="day-block"><div class="day-block-header"><div class="day-block-date${dowCls}">${d.m}/${d.dd}（${dayNames[d.dow]}）</div><div class="day-block-count">${usedCount} / ${list.length} 台</div></div>`;
     if(groups.length===0){
       html+='<div class="day-row" style="color:#999;font-size:13px">予約なし</div>';
     }else{
-      groups.sort((a,b)=>VEHICLES.findIndex(v=>v.name===a.vehicle)-VEHICLES.findIndex(v=>v.name===b.vehicle));
+      groups.sort((a,b)=>list.findIndex(v=>v.name===a.vehicle)-list.findIndex(v=>v.name===b.vehicle));
       groups.forEach(g=>{
         const rep=g.leader||(g.members[0]||'');
         const dest=g.loc||g.genba||'';
@@ -2003,11 +2023,16 @@ function renderVehicleWeek(){
   }
   const dayNames=['日','月','火','水','木','金','土'];
   document.getElementById('vehicle-week-label').textContent=days[0].label+'〜'+days[6].label;
+  const list=getCompanyVehicles();
+  if(list.length===0){
+    document.getElementById('vehicle-weekly').innerHTML='<div style="color:#999;text-align:center;padding:20px;font-size:13px">この会社に登録された車両はありません</div>';
+    return;
+  }
   const cn=(allNippos||[]).filter(n=>!n.isGhost&&n.vehicle);
   let html='<table class="week-table veh-table"><thead><tr><th></th>';
   days.forEach(d=>{const cls=d.dow===0?' class="week-sun"':d.dow===6?' class="week-sat"':'';html+=`<th${cls}>${d.label}<br>${dayNames[d.dow]}</th>`;});
   html+='</tr></thead><tbody>';
-  VEHICLES.forEach(v=>{
+  list.forEach(v=>{
     html+='<tr><td class="name-col">'+esc(v.name)+'</td>';
     days.forEach(d=>{
       const entries=cn.filter(n=>n.vehicle===v.name&&n.date===d.date);
