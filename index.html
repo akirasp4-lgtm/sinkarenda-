@@ -25,7 +25,8 @@
 </script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;background:#f2f2f7;color:#1a1a1a;min-height:100vh}
+html,body{height:100%;overflow:hidden}
+body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;background:#f2f2f7;color:#1a1a1a;overscroll-behavior:none}
 .company-bar{position:fixed;top:0;left:0;right:0;z-index:100;background:#fff;border-bottom:1px solid #ddd;padding:8px 12px;display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
 .help-btn-inline{background:#1D9E75;color:#fff;border:none;border-radius:16px;height:30px;padding:0 12px;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,0.15);display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
 .help-btn-inline:active{transform:scale(0.96)}
@@ -42,8 +43,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;bac
 .tab{flex:1;padding:10px 0 6px;text-align:center;font-size:10px;color:#999;border:none;background:none;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px}
 .tab.active{color:#1D9E75}
 .tab-icon{font-size:22px;line-height:1}
-.screen{display:none;padding:12px 12px 80px;max-width:600px;margin:0 auto;padding-top:52px}
+.screen{display:none;position:fixed;top:0;bottom:0;left:0;right:0;padding:52px 12px 78px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 .screen.active{display:block}
+.screen>*{max-width:600px;margin-left:auto;margin-right:auto}
 .page-title{font-size:20px;font-weight:600;margin-bottom:16px;padding-top:8px}
 .card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.08)}
 label{font-size:13px;color:#666;display:block;margin-bottom:4px}
@@ -206,7 +208,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 .yotei-card-ghost{opacity:0.85;background:#fafafa}
 /* PC表示: カレンダー大きめ・コンテナ拡張 */
 @media (min-width:1024px){
-  .screen{max-width:1000px;padding:60px 24px 80px}
+  .screen{padding:60px 24px 80px}
+  .screen>*{max-width:1000px}
   .cal-cell{min-height:120px;padding:6px 5px}
   .cal-day-num{font-size:14px;margin-bottom:4px}
   .cal-event{font-size:11px;padding:2px 5px;margin-bottom:2px}
@@ -2526,15 +2529,19 @@ function shiftCalDay(delta){
 function hapticTap(){try{if(navigator.vibrate)navigator.vibrate(8);}catch(e){}}
 function hapticSuccess(){try{if(navigator.vibrate)navigator.vibrate([10,40,15]);}catch(e){}}
 
-// 引き下げて更新（pull-to-refresh）
+// 引き下げて更新（pull-to-refresh）。アクティブなスクリーンの内側スクロール用
 function initPullToRefresh(){
   let startY=0,active=false,triggered=false;
   const indicator=document.createElement('div');
   indicator.className='ptr-indicator';
   indicator.textContent='↓ 引き下げて更新';
   document.body.appendChild(indicator);
+  function getActiveScreen(){return document.querySelector('.screen.active');}
   document.addEventListener('touchstart',e=>{
-    if(window.scrollY>0||e.touches.length!==1){active=false;return;}
+    const sc=getActiveScreen();
+    if(!sc||sc.scrollTop>0||e.touches.length!==1){active=false;return;}
+    // モーダルが開いている時はスキップ
+    if(document.querySelector('.modal-bg.active, .detail-fullscreen.active')){active=false;return;}
     startY=e.touches[0].clientY;active=true;triggered=false;
   },{passive:true});
   document.addEventListener('touchmove',e=>{
