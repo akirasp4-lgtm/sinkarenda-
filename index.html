@@ -214,6 +214,54 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   .cal-header-cell{font-size:13px;padding:6px 0}
   .week-table th,.week-table td{font-size:13px}
 }
+/* スマホ最適化: フォント・タップ領域を大きく */
+@media (max-width:600px){
+  .btn,.btn-secondary{min-height:46px;font-size:15px}
+  .btn-sm{min-height:38px;font-size:14px;padding:8px 12px}
+  label{font-size:14px}
+  input:not([type="checkbox"]),select,textarea{font-size:16px;padding:12px 14px;min-height:46px}
+  .tab{padding:10px 0 7px}
+  .tab-icon{font-size:24px}
+  .tab{font-size:11px}
+  .toggle-row{padding:14px 12px;font-size:15px}
+  .member-chip{padding:10px 14px;font-size:14px;min-height:40px;display:inline-flex;align-items:center}
+  .company-chip{padding:8px 14px;font-size:14px}
+  .yotei-card-min{padding:10px 14px}
+  .yotei-card-min .yotei-card-title{font-size:15px}
+  .yotei-card-min .yotei-members .member-tag{padding:3px 10px;font-size:12px}
+  .help-btn-inline{height:34px;font-size:13px;padding:0 14px}
+  /* 引き下げて更新インジケーター */
+  .ptr-indicator{position:fixed;top:0;left:0;right:0;text-align:center;font-size:13px;color:#1D9E75;background:#fff;padding:8px;z-index:200;transform:translateY(-100%);transition:transform 0.2s;font-weight:600}
+  .ptr-indicator.show{transform:translateY(0)}
+}
+/* スマホ専用: 空き確認・車確認をリスト表示に切替 */
+.list-mode{display:none}
+.tbl-mode{display:block}
+@media (max-width:600px){
+  .list-mode{display:block}
+  .tbl-mode{display:none}
+}
+.day-block{background:#fff;border-radius:12px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.08)}
+.day-block-header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;border-bottom:1px solid #eee;padding-bottom:6px}
+.day-block-date{font-size:16px;font-weight:700;color:#1a1a1a}
+.day-block-date.sun{color:#CC0000}
+.day-block-date.sat{color:#0000CC}
+.day-block-count{font-size:12px;color:#666}
+.day-row{display:flex;justify-content:space-between;align-items:center;padding:8px 4px;border-bottom:1px solid #f5f5f5;gap:12px}
+.day-row:last-child{border-bottom:none}
+.day-row-main{flex:1;min-width:0;font-size:14px;font-weight:500;color:#1a1a1a}
+.day-row-sub{font-size:12px;color:#666;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.day-row-status{font-size:12px;font-weight:600;padding:3px 10px;border-radius:10px;flex-shrink:0}
+.status-busy{background:#FAECE7;color:#993C1D}
+.status-free{background:#EAF3DE;color:#3B6D11}
+.status-yasumi{background:#FFF9E6;color:#8B7000}
+.status-souko{background:#F3EAE0;color:#8B5E3C}
+/* PWA インストールバナー */
+.install-banner{position:fixed;bottom:62px;left:8px;right:8px;background:#1D9E75;color:#fff;padding:10px 14px;border-radius:12px;font-size:13px;display:flex;align-items:center;gap:10px;box-shadow:0 4px 12px rgba(0,0,0,0.25);z-index:90;display:none}
+.install-banner.show{display:flex}
+.install-banner .ib-text{flex:1;line-height:1.4}
+.install-banner button{background:#fff;color:#1D9E75;border:none;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}
+.install-banner .ib-close{background:transparent;color:#fff;padding:4px 8px}
 </style>
 </head>
 <body>
@@ -279,7 +327,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     </div>
   </div>
   <div class="member-section"><div class="member-label">同行メンバー（タップで選択）</div><div id="member-selector" class="member-grid"></div></div>
-  <label>メモ</label><textarea id="s-memo" placeholder="作業内容など"></textarea>
+  <label>メモ <span style="font-size:11px;color:#999;font-weight:400">🎤 キーボードのマイクで音声入力できます</span></label>
+  <textarea id="s-memo" placeholder="作業内容など"></textarea>
   <label>カレンダーの色</label>
   <div id="s-color-picker" class="color-picker-wrap"></div>
   <div id="s-alert" class="alert"></div>
@@ -325,6 +374,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   </div>
   <div class="detail-fs-body" id="detail-fs-body"></div>
   <div class="detail-fs-footer">
+    <button class="btn btn-secondary btn-sm" onclick="shareFromDetail()">📤 共有</button>
     <button class="btn btn-secondary btn-sm" onclick="copyFromDetail()">コピー</button>
     <button class="btn btn-sm" onclick="editFromDetail()">編集</button>
   </div>
@@ -337,15 +387,18 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <span id="avail-week-label" style="font-size:15px;font-weight:600;min-width:180px;text-align:center"></span>
   <button class="btn btn-secondary btn-sm" onclick="changeAvailWeek(1)">▶</button>
 </div>
-<div class="card" style="overflow-x:auto">
-  <div id="avail-weekly" style="min-width:600px"></div>
-  <div style="display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:#999;margin-top:8px">
-    <span><span style="display:inline-block;width:10px;height:10px;background:#EAF3DE;border:1px solid #97C459;border-radius:2px;margin-right:3px"></span>空き</span>
-    <span><span style="display:inline-block;width:10px;height:10px;background:#FAECE7;border:1px solid #F0997B;border-radius:2px;margin-right:3px"></span>出勤</span>
-    <span><span style="display:inline-block;width:10px;height:10px;background:#FFF9E6;border:1px solid #F0D860;border-radius:2px;margin-right:3px"></span>休み</span>
-    <span><span style="display:inline-block;width:10px;height:10px;background:#F3EAE0;border:1px solid #C49A6C;border-radius:2px;margin-right:3px"></span>倉庫</span>
+<div class="tbl-mode">
+  <div class="card" style="overflow-x:auto">
+    <div id="avail-weekly" style="min-width:600px"></div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:#999;margin-top:8px">
+      <span><span style="display:inline-block;width:10px;height:10px;background:#EAF3DE;border:1px solid #97C459;border-radius:2px;margin-right:3px"></span>空き</span>
+      <span><span style="display:inline-block;width:10px;height:10px;background:#FAECE7;border:1px solid #F0997B;border-radius:2px;margin-right:3px"></span>出勤</span>
+      <span><span style="display:inline-block;width:10px;height:10px;background:#FFF9E6;border:1px solid #F0D860;border-radius:2px;margin-right:3px"></span>休み</span>
+      <span><span style="display:inline-block;width:10px;height:10px;background:#F3EAE0;border:1px solid #C49A6C;border-radius:2px;margin-right:3px"></span>倉庫</span>
+    </div>
   </div>
 </div>
+<div class="list-mode" id="avail-list"></div>
 <button class="btn btn-secondary" onclick="loadData()">更新</button>
 </div>
 
@@ -356,13 +409,16 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <span id="vehicle-week-label" style="font-size:15px;font-weight:600;min-width:180px;text-align:center"></span>
   <button class="btn btn-secondary btn-sm" onclick="changeVehicleWeek(1)">▶</button>
 </div>
-<div class="card" style="overflow-x:auto">
-  <div id="vehicle-weekly" style="min-width:600px"></div>
-  <div style="display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:#999;margin-top:8px">
-    <span><span style="display:inline-block;width:10px;height:10px;background:#EAF3DE;border:1px solid #97C459;border-radius:2px;margin-right:3px"></span>空き</span>
-    <span><span style="display:inline-block;width:10px;height:10px;background:#FAECE7;border:1px solid #F0997B;border-radius:2px;margin-right:3px"></span>予約済</span>
+<div class="tbl-mode">
+  <div class="card" style="overflow-x:auto">
+    <div id="vehicle-weekly" style="min-width:600px"></div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:#999;margin-top:8px">
+      <span><span style="display:inline-block;width:10px;height:10px;background:#EAF3DE;border:1px solid #97C459;border-radius:2px;margin-right:3px"></span>空き</span>
+      <span><span style="display:inline-block;width:10px;height:10px;background:#FAECE7;border:1px solid #F0997B;border-radius:2px;margin-right:3px"></span>予約済</span>
+    </div>
   </div>
 </div>
+<div class="list-mode" id="vehicle-list"></div>
 <button class="btn btn-secondary" onclick="loadData()">更新</button>
 </div>
 
@@ -587,6 +643,18 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <p style="color:#1D9E75">✓ 翌日のカレンダー・空き確認にも自動で「⏰前日から」表示（集計には影響なし）</p>
     <p style="color:#1D9E75">✓ 同日に昼勤+夜勤を別登録すると合計2人工（独立カウント）</p>
     <p style="color:#c00;font-size:12px;margin-top:6px">❌ よくあるミス: 作業日を翌日にしてしまう / 夜勤モードOFFのまま22:00→05:00入力 / 9-18のまま登録</p>
+  </div>
+
+  <div class="help-section">
+    <h3>📱 スマホ便利機能</h3>
+    <ul>
+      <li><b>引き下げて更新</b>: 画面を下に引っ張ると最新データを取り込みます</li>
+      <li><b>📤 共有</b>: 予定詳細から LINE・メール等へワンタップで送れます</li>
+      <li><b>🎤 音声入力</b>: メモ欄でキーボードのマイクボタンを押すと声で入力できます</li>
+      <li><b>📲 ホーム画面に追加</b>: アプリのように起動できます（バナーから／iPhoneは Safari の「共有」→「ホーム画面に追加」）</li>
+      <li><b>触覚フィードバック</b>: スワイプ・登録時に軽く振動します（対応端末のみ）</li>
+      <li><b>スマホ表示</b>: 空き確認・車確認はスマホでは見やすいリスト形式で自動表示</li>
+    </ul>
   </div>
 
   <div class="help-section">
@@ -881,6 +949,7 @@ function setMode(p,mode){
     if(el)el.classList.toggle('active',m===next);
   });
   applyYasumiLock(p,true);
+  hapticTap();
 }
 function applyMode(p,mode){
   modeState[p]=mode||'';
@@ -1083,7 +1152,9 @@ function switchTab(t){
   if(t==='genba')updateGmSelects();
   if(t==='list')renderList();
   if(t==='input')initColorPicker('s',selectedColor.s);
-  if(t==='vehicle'){if(!vehicleWeekStart)initVehicleWeek();renderVehicleWeek();}
+  if(t==='vehicle'){if(!vehicleWeekStart)initVehicleWeek();renderVehicleWeek();renderVehicleList();}
+  if(t==='avail')renderAvailList();
+  hapticTap();
 }
 
 function initMemberUI(){
@@ -1286,6 +1357,7 @@ async function submitNippo(){
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'add',rows}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'){
+      hapticSuccess();
       showAlert(`✓ ${dates.length}日×${members.length}人分を登録しました！（${currentCompany}）`,'ok');
       document.getElementById('s-genba').value='';document.getElementById('s-genba-select').value='';document.getElementById('s-genba').style.display='none';document.getElementById('s-location').value='';
       document.getElementById('s-memo').value='';document.getElementById('s-leader').value='';
@@ -1965,8 +2037,8 @@ async function deleteGmChecked(){
 // ========== 空き確認 ==========
 let availWeekStart=null;
 function getMonday(d){const dt=new Date(d);const day=dt.getDay();const diff=dt.getDate()-day+(day===0?-6:1);return new Date(dt.getFullYear(),dt.getMonth(),diff);}
-function initAvailWeek(){availWeekStart=getMonday(new Date());renderAvailWeek();}
-function changeAvailWeek(delta){availWeekStart=new Date(availWeekStart.getFullYear(),availWeekStart.getMonth(),availWeekStart.getDate()+delta*7);renderAvailWeek();}
+function initAvailWeek(){availWeekStart=getMonday(new Date());renderAvailWeek();renderAvailList();}
+function changeAvailWeek(delta){availWeekStart=new Date(availWeekStart.getFullYear(),availWeekStart.getMonth(),availWeekStart.getDate()+delta*7);renderAvailWeek();renderAvailList();hapticTap();}
 
 function renderAvailWeek(){
   const days=[];
@@ -1996,12 +2068,88 @@ function renderAvailWeek(){
   document.getElementById('avail-weekly').innerHTML=html;
 }
 
-function updateAvailability(){renderAvailWeek();if(vehicleWeekStart)renderVehicleWeek();}
+function updateAvailability(){renderAvailWeek();renderAvailList();if(vehicleWeekStart)renderVehicleWeek();renderVehicleList();}
+
+// スマホ用: 空き確認をリスト形式で表示
+function renderAvailList(){
+  if(!availWeekStart)return;
+  const el=document.getElementById('avail-list');if(!el)return;
+  const days=[];
+  for(let i=0;i<7;i++){
+    const d=new Date(availWeekStart.getFullYear(),availWeekStart.getMonth(),availWeekStart.getDate()+i);
+    days.push({date:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),m:d.getMonth()+1,dd:d.getDate(),dow:d.getDay()});
+  }
+  const dayNames=['日','月','火','水','木','金','土'];
+  const cn=filteredNippos();const shokunin=getShokunin();
+  let html='';
+  days.forEach(d=>{
+    const buckets={busy:[],yasumi:[],souko:[],free:[]};
+    shokunin.forEach(name=>{
+      const e=cn.find(n=>n.name===name&&n.date===d.date);
+      if(!e)buckets.free.push(name);
+      else if(e.yasumi)buckets.yasumi.push(name);
+      else if(e.souko)buckets.souko.push(name);
+      else buckets.busy.push(name);
+    });
+    const dowCls=d.dow===0?' sun':d.dow===6?' sat':'';
+    const totalBusy=buckets.busy.length+buckets.yasumi.length+buckets.souko.length;
+    html+=`<div class="day-block"><div class="day-block-header"><div class="day-block-date${dowCls}">${d.m}/${d.dd}（${dayNames[d.dow]}）</div><div class="day-block-count">${totalBusy} / ${shokunin.length} 人</div></div>`;
+    const rows=[];
+    if(buckets.busy.length>0)rows.push({label:'出勤',cls:'status-busy',names:buckets.busy});
+    if(buckets.yasumi.length>0)rows.push({label:'休み',cls:'status-yasumi',names:buckets.yasumi});
+    if(buckets.souko.length>0)rows.push({label:'倉庫',cls:'status-souko',names:buckets.souko});
+    if(buckets.free.length>0)rows.push({label:'空き',cls:'status-free',names:buckets.free});
+    rows.forEach(r=>{
+      html+=`<div class="day-row"><div class="day-row-main">${r.names.map(esc).join('、')}</div><div class="day-row-status ${r.cls}">${r.label} ${r.names.length}</div></div>`;
+    });
+    html+='</div>';
+  });
+  el.innerHTML=html;
+}
+
+// スマホ用: 車確認をリスト形式で表示
+function renderVehicleList(){
+  if(!vehicleWeekStart)return;
+  const el=document.getElementById('vehicle-list');if(!el)return;
+  const days=[];
+  for(let i=0;i<7;i++){
+    const d=new Date(vehicleWeekStart.getFullYear(),vehicleWeekStart.getMonth(),vehicleWeekStart.getDate()+i);
+    days.push({date:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),m:d.getMonth()+1,dd:d.getDate(),dow:d.getDay()});
+  }
+  const dayNames=['日','月','火','水','木','金','土'];
+  const cn=(allNippos||[]).filter(n=>!n.isGhost&&n.vehicle);
+  let html='';
+  days.forEach(d=>{
+    // この日の予約をグループ化
+    const dayEntries=cn.filter(n=>n.date===d.date);
+    const byKey={};
+    dayEntries.forEach(e=>{const key=(e.id||'')+'__'+e.vehicle;if(!byKey[key])byKey[key]={vehicle:e.vehicle,leader:'',members:[],genba:e.genba,loc:e.loc};
+      if(e.role==='代表')byKey[key].leader=e.name;
+      byKey[key].members.push(e.name);
+    });
+    const groups=Object.values(byKey);
+    const dowCls=d.dow===0?' sun':d.dow===6?' sat':'';
+    const usedCount=new Set(groups.map(g=>g.vehicle)).size;
+    html+=`<div class="day-block"><div class="day-block-header"><div class="day-block-date${dowCls}">${d.m}/${d.dd}（${dayNames[d.dow]}）</div><div class="day-block-count">${usedCount} / ${VEHICLES.length} 台</div></div>`;
+    if(groups.length===0){
+      html+='<div class="day-row" style="color:#999;font-size:13px">予約なし</div>';
+    }else{
+      groups.sort((a,b)=>VEHICLES.findIndex(v=>v.name===a.vehicle)-VEHICLES.findIndex(v=>v.name===b.vehicle));
+      groups.forEach(g=>{
+        const rep=g.leader||(g.members[0]||'');
+        const dest=g.loc||g.genba||'';
+        html+=`<div class="day-row"><div class="day-row-main">🚗 ${esc(g.vehicle)}<div class="day-row-sub">${esc(rep)}${dest?' / '+esc(dest):''}</div></div><div class="day-row-status status-busy">予約</div></div>`;
+      });
+    }
+    html+='</div>';
+  });
+  el.innerHTML=html;
+}
 
 // ========== 車確認 ==========
 let vehicleWeekStart=null;
 function initVehicleWeek(){vehicleWeekStart=getMonday(new Date());}
-function changeVehicleWeek(delta){if(!vehicleWeekStart)initVehicleWeek();vehicleWeekStart=new Date(vehicleWeekStart.getFullYear(),vehicleWeekStart.getMonth(),vehicleWeekStart.getDate()+delta*7);renderVehicleWeek();}
+function changeVehicleWeek(delta){if(!vehicleWeekStart)initVehicleWeek();vehicleWeekStart=new Date(vehicleWeekStart.getFullYear(),vehicleWeekStart.getMonth(),vehicleWeekStart.getDate()+delta*7);renderVehicleWeek();renderVehicleList();hapticTap();}
 function renderVehicleWeek(){
   if(!vehicleWeekStart)return;
   const days=[];
@@ -2373,8 +2521,106 @@ function shiftCalDay(delta){
   openCalDay(next);
 }
 
+// ========== モバイル便利機能 ==========
+// ハプティック（短い振動）。iOS Safari は無視するが Chrome 等で発火
+function hapticTap(){try{if(navigator.vibrate)navigator.vibrate(8);}catch(e){}}
+function hapticSuccess(){try{if(navigator.vibrate)navigator.vibrate([10,40,15]);}catch(e){}}
+
+// 引き下げて更新（pull-to-refresh）
+function initPullToRefresh(){
+  let startY=0,active=false,triggered=false;
+  const indicator=document.createElement('div');
+  indicator.className='ptr-indicator';
+  indicator.textContent='↓ 引き下げて更新';
+  document.body.appendChild(indicator);
+  document.addEventListener('touchstart',e=>{
+    if(window.scrollY>0||e.touches.length!==1){active=false;return;}
+    startY=e.touches[0].clientY;active=true;triggered=false;
+  },{passive:true});
+  document.addEventListener('touchmove',e=>{
+    if(!active)return;
+    const dy=e.touches[0].clientY-startY;
+    if(dy>80){indicator.classList.add('show');indicator.textContent='✓ 離して更新';triggered=true;}
+    else if(dy>30){indicator.classList.add('show');indicator.textContent='↓ 引き下げて更新';}
+    else{indicator.classList.remove('show');}
+  },{passive:true});
+  document.addEventListener('touchend',()=>{
+    if(active&&triggered){indicator.textContent='🔄 更新中…';hapticSuccess();loadData().then(()=>{setTimeout(()=>indicator.classList.remove('show'),400);}).catch(()=>indicator.classList.remove('show'));}
+    else{indicator.classList.remove('show');}
+    active=false;triggered=false;
+  });
+}
+
+// PWAインストールバナー
+let deferredInstallPrompt=null;
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstallPrompt=e;showInstallBanner();});
+function isStandaloneInstalled(){return window.matchMedia('(display-mode: standalone)').matches||window.navigator.standalone===true;}
+function showInstallBanner(){
+  if(isStandaloneInstalled())return;
+  try{if(localStorage.getItem('install-banner-dismissed-v1')==='1')return;}catch(e){}
+  let b=document.getElementById('install-banner');
+  if(!b){
+    b=document.createElement('div');b.id='install-banner';b.className='install-banner';
+    const isIOS=/iPhone|iPad|iPod/.test(navigator.userAgent);
+    if(isIOS){
+      b.innerHTML='<div class="ib-text">📲 ホーム画面に追加すると<br>アプリのように使えます<br><span style="font-size:11px;opacity:0.9">Safari下部の<b>共有</b>→<b>ホーム画面に追加</b></span></div><button class="ib-close" onclick="dismissInstallBanner()">×</button>';
+    }else{
+      b.innerHTML='<div class="ib-text">📲 ホーム画面に追加すると<br>アプリのように使えます</div><button onclick="acceptInstall()">追加</button><button class="ib-close" onclick="dismissInstallBanner()">×</button>';
+    }
+    document.body.appendChild(b);
+  }
+  b.classList.add('show');
+}
+function acceptInstall(){
+  if(!deferredInstallPrompt){dismissInstallBanner();return;}
+  deferredInstallPrompt.prompt();
+  deferredInstallPrompt.userChoice.finally(()=>{deferredInstallPrompt=null;dismissInstallBanner();});
+}
+function dismissInstallBanner(){
+  const b=document.getElementById('install-banner');if(b)b.classList.remove('show');
+  try{localStorage.setItem('install-banner-dismissed-v1','1');}catch(e){}
+}
+// iOSは beforeinstallprompt 非対応なので、Safari + 非インストール時に手動で案内
+if(/iPhone|iPad|iPod/.test(navigator.userAgent)&&!isStandaloneInstalled()){
+  setTimeout(showInstallBanner,3000);
+}
+
+// 共有（Web Share API）。未対応端末はクリップボードへコピー
+async function shareGroup(g){
+  if(!g)return;
+  const lp=g.date.split('-').map(Number);
+  const DOW=['日','月','火','水','木','金','土'];
+  const dt=new Date(lp[0],lp[1]-1,lp[2]);
+  const dateStr=`${lp[0]}年${lp[1]}月${lp[2]}日(${DOW[dt.getDay()]})`;
+  const leader=g.members.find(m=>m.role==='代表');
+  const fellows=g.members.filter(m=>m.role==='同行');
+  const memberLine=(leader?leader.name+'（代表）':'')+(fellows.length?'、'+fellows.map(m=>m.name).join('、'):'');
+  const lines=[];
+  lines.push(`【${dateStr} の予定】`);
+  if(g.yasumi)lines.push('🏖️ 休み');
+  else if(g.souko)lines.push('🏭 倉庫');
+  else{
+    if(g.genba)lines.push(`元請: ${g.genba}`);
+    if(g.loc)lines.push(`現場: ${g.loc}`);
+    if(g.start||g.end)lines.push(`時間: ${g.start||''}〜${g.end||''}`);
+  }
+  if(memberLine)lines.push(`メンバー: ${memberLine}`);
+  if(g.vehicle)lines.push(`🚗 車両: ${g.vehicle}`);
+  if(g.memo)lines.push(`メモ: ${g.memo}`);
+  const text=lines.join('\n');
+  try{
+    if(navigator.share){await navigator.share({title:'予定',text});hapticTap();}
+    else{await navigator.clipboard.writeText(text);showAlert('クリップボードにコピーしました','ok');}
+  }catch(e){}
+}
+function shareFromDetail(){
+  let g=detailGroups[detailIdx];if(!g)return;
+  if(g.isGhost){const orig=findOriginalGroup(g.originalId);if(orig)g=orig;}
+  shareGroup(g);
+}
+
 // ========== 初期化 ==========
-initCompanyBar();initSelects();initAvailWeek();initVehicleWeek();initUsername();initColorPicker('s');renderList();initCalSwipe();
+initCompanyBar();initSelects();initAvailWeek();initVehicleWeek();initUsername();initColorPicker('s');renderList();initCalSwipe();initPullToRefresh();
 // 会社が未設定の場合は会社選択ピッカーを表示し、データロードはスキップ
 if(needsCompanyPicker)showCompanyPicker();
 else loadData();
