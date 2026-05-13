@@ -529,6 +529,11 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="archive-desc" style="color:#991B1B">休み・倉庫・予定モードのレコードに残っている工番・事業部をクリアします（旧仕様時代のデータ清掃用）。</div>
   <button class="btn btn-secondary btn-sm" onclick="runJobNoCleanup()">休み・倉庫・予定の工番をクリア</button>
 </div>
+<div class="archive-section" style="background:#EFF6FF;border-color:#93C5FD;margin-top:8px">
+  <div class="archive-title" style="color:#1E3A8A">🔀 元請名を統合（マージ）</div>
+  <div class="archive-desc" style="color:#1E3A8A">同じ会社が違う名前で登録されてしまった場合に、片方を残してもう片方のレコードを統合します。日報・アーカイブ・現場マスタ・元請マスタ全部を一括書き換え。</div>
+  <button class="btn btn-secondary btn-sm" onclick="openMergeGenbaModal()">元請名をマージする</button>
+</div>
 <div class="archive-section" style="background:#E8F4FD;border-color:#85B7EB">
   <div class="archive-title" style="color:#0C447C">📊 スプレッドシート集計</div>
   <div class="archive-desc" style="color:#0C447C">会社別・月別の出勤日数・人工をスプレッドシートに自動集計します。毎朝6時にも自動更新されます。</div>
@@ -681,11 +686,23 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 
   <div class="help-section">
     <h3>🧹 おかしい工番をクリア</h3>
-    <p>事務タブの赤いボタン。<b>休み・倉庫・予定</b>モードのレコードに残っている <b>工番・事業部</b> を一括クリアします。</p>
+    <p>事務タブの赤いボタン。<b>休み・倉庫・予定</b>モードや「現場作業以外」のレコードに残っている <b>工番・事業部</b> を一括クリアします。</p>
     <ul>
       <li>仕様変更以前に登録された「休み なのに工番がついている」レコードを清掃</li>
       <li>新規登録時は既に空のまま保存されているため、通常は1回実行すれば十分</li>
       <li>クリア後は <b>「集計を更新」</b> で集計シートを再計算してください</li>
+    </ul>
+  </div>
+
+  <div class="help-section">
+    <h3>🔀 元請名をマージ</h3>
+    <p>事務タブの青いボタン。同じ会社が違う名前で登録されてしまった場合に、片方を残してもう片方のレコードを統合します。</p>
+    <ul>
+      <li>例: 「グローライズ」と「グローライズ自社」を「グローライズ自社」に統合</li>
+      <li><b>統合する元請</b>（消える方）と <b>残す元請</b>（こちらに統一）を選んで実行</li>
+      <li>日報・アーカイブ・現場マスタ・元請マスタ <b>全部を一括書き換え</b></li>
+      <li><b>取り消し不可</b>なので、本当に同じ元請の重複登録か確認してから実行</li>
+      <li>影響範囲（何件書き換わるか）はプレビューで確認できます</li>
     </ul>
   </div>
 
@@ -836,6 +853,27 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   </div>
   <div id="jobno-fix-list" style="margin-bottom:16px;max-height:60vh;overflow-y:auto"></div>
   <button class="btn btn-secondary" style="width:100%" onclick="document.getElementById('jobno-fix-modal').classList.remove('active')">閉じる</button>
+</div>
+</div>
+
+<div id="merge-genba-modal" class="modal-bg">
+<div class="modal" style="max-width:480px">
+  <div class="modal-title">🔀 元請名をマージ</div>
+  <p style="margin:0 0 12px;font-size:12px;color:#666">「統合する元請」のレコードを「残す元請」の名前に書き換えます。日報・アーカイブ・現場マスタ・元請マスタ全部一括で書き換えます。<b>この操作は取り消せません。</b></p>
+  <label style="font-size:13px;color:#666">統合する元請（消える方）</label>
+  <select id="merge-from" style="margin-bottom:10px">
+    <option value="">選択してください</option>
+  </select>
+  <label style="font-size:13px;color:#666">↓ こちらに統合</label>
+  <label style="font-size:13px;color:#666">残す元請（こちらに統一）</label>
+  <select id="merge-to" style="margin-bottom:10px">
+    <option value="">選択してください</option>
+  </select>
+  <div id="merge-preview" style="font-size:12px;color:#666;background:#F3F4F6;padding:8px 10px;border-radius:6px;margin-bottom:12px;display:none"></div>
+  <div style="display:flex;gap:8px">
+    <button class="btn btn-secondary btn-sm" style="flex:1" onclick="document.getElementById('merge-genba-modal').classList.remove('active')">キャンセル</button>
+    <button class="btn btn-sm" style="flex:1;background:#1E3A8A;color:#fff" onclick="runMergeGenba()">マージ実行</button>
+  </div>
 </div>
 </div>
 
@@ -2295,6 +2333,55 @@ async function runJobNoCleanup(){
     const json=await res.json();
     if(json.status==='ok'){
       alert(`✓ ${json.cleaned}件の工番・事業部をクリアしました`);
+      await loadData();
+    }else alert('エラー: '+json.message);
+  }catch(e){alert('エラー: '+e.message);}
+  finally{setLoading(false);}
+}
+
+// ===== 元請マージ =====
+function openMergeGenbaModal(){
+  // 全社の全元請を取得
+  const genbas=[...new Set((allNippos||[]).filter(n=>!n.isGhost).map(n=>n.genba).filter(Boolean).concat(allGenbaMaster.map(g=>g.name)))].sort();
+  const fromSel=document.getElementById('merge-from');
+  const toSel=document.getElementById('merge-to');
+  if(fromSel){
+    fromSel.innerHTML='<option value="">選択してください</option>'+genbas.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('');
+    fromSel.onchange=updateMergePreview;
+  }
+  if(toSel){
+    toSel.innerHTML='<option value="">選択してください</option>'+genbas.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('');
+    toSel.onchange=updateMergePreview;
+  }
+  document.getElementById('merge-preview').style.display='none';
+  document.getElementById('merge-genba-modal').classList.add('active');
+}
+
+function updateMergePreview(){
+  const from=document.getElementById('merge-from').value;
+  const to=document.getElementById('merge-to').value;
+  const prev=document.getElementById('merge-preview');
+  if(!from||!to){prev.style.display='none';return;}
+  if(from===to){prev.style.display='';prev.innerHTML='<span style="color:#dc2626">⚠️ 同じ元請名を選んでます</span>';return;}
+  // Count records that will be affected
+  const fromCount=(allNippos||[]).filter(n=>!n.isGhost&&n.genba===from).length;
+  prev.style.display='';
+  prev.innerHTML=`📊 影響範囲（プレビュー）<br>「${esc(from)}」の日報 約 <b>${fromCount}</b> 件が「${esc(to)}」に書き換えられます。`;
+}
+
+async function runMergeGenba(){
+  const from=document.getElementById('merge-from').value;
+  const to=document.getElementById('merge-to').value;
+  if(!from||!to){alert('「統合する元請」と「残す元請」両方を選んでください');return;}
+  if(from===to){alert('同じ元請名です');return;}
+  if(!confirm(`本当に統合しますか？\n\n「${from}」→「${to}」\n\nこの操作は取り消せません。`))return;
+  try{
+    setLoading(true);
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'merge_genba',from,to,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){
+      alert(`✓ マージ完了\n\n日報更新: ${json.nippoUpdated||0}件\nアーカイブ更新: ${json.archiveUpdated||0}件\n現場マスタ更新: ${json.jobsiteUpdated||0}件\n元請マスタ: ${json.masterAction||'-'}`);
+      document.getElementById('merge-genba-modal').classList.remove('active');
       await loadData();
     }else alert('エラー: '+json.message);
   }catch(e){alert('エラー: '+e.message);}
