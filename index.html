@@ -285,6 +285,18 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <div><label>開始日<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label><input type="date" id="s-date" onchange="refreshVehicleSelect('s')"></div>
     <div><label>終了日（連続入力）</label><input type="date" id="s-date-end" onchange="refreshVehicleSelect('s')"></div>
   </div>
+  <label>作業区分<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
+  <select id="s-work-type" onchange="applyWorkTypeLock('s')">
+    <option value="">▼ まず作業区分を選んでください</option>
+    <option value="現場作業">⛑️ 現場作業（工番発行）</option>
+    <option value="現調">📐 現調</option>
+    <option value="着打ち">🔨 着打ち</option>
+    <option value="カギ借用">🗝️ カギ借用</option>
+    <option value="材料引き取り">📦 材料引き取り</option>
+    <option value="撤去品返却">♻️ 撤去品返却</option>
+    <option value="その他">📋 その他</option>
+  </select>
+  <div id="s-worktype-notice" style="color:#dc2626;font-size:13px;font-weight:600;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:8px 12px;margin-bottom:12px">⚠️ 最初に「作業区分」を選択してください。選択するまで以下の項目は入力できません。</div>
   <label>元請名<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
   <div class="select-add-wrap">
     <select id="s-genba-select" onchange="onGenbaSelect('s')"><option value="">選択してください</option><option value="__manual__">直接入力する</option></select>
@@ -294,16 +306,6 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <label>現場名</label>
   <input type="text" id="s-location" list="s-location-list" placeholder="例：〇〇ビル新築工事" oninput="checkLocationJobNo()">
   <datalist id="s-location-list"></datalist>
-  <label>作業区分</label>
-  <select id="s-work-type">
-    <option value="現場作業">現場作業</option>
-    <option value="現調">現調</option>
-    <option value="着打ち">着打ち</option>
-    <option value="カギ借用">カギ借用</option>
-    <option value="材料引き取り">材料引き取り</option>
-    <option value="撤去品返却">撤去品返却</option>
-    <option value="その他">その他</option>
-  </select>
   <div id="s-vehicle-wrap">
     <label>🚗 車両</label>
     <select id="s-vehicle"><option value="">使用しない</option></select>
@@ -536,21 +538,23 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <div id="edit-modal" class="modal-bg">
 <div class="modal">
   <div class="modal-title" id="edit-title">編集</div>
+  <label>作業区分<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
+  <select id="e-work-type" onchange="applyWorkTypeLock('e')">
+    <option value="">▼ まず作業区分を選んでください</option>
+    <option value="現場作業">⛑️ 現場作業（工番発行）</option>
+    <option value="現調">📐 現調</option>
+    <option value="着打ち">🔨 着打ち</option>
+    <option value="カギ借用">🗝️ カギ借用</option>
+    <option value="材料引き取り">📦 材料引き取り</option>
+    <option value="撤去品返却">♻️ 撤去品返却</option>
+    <option value="その他">📋 その他</option>
+  </select>
+  <div id="e-worktype-notice" style="display:none;color:#dc2626;font-size:13px;font-weight:600;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:8px 12px;margin-bottom:12px">⚠️ 最初に「作業区分」を選択してください。選択するまで以下の項目は編集できません。</div>
   <label>元請名</label>
   <select id="e-genba-select" onchange="onGenbaSelect('e')"><option value="">選択してください</option><option value="__manual__">直接入力する</option></select>
   <input type="text" id="e-genba" style="display:none;margin-bottom:12px">
   <label>現場名</label><input type="text" id="e-location" list="e-location-list">
   <datalist id="e-location-list"></datalist>
-  <label>作業区分</label>
-  <select id="e-work-type">
-    <option value="現場作業">現場作業</option>
-    <option value="現調">現調</option>
-    <option value="着打ち">着打ち</option>
-    <option value="カギ借用">カギ借用</option>
-    <option value="材料引き取り">材料引き取り</option>
-    <option value="撤去品返却">撤去品返却</option>
-    <option value="その他">その他</option>
-  </select>
   <div id="e-vehicle-wrap">
     <label>🚗 車両</label>
     <select id="e-vehicle"><option value="">使用しない</option></select>
@@ -986,8 +990,9 @@ function applyMode(p,mode){
 // 休み/倉庫モード時は入力欄を無効化。clearValues=true なら入力済みの値もクリア（ユーザーがトグルを押した時）
 function applyYasumiLock(p,clearValues){
   const isLocked=modeState[p]==='yasumi'||modeState[p]==='souko';
+  // 作業区分（work-type）はゲートのため、ここではロックしない
   const fieldIds=[
-    p+'-genba-select',p+'-genba',p+'-location',p+'-work-type',
+    p+'-genba-select',p+'-genba',p+'-location',
     p+'-start',p+'-end',p+'-memo',p+'-vehicle'
   ];
   fieldIds.forEach(id=>{
@@ -1022,6 +1027,54 @@ function applyYasumiLock(p,clearValues){
     const divWrap=document.getElementById(p+'-jobno-div-wrap');
     if(divWrap)divWrap.style.display='none';
   }
+}
+
+// 作業区分が空白の時、以下の入力欄を全部ロックする（ゲート機構）
+function applyWorkTypeLock(p){
+  const wt=document.getElementById(p+'-work-type');
+  const isEmpty=!wt||!wt.value;
+  const notice=document.getElementById(p+'-worktype-notice');
+  if(notice)notice.style.display=isEmpty?'':'none';
+  const fieldIds=[
+    p+'-genba-select',p+'-genba',p+'-location',
+    p+'-vehicle',p+'-start',p+'-end',
+    p+'-leader',p+'-memo'
+  ];
+  fieldIds.forEach(id=>{
+    const el=document.getElementById(id);
+    if(!el)return;
+    if(isEmpty){
+      el.disabled=true;
+      el.style.opacity='0.45';
+      el.style.cursor='not-allowed';
+    }else{
+      el.disabled=false;
+      el.style.opacity='';
+      el.style.cursor='';
+    }
+  });
+  ['souko','yakin','yasumi','yotei'].forEach(m=>{
+    const el=document.getElementById(p+'-'+m+'-toggle');
+    if(!el)return;
+    el.style.pointerEvents=isEmpty?'none':'';
+    el.style.opacity=isEmpty?'0.45':'';
+  });
+  const memberWrap=document.getElementById(p==='s'?'member-selector':'e-member-selector');
+  if(memberWrap){
+    memberWrap.style.pointerEvents=isEmpty?'none':'';
+    memberWrap.style.opacity=isEmpty?'0.45':'';
+  }
+  const cp=document.getElementById(p+'-color-picker');
+  if(cp){
+    cp.style.pointerEvents=isEmpty?'none':'';
+    cp.style.opacity=isEmpty?'0.45':'';
+  }
+  if(p==='s'){
+    const btn=document.getElementById('submit-btn');
+    if(btn)btn.disabled=isEmpty||currentCompany==='全社';
+  }
+  // 選択された場合は休み/倉庫モードのロックを再適用
+  if(!isEmpty)applyYasumiLock(p,false);
 }
 
 // 車両セレクタ: 指定日に他の予定で使用中の車両は disabled で表示する
@@ -1322,6 +1375,8 @@ async function submitNippo(){
   const yotei=mode==='yotei';
   const effectiveKosu=yasumi?0:kosu;
   if(!dateStart){showAlert('開始日は必須です','err');return;}
+  const _wtVal=(document.getElementById('s-work-type')||{}).value||'';
+  if(!_wtVal){showAlert('作業区分を選択してください','err');return;}
   if(!yasumi && !souko && !genba){showAlert('元請名は必須です（休み・倉庫モード時は不要）','err');return;}
   if(!leader){showAlert('代表者を選択してください','err');return;}
   // 異常値検出
@@ -1394,6 +1449,8 @@ async function submitNippo(){
       document.getElementById('s-memo').value='';document.getElementById('s-leader').value='';
       document.getElementById('s-date-end').value='';
       const _v=document.getElementById('s-vehicle');if(_v)_v.value='';
+      const _wt=document.getElementById('s-work-type');if(_wt)_wt.value='';
+      applyWorkTypeLock('s');
       document.getElementById('s-jobno-hint').style.display='none';
       document.getElementById('s-jobno-div-wrap').style.display='none';
       const _jnSel=document.getElementById('s-jobno-division');if(_jnSel){delete _jnSel.dataset.userSet;_jnSel.value='ICT';}
@@ -1879,6 +1936,7 @@ function openEditModal(idx,groupsOverride){
   document.getElementById('e-end').value=g.end||'17:00';
   document.getElementById('e-memo').value=g.memo||'';
   const eWT=document.getElementById('e-work-type');if(eWT)eWT.value=g.workType||'現場作業';
+  applyWorkTypeLock('e');
   renderVehicleOptions('e-vehicle',[editDate],g.vehicle||'',editIds);
   document.getElementById('edit-title').textContent=`編集：${formatDate(g.date)} ${g.genba}`;
   const mode=g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'';
@@ -1908,6 +1966,8 @@ async function saveEdit(){
   const mode=modeState.e;
   const yasumi=mode==='yasumi';const yakin=mode==='yakin';const souko=mode==='souko';const yotei=mode==='yotei';
   const effectiveKosu=yasumi?0:kosu;
+  const _eWtVal=(document.getElementById('e-work-type')||{}).value||'';
+  if(!_eWtVal){alert('作業区分を選択してください');return;}
   if(!yasumi && !souko && !genba){alert('元請名は必須です（休み・倉庫モード時は不要）');return;}
   if(!leader){alert('代表者を選択してください');return;}
   if(!getUsername()){alert('編集者の名前が未設定です。右下の「変更」から名前を設定してください');openUsernameModal();return;}
@@ -2072,6 +2132,7 @@ function openBulkEditModal(){
   document.getElementById('e-end').value=g.end||'17:00';
   document.getElementById('e-memo').value=g.memo||'';
   const eWT=document.getElementById('e-work-type');if(eWT)eWT.value=g.workType||'現場作業';
+  applyWorkTypeLock('e');
   renderVehicleOptions('e-vehicle',editDates,g.vehicle||'',editIds);
   const dateLabels=targets.map(t=>formatDate(t.date)).join('、');
   document.getElementById('edit-title').textContent=`一括編集：${targets.length}日分（${dateLabels}）`;
@@ -2706,7 +2767,7 @@ function shareFromDetail(){
 }
 
 // ========== 初期化 ==========
-initCompanyBar();initSelects();initAvailWeek();initVehicleWeek();initUsername();initColorPicker('s');renderList();initCalSwipe();initPullToRefresh();
+initCompanyBar();initSelects();initAvailWeek();initVehicleWeek();initUsername();initColorPicker('s');renderList();initCalSwipe();initPullToRefresh();applyWorkTypeLock('s');
 // 会社が未設定の場合は会社選択ピッカーを表示し、データロードはスキップ
 if(needsCompanyPicker)showCompanyPicker();
 else loadData();
