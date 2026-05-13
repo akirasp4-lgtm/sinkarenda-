@@ -494,7 +494,9 @@ function renderCalendar(){
       const chip = document.createElement('div');
       chip.className = 'evt-chip';
       chip.style.background = ev.color || COLORS[0];
-      chip.textContent = (ev.startTime ? ev.startTime + ' ' : '') + ev.title;
+      // タイトルを優先表示（時刻はタップして詳細で確認）
+      chip.textContent = ev.title || (ev.startTime || '予定');
+      chip.title = (ev.startTime ? ev.startTime + ' ' : '') + (ev.title || '');
       list.appendChild(chip);
     });
     if (dayEvents.length > max) {
