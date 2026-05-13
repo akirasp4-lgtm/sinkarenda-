@@ -326,7 +326,12 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   </div>
   <input type="text" id="s-genba" placeholder="例：〇〇電気" style="display:none;margin-bottom:12px">
   <label>現場名</label>
-  <input type="text" id="s-location" list="s-location-list" placeholder="例：〇〇ビル新築工事" oninput="checkLocationJobNo()">
+  <select id="s-location-select" onchange="onLocationSelect('s')" style="margin-bottom:6px">
+    <option value="">既存の現場から選択</option>
+    <option value="__new__" style="color:#1D9E75;font-weight:600">＋ 新規現場として追加</option>
+  </select>
+  <input type="text" id="s-location" placeholder="例：〇〇ビル新築工事" oninput="onLocationInput('s')" style="display:none">
+  <div id="s-loc-similar" style="display:none;background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:8px 10px;margin-bottom:12px;font-size:13px;color:#92400E"></div>
   <datalist id="s-location-list"></datalist>
   <div id="s-vehicle-wrap">
     <label>🚗 車両</label>
@@ -585,7 +590,13 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <label>元請名</label>
   <select id="e-genba-select" onchange="onGenbaSelect('e')"><option value="">選択してください</option><option value="__manual__">直接入力する</option></select>
   <input type="text" id="e-genba" style="display:none;margin-bottom:12px">
-  <label>現場名</label><input type="text" id="e-location" list="e-location-list">
+  <label>現場名</label>
+  <select id="e-location-select" onchange="onLocationSelect('e')" style="margin-bottom:6px">
+    <option value="">既存の現場から選択</option>
+    <option value="__new__" style="color:#1D9E75;font-weight:600">＋ 新規現場として追加</option>
+  </select>
+  <input type="text" id="e-location" placeholder="新規現場名を入力" oninput="onLocationInput('e')" style="display:none">
+  <div id="e-loc-similar" style="display:none;background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:8px 10px;margin-bottom:12px;font-size:13px;color:#92400E"></div>
   <datalist id="e-location-list"></datalist>
   <div id="e-vehicle-wrap">
     <label>🚗 車両</label>
@@ -1237,7 +1248,7 @@ function applyMode(p,mode){
 function applyYasumiLock(p,clearValues){
   const isLocked=modeState[p]==='yasumi'||modeState[p]==='souko';
   // 作業区分はゲートのためここではロックしない
-  const fieldIds=[p+'-genba-select',p+'-genba',p+'-location',p+'-start',p+'-end',p+'-memo',p+'-vehicle'];
+  const fieldIds=[p+'-genba-select',p+'-genba',p+'-location',p+'-location-select',p+'-start',p+'-end',p+'-memo',p+'-vehicle'];
   fieldIds.forEach(id=>{
     const el=document.getElementById(id);
     if(!el)return;
@@ -1266,7 +1277,7 @@ function applyWorkTypeLock(p){
   const isEmpty=!wt||!wt.value;
   const notice=document.getElementById(p+'-worktype-notice');
   if(notice)notice.style.display=isEmpty?'':'none';
-  const fieldIds=[p+'-genba-select',p+'-genba',p+'-location',p+'-vehicle',p+'-start',p+'-end',p+'-leader',p+'-memo'];
+  const fieldIds=[p+'-genba-select',p+'-genba',p+'-location',p+'-location-select',p+'-vehicle',p+'-start',p+'-end',p+'-leader',p+'-memo'];
   fieldIds.forEach(id=>{
     const el=document.getElementById(id);
     if(!el)return;
@@ -1427,7 +1438,8 @@ async function loadData(){
 
 // ===== 現場名サジェスト =====
 function updateLocationSuggestions(){
-  // 入力フォーム用 (s-location-list)
+  populateLocationSelect('s');
+  populateLocationSelect('e');
   const dl=document.getElementById('s-location-list');
   if(dl){
     const genba=getGenbaValue('s');
@@ -1437,14 +1449,90 @@ function updateLocationSuggestions(){
     const locs=[...new Set(pool.filter(n=>n.loc).map(n=>n.loc))].sort();
     dl.innerHTML=locs.map(l=>`<option value="${esc(l)}">`).join('');
   }
-  // 編集モーダル用 (e-location-list)
-  const edl=document.getElementById('e-location-list');
-  if(edl){
-    let pool=allNippos;
-    if(currentCompany!=='全社')pool=pool.filter(n=>n.company===currentCompany);
-    const locs=[...new Set(pool.filter(n=>n.loc).map(n=>n.loc))].sort();
-    edl.innerHTML=locs.map(l=>`<option value="${esc(l)}">`).join('');
+}
+
+function populateLocationSelect(p){
+  const sel=document.getElementById(p+'-location-select');
+  if(!sel)return;
+  const genba=getGenbaValue(p);
+  let pool=(allNippos||[]).filter(n=>!n.isGhost);
+  if(currentCompany!=='全社')pool=pool.filter(n=>n.company===currentCompany);
+  if(genba)pool=pool.filter(n=>n.genba===genba);
+  const locs=[...new Set(pool.filter(n=>n.loc).map(n=>n.loc))].sort();
+  const currentVal=(document.getElementById(p+'-location')||{}).value||'';
+  const inList=locs.includes(currentVal);
+  let html='<option value="">既存の現場から選択</option>';
+  locs.forEach(l=>{html+=`<option value="${esc(l)}"${l===currentVal?' selected':''}>${esc(l)}</option>`;});
+  html+='<option value="__new__" style="color:#1D9E75;font-weight:600">＋ 新規現場として追加</option>';
+  sel.innerHTML=html;
+  const input=document.getElementById(p+'-location');
+  if(currentVal && !inList){
+    sel.value='__new__';
+    if(input)input.style.display='';
+  }else if(currentVal && inList){
+    if(input)input.style.display='none';
+  }else{
+    if(input){input.style.display='none';input.value='';}
   }
+}
+
+function onLocationSelect(p){
+  const sel=document.getElementById(p+'-location-select');
+  const input=document.getElementById(p+'-location');
+  const sim=document.getElementById(p+'-loc-similar');
+  if(!sel||!input)return;
+  if(sel.value==='__new__'){
+    input.style.display='';input.value='';input.focus();
+    if(sim){sim.style.display='none';sim.innerHTML='';}
+    showSimilarSuggest(p);
+  }else if(sel.value===''){
+    input.style.display='none';input.value='';
+    if(sim){sim.style.display='none';sim.innerHTML='';}
+  }else{
+    input.style.display='none';input.value=sel.value;
+    if(sim){sim.style.display='none';sim.innerHTML='';}
+    if(p==='s')checkLocationJobNo();
+  }
+}
+
+function onLocationInput(p){
+  if(p==='s')checkLocationJobNo();
+  showSimilarSuggest(p);
+}
+
+function showSimilarSuggest(p){
+  const input=document.getElementById(p+'-location');
+  const sim=document.getElementById(p+'-loc-similar');
+  if(!input||!sim)return;
+  const val=input.value.trim();
+  if(!val||val.length<2){sim.style.display='none';sim.innerHTML='';return;}
+  const genba=getGenbaValue(p);
+  let pool=(allNippos||[]).filter(n=>!n.isGhost&&n.loc);
+  if(currentCompany!=='全社')pool=pool.filter(n=>n.company===currentCompany);
+  if(genba)pool=pool.filter(n=>n.genba===genba);
+  const locs=[...new Set(pool.map(n=>n.loc))];
+  const matches=[];
+  locs.forEach(l=>{
+    if(l===val)return;
+    const lower1=l.toLowerCase(),lower2=val.toLowerCase();
+    if(lower1.includes(lower2)||lower2.includes(lower1))matches.push(l);
+  });
+  if(matches.length===0){sim.style.display='none';sim.innerHTML='';return;}
+  let html='<div style="font-weight:600;margin-bottom:4px">⚠️ 似ている既存の現場があります。同じ現場ならタップして選んでください:</div>';
+  matches.slice(0,5).forEach(m=>{
+    html+=`<button type="button" onclick="pickSimilarLoc('${p}','${esc(m).replace(/'/g,"&apos;")}')" style="display:block;width:100%;text-align:left;background:#fff;border:1px solid #FCD34D;border-radius:6px;padding:6px 10px;margin-top:4px;cursor:pointer;font-size:13px">📌 ${esc(m)}</button>`;
+  });
+  sim.innerHTML=html;sim.style.display='';
+}
+
+function pickSimilarLoc(p,loc){
+  const sel=document.getElementById(p+'-location-select');
+  const input=document.getElementById(p+'-location');
+  const sim=document.getElementById(p+'-loc-similar');
+  if(sel)sel.value=loc;
+  if(input){input.style.display='none';input.value=loc;}
+  if(sim){sim.style.display='none';sim.innerHTML='';}
+  if(p==='s')checkLocationJobNo();
 }
 function checkLocationJobNo(){
   const hint=document.getElementById('s-jobno-hint');const divWrap=document.getElementById('s-jobno-div-wrap');if(!hint)return;
@@ -1555,6 +1643,9 @@ async function submitNippo(){
       const _v=document.getElementById('s-vehicle');if(_v)_v.value='';
       const _wt=document.getElementById('s-work-type');if(_wt)_wt.value='';
       applyWorkTypeLock('s');
+      const _ls=document.getElementById('s-location-select');if(_ls)_ls.value='';
+      const _li=document.getElementById('s-location');if(_li){_li.value='';_li.style.display='none';}
+      const _lsim=document.getElementById('s-loc-similar');if(_lsim){_lsim.style.display='none';_lsim.innerHTML='';}
       const _jnSel=document.getElementById('s-jobno-division');if(_jnSel){delete _jnSel.dataset.userSet;_jnSel.value='ICT';}
       applyMode('s','');selectedMembers=[];renderMemberChips('member-selector',selectedMembers,toggleMember);
       await loadData();
@@ -1818,6 +1909,7 @@ function openEditModal(idx,groupsOverride){
   editIds=[...new Set(g.ids)];editDate=g.date;
   window._editIds=editIds;window._editDates=[editDate];
   setGenbaValue('e',g.genba);document.getElementById('e-location').value=g.loc||'';
+  populateLocationSelect('e');
   document.getElementById('e-start').value=g.start||'08:00';document.getElementById('e-end').value=g.end||'17:00';
   document.getElementById('e-memo').value=g.memo||'';
   const eWT=document.getElementById('e-work-type');if(eWT)eWT.value=g.workType||'現場作業';
@@ -1958,6 +2050,7 @@ function openBulkEditModal(){
   bulkEditMode=true;editIds=[...new Set(targets.flatMap(g=>g.ids))];editDates=targets.map(g=>g.date);
   window._editIds=editIds;window._editDates=editDates;
   const g=targets[0];setGenbaValue('e',g.genba);document.getElementById('e-location').value=g.loc||'';
+  populateLocationSelect('e');
   document.getElementById('e-start').value=g.start||'08:00';document.getElementById('e-end').value=g.end||'17:00';
   document.getElementById('e-memo').value=g.memo||'';
   const eWT=document.getElementById('e-work-type');if(eWT)eWT.value=g.workType||'現場作業';
@@ -2317,6 +2410,12 @@ function initGenbaSelects(){
 function onGenbaSelect(p){
   const sel=document.getElementById(p+'-genba-select');const inp=document.getElementById(p+'-genba');
   if(sel.value==='__manual__'){inp.style.display='';inp.value='';inp.focus();}else{inp.style.display='none';inp.value=sel.value;}
+  // 元請変更時に現場プルダウンを再populate
+  const locInput=document.getElementById(p+'-location');
+  const locSelect=document.getElementById(p+'-location-select');
+  if(locInput)locInput.value='';
+  if(locSelect)locSelect.value='';
+  populateLocationSelect(p);
   if(p==='s'){updateLocationSuggestions();checkLocationJobNo();}
 }
 function getGenbaValue(p){
