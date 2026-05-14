@@ -321,6 +321,53 @@ function doPost(e) {
       return ok({base64: result.base64, filename: '月別確認表.xlsx'});
     }
 
+    // 任意のシートを xlsx でエクスポート（CSV ダウンロードの置き換え）
+    // 日報データ／アーカイブで dateFrom/dateTo 指定があれば一時シートを作って絞り込んでからエクスポート
+    if (action === 'export_sheet_xlsx') {
+      const sheetName = body.sheet || '';
+      const allowed = [SHEET_NAME, ARCHIVE_SHEET, MEMBER_SHEET, GENBA_MASTER_SHEET, JOBSITE_SHEET, SUMMARY_COMPANY, SUMMARY_MONTH, KAKUNIN_SHEET, BILLING_SHEET, ALLOCATION_SHEET, OPLOG_SHEET];
+      if (!allowed.includes(sheetName)) return error('無効なシート名です');
+      const targetSheet = ss.getSheetByName(sheetName);
+      if (!targetSheet) return error('シートが見つかりません: ' + sheetName);
+
+      const dateFrom = String(body.dateFrom || '').trim();
+      const dateTo = String(body.dateTo || '').trim();
+      const canFilter = (sheetName === SHEET_NAME || sheetName === ARCHIVE_SHEET) && (dateFrom || dateTo);
+
+      let tempSheet = null;
+      let exportTarget = targetSheet;
+      try {
+        if (canFilter) {
+          const data = targetSheet.getDataRange().getValues();
+          if (data.length > 1) {
+            const headers = data[0];
+            const dateColIdx = headers.indexOf('作業日');
+            if (dateColIdx >= 0) {
+              const tz = Session.getScriptTimeZone();
+              const filtered = [data[0]].concat(data.slice(1).filter(row => {
+                const v = row[dateColIdx];
+                const d = v instanceof Date
+                  ? Utilities.formatDate(v, tz, 'yyyy-MM-dd')
+                  : String(v || '').slice(0, 10);
+                if (dateFrom && d < dateFrom) return false;
+                if (dateTo && d > dateTo) return false;
+                return true;
+              }));
+              tempSheet = ss.insertSheet('_TMP' + sheetName + '_' + (new Date().getTime()));
+              tempSheet.getRange(1, 1, filtered.length, filtered[0].length).setValues(filtered);
+              SpreadsheetApp.flush();
+              exportTarget = tempSheet;
+            }
+          }
+        }
+        const result = exportSheetAsXlsxBase64_(ss, exportTarget);
+        const suffix = (dateFrom || dateTo) ? '_' + (dateFrom || '始') + '_' + (dateTo || '今') : '';
+        return ok({base64: result.base64, filename: sheetName + suffix + '.xlsx'});
+      } finally {
+        if (tempSheet) { try { ss.deleteSheet(tempSheet); } catch (e) {} }
+      }
+    }
+
     // 期間指定の月別確認表（見た目付き）を xlsx でエクスポート。一時シートを作って書式設定→xlsx化→削除
     if (action === 'export_period_kakunin_xlsx') {
       const dateFrom = String(body.dateFrom || '').trim();
@@ -1208,6 +1255,17 @@ function generatePeriodKakuninData_(ss, dateFrom, dateTo, companyFilter) {
   };
 }
 
+// 列番号 → 列文字（1 → A、27 → AA など）
+function colLetter_(n) {
+  let s = '';
+  while (n > 0) {
+    const m = (n - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
 // 指定シートを xlsx として書き出し base64 で返す（書式・色・罫線そのまま保持）
 // 内部的に Google Sheets の export URL を OAuth トークン付きで叩く方式。
 function exportSheetAsXlsxBase64_(ss, sheet) {
@@ -1300,6 +1358,29 @@ function exportPeriodKakuninAsXlsxBase64_(ss, dateFrom, dateTo, companyFilter) {
     // テーブル全体に罫線
     if (namesCount > 0) {
       tempSheet.getRange(2, 1, namesCount + 2, totalCols).setBorder(true, true, true, true, true, true);
+    }
+
+    // 8.5) 合計セルを SUM 関数に置き換え（Excel で値を編集すると合計が自動更新される）
+    if (namesCount > 0 && daysInRange > 0) {
+      const firstDayCol = colLetter_(2);                       // B
+      const lastDayCol  = colLetter_(1 + daysInRange);          // 例: AE
+      const totalColLet = colLetter_(totalCols);
+
+      // 各データ行の右端「合計」列を =SUM(B行:AE行)
+      const dataTotalFormulas = [];
+      for (let r = dataStartRow; r <= dataEndRow; r++) {
+        dataTotalFormulas.push([`=SUM(${firstDayCol}${r}:${lastDayCol}${r})`]);
+      }
+      tempSheet.getRange(dataStartRow, totalCols, namesCount, 1).setFormulas(dataTotalFormulas);
+
+      // 合計行：各日列 =SUM(列<dataStart>:列<dataEnd>) ＋ 右端 =SUM(B合計行:AE合計行)
+      const totalRowFormulas = [[]];
+      for (let i = 0; i < daysInRange; i++) {
+        const col = colLetter_(2 + i);
+        totalRowFormulas[0].push(`=SUM(${col}${dataStartRow}:${col}${dataEndRow})`);
+      }
+      totalRowFormulas[0].push(`=SUM(${firstDayCol}${totalRowNum}:${lastDayCol}${totalRowNum})`);
+      tempSheet.getRange(totalRowNum, 2, 1, daysInRange + 1).setFormulas(totalRowFormulas);
     }
 
     // 9) ヘッダ行を固定（行のみ。列を固定するとタイトル行のセル結合と競合してエラーになる）
@@ -1465,6 +1546,33 @@ function generateKakuninTable_(ss, records) {
         sheet.getRange(r, rule.cols).setHorizontalAlignment('center');
         const startRow = r - rule.namesLength - 1;
         sheet.getRange(startRow, 1, rule.namesLength + 2, rule.cols).setBorder(true, true, true, true, true, true);
+      }
+    });
+
+    // 合計セルを SUM 関数に置換（Excel で値を編集すると合計が自動更新される）
+    // ※ data 行の最右列 + total 行の各日列 + total 行の最右列
+    formatRules.forEach(rule => {
+      if (rule.type !== 'data' && rule.type !== 'total') return;
+      const r = rule.row + 1;                              // 1-based
+      const days = rule.daysInMonth;
+      if (!days) return;
+      const firstDayCol = colLetter_(2);                    // B
+      const lastDayCol = colLetter_(1 + days);              // 例: AF (31日なら)
+      const totalCol = rule.cols;                           // 数値 = days + 2
+      if (rule.type === 'data') {
+        // 行の右端 = SUM(B行:lastDayCol行)
+        sheet.getRange(r, totalCol).setFormula(`=SUM(${firstDayCol}${r}:${lastDayCol}${r})`);
+      } else {
+        // 合計行：各日列 = SUM(日列<dataStart>:<dataEnd>)、右端 = SUM(行内全日)
+        const dataStartRow = r - rule.namesLength;
+        const dataEndRow = r - 1;
+        const totalFormulas = [[]];
+        for (let i = 0; i < days; i++) {
+          const col = colLetter_(2 + i);
+          totalFormulas[0].push(`=SUM(${col}${dataStartRow}:${col}${dataEndRow})`);
+        }
+        totalFormulas[0].push(`=SUM(${firstDayCol}${r}:${lastDayCol}${r})`);
+        sheet.getRange(r, 2, 1, days + 1).setFormulas(totalFormulas);
       }
     });
   }
