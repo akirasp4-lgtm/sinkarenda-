@@ -9,8 +9,27 @@ const KAKUNIN_SHEET = '月別確認表';
 const BILLING_SHEET = '元請別請求集計';
 const ALLOCATION_SHEET = '事業部別按分';
 const OPLOG_SHEET = '操作ログ';
-const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番'];
+const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両'];
 const GROWISE = 'グローライズ';
+
+// ==============================================================
+// 社長専用カレンダー（極秘）
+// シート名は意図的に内部呼称のみ。PIN認証でのみアクセス可能。
+// ==============================================================
+const PRES_SHEET = '社長予定';
+const PRES_HEADERS = ['登録日時','タイトル','開始日','開始時刻','終了日','終了時刻','場所','メモ','カテゴリ','色','ID','更新者'];
+const PRES_PIN = '1203';
+
+// ==============================================================
+// 車両予約シート（LINEボット連携用 - GR社内秘書ボットから書き込み）
+// 既存カレンダー機能とは独立。トークン認証でのみアクセス可能。
+// ==============================================================
+const VEHICLE_RES_SHEET = '車両予約';
+const VEHICLE_RES_HEADERS = [
+  '予約ID','車両名','ナンバー','所有会社','使用者氏名','使用者LINE_ID',
+  '開始日時','返却予定日時','実返却日時','行先','状態','備考','登録日時','更新日時'
+];
+const VEHICLE_RES_TOKEN = '車両予約用トークン1234';
 
 // ==============================================================
 // 読み(フリガナ)自動生成用 - Groq API
@@ -106,7 +125,8 @@ function doPost(e) {
       body.rows.forEach(row => {
         let division = '';
         let jobNo = '';
-        if (row.company === GROWISE && !row.souko) {
+        // 工番発行は「グローライズ × 倉庫/休み/予定 のいずれでもない」場合のみ（夜勤は通常の工番発行対象）
+        if (row.company === GROWISE && !row.souko && !row.yotei && !row.yasumi && row.workType === '現場作業') {
           const explicitDiv = String(row.jobNoDivision || '').trim();
           if (explicitDiv) {
             division = explicitDiv;
@@ -135,7 +155,9 @@ function doPost(e) {
           row.updatedBy || updatedBy || '',
           row.color || '',
           division,
-          jobNo
+          jobNo,
+          row.workType || '',
+          row.vehicle || ''
         ]);
       });
       logOperation_(ss, 'add', body.rows[0] && body.rows[0].genba + '/' + (body.rows[0].loc || ''), '行数=' + body.rows.length, updatedBy);
@@ -174,7 +196,8 @@ function doPost(e) {
       body.rows.forEach(row => {
         let division = '';
         let jobNo = '';
-        if (row.company === GROWISE && !row.souko) {
+        // 工番発行は「グローライズ × 倉庫/休み/予定 のいずれでもない」場合のみ（夜勤は通常の工番発行対象）
+        if (row.company === GROWISE && !row.souko && !row.yotei && !row.yasumi && row.workType === '現場作業') {
           const explicitDiv = String(row.jobNoDivision || '').trim();
           if (explicitDiv) {
             division = explicitDiv;
@@ -203,7 +226,9 @@ function doPost(e) {
           row.updatedBy || updatedBy || '',
           row.color || '',
           division,
-          jobNo
+          jobNo,
+          row.workType || '',
+          row.vehicle || ''
         ]);
       });
       logOperation_(ss, 'update', body.rows[0] && body.rows[0].genba + '/' + (body.rows[0].loc || ''), '行数=' + body.rows.length + ', 旧ID=' + (body.ids || []).length, updatedBy);
@@ -215,6 +240,22 @@ function doPost(e) {
       const archived = archiveOldData_(ss, months);
       logOperation_(ss, 'archive', months + 'ヶ月以前', '件数=' + archived, updatedBy);
       return ok({archived});
+    }
+
+    if (action === 'cleanup_orphan_jobnos') {
+      const cleaned = cleanupOrphanJobNos_(ss);
+      logOperation_(ss, 'cleanup_orphan_jobnos', '休み/倉庫/予定', '清掃=' + cleaned, updatedBy);
+      return ok({cleaned: cleaned});
+    }
+
+    if (action === 'merge_genba') {
+      const from = String(body.from || '').trim();
+      const to = String(body.to || '').trim();
+      if (!from || !to) return error('from と to を指定してください');
+      if (from === to) return error('同じ名前です');
+      const result = mergeGenba_(ss, from, to);
+      logOperation_(ss, 'merge_genba', from + ' → ' + to, JSON.stringify(result), updatedBy);
+      return ok(result);
     }
 
     if (action === 'summarize') {
@@ -397,6 +438,213 @@ function doPost(e) {
       return ok({ oldJobNo: currentJobNo, newJobNo, updatedRows, archivedUpdated });
     }
 
+    // ============================================================
+    // 社長専用カレンダー（極秘）
+    // すべてのアクションで PIN チェックを行う。
+    // ============================================================
+    if (action === 'pres_list' || action === 'pres_add' || action === 'pres_update' || action === 'pres_delete') {
+      if (String(body.pin || '') !== PRES_PIN) {
+        return error('認証に失敗しました');
+      }
+      const presSheet = getOrCreatePresSheet_(ss);
+      const tz = Session.getScriptTimeZone();
+
+      if (action === 'pres_list') {
+        const data = presSheet.getDataRange().getValues();
+        let rows = [];
+        if (data.length > 1) {
+          const headers = data[0];
+          rows = data.slice(1).map(r => {
+            const obj = {};
+            headers.forEach((h, j) => {
+              const v = r[j];
+              if (h === '開始日' || h === '終了日') {
+                obj[h] = (v instanceof Date) ? Utilities.formatDate(v, tz, 'yyyy-MM-dd') : String(v || '');
+              } else if (h === '開始時刻' || h === '終了時刻') {
+                obj[h] = (v instanceof Date) ? Utilities.formatDate(v, tz, 'HH:mm') : String(v || '');
+              } else {
+                obj[h] = (v === undefined || v === null) ? '' : v;
+              }
+            });
+            return obj;
+          });
+        }
+        return ok({rows});
+      }
+
+      if (action === 'pres_add') {
+        const ev = body.event || {};
+        const id = 'P' + new Date().getTime() + '_' + Math.floor(Math.random() * 10000);
+        presSheet.appendRow([
+          new Date(),
+          String(ev.title || ''),
+          String(ev.startDate || ''),
+          String(ev.startTime || ''),
+          String(ev.endDate || ev.startDate || ''),
+          String(ev.endTime || ''),
+          String(ev.location || ''),
+          String(ev.memo || ''),
+          String(ev.category || ''),
+          String(ev.color || '#1D9E75'),
+          id,
+          updatedBy
+        ]);
+        return ok({id});
+      }
+
+      if (action === 'pres_update') {
+        const ev = body.event || {};
+        const id = String(ev.id || '');
+        if (!id) return error('IDが指定されていません');
+        const data = presSheet.getDataRange().getValues();
+        const idCol = PRES_HEADERS.indexOf('ID');
+        for (let i = 1; i < data.length; i++) {
+          if (String(data[i][idCol]) === id) {
+            presSheet.getRange(i + 1, 1, 1, PRES_HEADERS.length).setValues([[
+              data[i][0] instanceof Date ? data[i][0] : new Date(),
+              String(ev.title || ''),
+              String(ev.startDate || ''),
+              String(ev.startTime || ''),
+              String(ev.endDate || ev.startDate || ''),
+              String(ev.endTime || ''),
+              String(ev.location || ''),
+              String(ev.memo || ''),
+              String(ev.category || ''),
+              String(ev.color || '#1D9E75'),
+              id,
+              updatedBy
+            ]]);
+            return ok({updated: id});
+          }
+        }
+        return error('対象が見つかりませんでした');
+      }
+
+      if (action === 'pres_delete') {
+        const id = String(body.id || '');
+        if (!id) return error('IDが指定されていません');
+        const data = presSheet.getDataRange().getValues();
+        const idCol = PRES_HEADERS.indexOf('ID');
+        for (let i = data.length - 1; i >= 1; i--) {
+          if (String(data[i][idCol]) === id) {
+            presSheet.deleteRow(i + 1);
+            return ok({deleted: id});
+          }
+        }
+        return error('対象が見つかりませんでした');
+      }
+    }
+
+    // ============================================================
+    // 車両予約（LINEボット連携）
+    // トークン認証。既存カレンダー機能とは独立した「車両予約」シートを操作。
+    // ============================================================
+    if (action === 'vehicle_res_add' || action === 'vehicle_res_update' || action === 'vehicle_res_delete' || action === 'vehicle_res_list') {
+      if (String(body.token || '') !== VEHICLE_RES_TOKEN) return error('認証失敗');
+      const vehicleSheet = getOrCreateVehicleResSheet_(ss);
+
+      if (action === 'vehicle_res_add') {
+        const ev = body.event || {};
+        const now = new Date();
+        vehicleSheet.appendRow([
+          String(ev.reservation_id || ''),
+          String(ev.vehicle_name || ''),
+          String(ev.plate || ''),
+          String(ev.company || ''),
+          String(ev.user_name || ''),
+          String(ev.user_line_id || ''),
+          String(ev.start_dt || ''),
+          String(ev.end_dt_planned || ''),
+          String(ev.end_dt_actual || ''),
+          String(ev.destination || ''),
+          String(ev.status || '予約'),
+          String(ev.memo || ''),
+          now,
+          now
+        ]);
+        logOperation_(ss, 'vehicle_res_add', String(ev.reservation_id || ''), String(ev.vehicle_name || '') + '/' + String(ev.user_name || ''), 'linebot');
+        return ok({id: String(ev.reservation_id || '')});
+      }
+
+      if (action === 'vehicle_res_update') {
+        const ev = body.event || {};
+        const id = String(ev.reservation_id || '');
+        if (!id) return error('予約IDが指定されていません');
+        const data = vehicleSheet.getDataRange().getValues();
+        const idCol = VEHICLE_RES_HEADERS.indexOf('予約ID');
+        const fieldMap = {
+          vehicle_name: '車両名',
+          plate: 'ナンバー',
+          company: '所有会社',
+          user_name: '使用者氏名',
+          user_line_id: '使用者LINE_ID',
+          start_dt: '開始日時',
+          end_dt_planned: '返却予定日時',
+          end_dt_actual: '実返却日時',
+          destination: '行先',
+          status: '状態',
+          memo: '備考'
+        };
+        for (let i = 1; i < data.length; i++) {
+          if (String(data[i][idCol]) === id) {
+            const updates = data[i].slice();
+            Object.keys(fieldMap).forEach(key => {
+              if (ev[key] !== undefined) {
+                const colIdx = VEHICLE_RES_HEADERS.indexOf(fieldMap[key]);
+                if (colIdx >= 0) updates[colIdx] = String(ev[key] || '');
+              }
+            });
+            const updColIdx = VEHICLE_RES_HEADERS.indexOf('更新日時');
+            if (updColIdx >= 0) updates[updColIdx] = new Date();
+            vehicleSheet.getRange(i + 1, 1, 1, VEHICLE_RES_HEADERS.length).setValues([updates]);
+            logOperation_(ss, 'vehicle_res_update', id, '状態=' + String(ev.status || ''), 'linebot');
+            return ok({updated: id});
+          }
+        }
+        return error('対象が見つかりませんでした');
+      }
+
+      if (action === 'vehicle_res_delete') {
+        const id = String(body.id || '');
+        if (!id) return error('予約IDが指定されていません');
+        const data = vehicleSheet.getDataRange().getValues();
+        const idCol = VEHICLE_RES_HEADERS.indexOf('予約ID');
+        const statusCol = VEHICLE_RES_HEADERS.indexOf('状態');
+        const updCol = VEHICLE_RES_HEADERS.indexOf('更新日時');
+        for (let i = 1; i < data.length; i++) {
+          if (String(data[i][idCol]) === id) {
+            vehicleSheet.getRange(i + 1, statusCol + 1).setValue('キャンセル');
+            vehicleSheet.getRange(i + 1, updCol + 1).setValue(new Date());
+            logOperation_(ss, 'vehicle_res_delete', id, '論理削除', 'linebot');
+            return ok({cancelled: id});
+          }
+        }
+        return error('対象が見つかりませんでした');
+      }
+
+      if (action === 'vehicle_res_list') {
+        const tz = Session.getScriptTimeZone();
+        const data = vehicleSheet.getDataRange().getValues();
+        let rows = [];
+        if (data.length > 1) {
+          const headers = data[0];
+          rows = data.slice(1).map(r => {
+            const obj = {};
+            headers.forEach((h, j) => {
+              const v = r[j];
+              if (v instanceof Date) {
+                obj[h] = Utilities.formatDate(v, tz, "yyyy-MM-dd'T'HH:mm:ssXXX");
+              } else {
+                obj[h] = (v === undefined || v === null) ? '' : String(v);
+              }
+            });
+            return obj;
+          });
+        }
+        return ok({rows});
+      }
+    }
+
     if (action === 'remove_genba') {
       const genbaSheet = getOrCreateGenbaSheet_(ss);
       const name = String(body.name || '').trim();
@@ -459,6 +707,38 @@ function doGet(e) {
   }
 }
 
+function getOrCreatePresSheet_(ss) {
+  let sheet = ss.getSheetByName(PRES_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(PRES_SHEET);
+    sheet.appendRow(PRES_HEADERS);
+    try { sheet.hideSheet(); } catch (e) {}
+  } else {
+    ensureColumns_(sheet, PRES_HEADERS.length);
+    const headers = sheet.getRange(1, 1, 1, PRES_HEADERS.length).getValues()[0];
+    PRES_HEADERS.forEach((h, i) => {
+      if (String(headers[i] || '').trim() !== h) sheet.getRange(1, i + 1).setValue(h);
+    });
+  }
+  return sheet;
+}
+
+// 車両予約シート（LINEボット連携）。既存カレンダーには影響しない独立シート。
+function getOrCreateVehicleResSheet_(ss) {
+  let sheet = ss.getSheetByName(VEHICLE_RES_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(VEHICLE_RES_SHEET);
+    sheet.appendRow(VEHICLE_RES_HEADERS);
+  } else {
+    ensureColumns_(sheet, VEHICLE_RES_HEADERS.length);
+    const headers = sheet.getRange(1, 1, 1, VEHICLE_RES_HEADERS.length).getValues()[0];
+    VEHICLE_RES_HEADERS.forEach((h, i) => {
+      if (String(headers[i] || '').trim() !== h) sheet.getRange(1, i + 1).setValue(h);
+    });
+  }
+  return sheet;
+}
+
 function getOrCreateMemberSheet_(ss) {
   let sheet = ss.getSheetByName(MEMBER_SHEET);
   if (!sheet) {
@@ -499,6 +779,50 @@ function getOrCreateJobSiteSheet_(ss) {
     if (String(headers[7] || '').trim() !== '読み') sheet.getRange(1, 8).setValue('読み');
   }
   return sheet;
+}
+
+// 現場マスタの孤立行を削除（日報データ＋アーカイブのいずれにも参照されず、売上未入力の行）
+function cleanupOrphanSites_(ss) {
+  const jobSiteSheet = getOrCreateJobSiteSheet_(ss);
+  const data = jobSiteSheet.getDataRange().getValues();
+  if (data.length <= 1) return 0;
+  // 日報データ＋アーカイブから使用中の (元請+現場) と 工番 を収集
+  const usedKeys = new Set();
+  const usedJobNos = new Set();
+  [SHEET_NAME, ARCHIVE_SHEET].forEach(name => {
+    const sh = ss.getSheetByName(name);
+    if (!sh) return;
+    const sd = sh.getDataRange().getValues();
+    if (sd.length <= 1) return;
+    const headers = sd[0];
+    const gC = headers.indexOf('元請名');
+    const lC = headers.indexOf('現場名');
+    const jC = headers.indexOf('工番');
+    for (let i = 1; i < sd.length; i++) {
+      const g = String(sd[i][gC] || '').trim();
+      const l = String(sd[i][lC] || '').trim();
+      const j = String(sd[i][jC] || '').trim();
+      if (g) usedKeys.add(g + '|||' + l);
+      if (j) usedJobNos.add(j);
+    }
+  });
+  // 削除候補（後ろから走査して deleteRow しても index がずれないように）
+  const rowsToDelete = [];
+  for (let i = data.length - 1; i >= 1; i--) {
+    const genba = String(data[i][0] || '').trim();
+    const loc = String(data[i][1] || '').trim();
+    const jobNo = String(data[i][2] || '').trim();
+    const revenue = Number(data[i][6] || 0);
+    if (revenue > 0) continue; // 売上が入っている行は将来の現場として残す
+    const key = genba + '|||' + loc;
+    const refByKey = usedKeys.has(key);
+    const refByJob = jobNo && usedJobNos.has(jobNo);
+    if (!refByKey && !refByJob) {
+      rowsToDelete.push(i + 1); // 1-indexed
+    }
+  }
+  rowsToDelete.forEach(rowNum => jobSiteSheet.deleteRow(rowNum));
+  return rowsToDelete.length;
 }
 
 function getOrCreateOpLogSheet_(ss) {
@@ -598,6 +922,12 @@ function generateSummary_() {
   const allRecords = [...mainRecords, ...archiveRecords];
   generateKakuninTable_(ss, allRecords);
   generateDivisionAllocation_(ss, allRecords);
+
+  // 現場マスタの孤立行を掃除（日報データに1件も存在しない＆売上未入力のもの）
+  try {
+    const orphanCount = cleanupOrphanSites_(ss);
+    if (orphanCount > 0) logOperation_(ss, 'cleanup_orphan_sites', '現場マスタ', '削除=' + orphanCount, 'auto');
+  } catch (e) {}
 }
 
 function calcEffective_(records, name) {
@@ -639,7 +969,9 @@ function generateCompanySummary_(ss, records) {
     formats.push({row: allRows.length, type: 'company'});
     allRows.push(['氏名', '当月出勤日数', '当月人工', '当月夜勤回数', '全期間出勤日数', '全期間人工']);
     formats.push({row: allRows.length, type: 'header'});
-    const names = [...new Set(cr.map(r => r.name))].sort();
+    // 実働(休み/予定以外)のあるメンバーのみ氏名に含める。倉庫は実働扱い。
+    const effRecords = cr.filter(r => r.yakin !== '休み' && r.yakin !== '予定');
+    const names = [...new Set(effRecords.map(r => r.name))].sort();
     let tMD=0,tMK=0,tMY=0,tAD=0,tAK=0;
     names.forEach(name => {
       const mEff=calcEffective_(mr, name), aEff=calcEffective_(cr, name);
@@ -681,7 +1013,9 @@ function generateMonthSummary_(ss, records) {
     formats.push({row: allRows.length, type: 'month'});
     allRows.push(['氏名', '会社', '出勤日数', '人工合計', '夜勤回数', '日別詳細']);
     formats.push({row: allRows.length, type: 'header'});
-    const names = [...new Set(mr.map(r => r.name))].sort();
+    // 実働(休み/予定以外)のあるメンバーのみ表示。倉庫は実働扱い。
+    const effRecords = mr.filter(r => r.yakin !== '休み' && r.yakin !== '予定');
+    const names = [...new Set(effRecords.map(r => r.name))].sort();
     let tD=0,tK=0,tY=0;
     names.forEach(name => {
       const eff=calcEffective_(mr, name);
@@ -737,17 +1071,29 @@ function generateKakuninTable_(ss, records) {
     const monthStr = year + '-' + String(month + 1).padStart(2, '0');
     const daysInMonth = new Date(year, month + 1, 0).getDate();
     const mr = records.filter(r => r.month === monthStr);
-    const names = [...new Set(mr.map(r => r.name))].filter(Boolean).sort();
+    // 実働(休み/予定以外)のあるメンバーのみ表示。倉庫は実働扱い。
+    const effRecords = mr.filter(r => r.yakin !== '休み' && r.yakin !== '予定');
+    const names = [...new Set(effRecords.map(r => r.name))].filter(Boolean).sort();
     const totalCols = daysInMonth + 2;
 
     function getKosuForDay(name, day) {
       const dateStr = year + '-' + String(month + 1).padStart(2, '0') + '-' + String(day).padStart(2, '0');
       const dayRecords = mr.filter(r => r.name === name && r.date === dateStr);
       if (dayRecords.length === 0) return 0;
-      if (dayRecords.some(r => r.yakin === '休み' || r.yakin === '予定')) return 0;
-      let maxKosu = 0;
-      dayRecords.forEach(r => { const k = Number(r.kosu) || 0; if (k > maxKosu) maxKosu = k; });
-      return maxKosu;
+      // 休み・予定の単体レコードは除外（同日に実働があればそちらを採用、calcEffective_と同じ挙動）
+      const effective = dayRecords.filter(r => r.yakin !== '休み' && r.yakin !== '予定');
+      if (effective.length === 0) return 0;
+      // 昼/夜勤は別バケットでmaxを取り、最後に合算（同日 昼+夜勤=2.0）
+      let dayKosu = 0, nightKosu = 0;
+      effective.forEach(r => {
+        const k = Number(r.kosu) || 0;
+        if (r.yakin === '夜勤') {
+          if (k > nightKosu) nightKosu = k;
+        } else {
+          if (k > dayKosu) dayKosu = k;
+        }
+      });
+      return dayKosu + nightKosu;
     }
 
     const titleRow = Array(maxCols).fill('');
@@ -813,6 +1159,8 @@ function generateKakuninTable_(ss, records) {
       } else if (rule.type === 'header') {
         const range = sheet.getRange(r, 1, 1, rule.cols);
         range.setFontWeight('bold').setBackground('#CCCCCC').setHorizontalAlignment('center');
+        // 日付の数字(1〜31)が日付シリアルとして解釈されないよう、整数書式を明示
+        sheet.getRange(r, 2, 1, rule.daysInMonth).setNumberFormat('0');
         for (let d = 1; d <= rule.daysInMonth; d++) {
           const dow = new Date(rule.year, rule.month, d).getDay();
           const cell = sheet.getRange(r, d + 1);
@@ -852,7 +1200,8 @@ function generateBillingSummary_(ss, records) {
   let sheet = ss.getSheetByName(BILLING_SHEET);
   if (sheet) { sheet.clear(); sheet.clearFormats(); } else { sheet = ss.insertSheet(BILLING_SHEET); }
   ensureColumns_(sheet, 35);
-  const workRecords = records.filter(r => r.yakin !== '休み' && r.yakin !== '予定');
+  // 倉庫は元請に請求しない作業のため除外（旧データで元請名が入っているものも対象外にする）
+  const workRecords = records.filter(r => r.yakin !== '休み' && r.yakin !== '予定' && r.yakin !== '倉庫');
   const months = [...new Set(workRecords.map(r => r.month).filter(Boolean))].sort().reverse();
   const genbas = [...new Set(workRecords.map(r => r.genba).filter(Boolean))].sort();
   const DOW = ['日','月','火','水','木','金','土'];
@@ -866,6 +1215,14 @@ function generateBillingSummary_(ss, records) {
     const totalCols = 3 + daysInMonth + 1;
     ensureColumns_(sheet, totalCols);
     const mr = workRecords.filter(r => r.month === month);
+    // (氏名, 日付, 昼夜区分) → 行った現場のSet。1日に複数現場行ったら 1/N で按分する
+    const sitesByPDN = {};
+    mr.forEach(r => {
+      const dn = r.yakin === '夜勤' ? 'N' : 'D';
+      const k = r.name + '|' + r.date + '|' + dn;
+      if (!sitesByPDN[k]) sitesByPDN[k] = new Set();
+      sitesByPDN[k].add(r.genba + '|||' + (r.loc || '（現場名なし）'));
+    });
     sheet.getRange(currentRow, 1, 1, totalCols).merge().setValue('▶ ' + monthLabel).setBackground('#1D9E75').setFontColor('#FFFFFF').setFontSize(12).setFontWeight('bold');
     currentRow++;
     const headerRow = ['会社名', '現場名', '名前'];
@@ -890,8 +1247,18 @@ function generateBillingSummary_(ss, records) {
           for (let d = 1; d <= daysInMonth; d++) {
             const dateStr = year + '-' + String(mon).padStart(2,'0') + '-' + String(d).padStart(2,'0');
             const dayRecs = lr.filter(r => r.name === name && r.date === dateStr);
+            // 昼/夜勤の有無を判定し、行った現場数で1人工を按分（昼と夜勤は別カウント）
+            const hasDay = dayRecs.some(r => r.yakin !== '夜勤');
+            const hasNight = dayRecs.some(r => r.yakin === '夜勤');
             let kosu = 0;
-            if (dayRecs.length > 0) dayRecs.forEach(r => { if (r.kosu > kosu) kosu = r.kosu; });
+            if (hasDay) {
+              const sCnt = (sitesByPDN[name + '|' + dateStr + '|D'] || new Set()).size || 1;
+              kosu += 1 / sCnt;
+            }
+            if (hasNight) {
+              const sCnt = (sitesByPDN[name + '|' + dateStr + '|N'] || new Set()).size || 1;
+              kosu += 1 / sCnt;
+            }
             row.push(kosu > 0 ? kosu : 0);
             rowTotal += kosu;
           }
@@ -907,7 +1274,7 @@ function generateBillingSummary_(ss, records) {
         });
         const totalRow = ['', '', '合計'];
         let grandTotal = 0;
-        for (let d = 1; d <= daysInMonth; d++) { const dateStr = year + '-' + String(mon).padStart(2,'0') + '-' + String(d).padStart(2,'0'); let daySum = 0; activeNames.forEach(name => { const dayRecs = lr.filter(r => r.name === name && r.date === dateStr); let kosu = 0; dayRecs.forEach(r => { if (r.kosu > kosu) kosu = r.kosu; }); daySum += kosu; }); totalRow.push(daySum > 0 ? daySum : 0); grandTotal += daySum; }
+        for (let d = 1; d <= daysInMonth; d++) { const dateStr = year + '-' + String(mon).padStart(2,'0') + '-' + String(d).padStart(2,'0'); let daySum = 0; activeNames.forEach(name => { const dayRecs = lr.filter(r => r.name === name && r.date === dateStr); const hasDay = dayRecs.some(r => r.yakin !== '夜勤'); const hasNight = dayRecs.some(r => r.yakin === '夜勤'); if (hasDay) { const sCnt = (sitesByPDN[name + '|' + dateStr + '|D'] || new Set()).size || 1; daySum += 1 / sCnt; } if (hasNight) { const sCnt = (sitesByPDN[name + '|' + dateStr + '|N'] || new Set()).size || 1; daySum += 1 / sCnt; } }); totalRow.push(daySum > 0 ? daySum : 0); grandTotal += daySum; }
         totalRow.push(grandTotal);
         sheet.getRange(currentRow, 1, 1, totalRow.length).setValues([totalRow]).setFontWeight('bold').setBackground('#FFF9C4');
         sheet.getRange(currentRow, 4, 1, totalRow.length - 3).setNumberFormat('0.##');
@@ -941,7 +1308,10 @@ function generateDivisionAllocation_(ss, records) {
     const name = String(memberData[i][0] || '').trim();
     const div = String(memberData[i][2] || '').trim();
     const rate = Number(memberData[i][3] || 0);
-    if (name) { memberDivision[name] = div; memberRate[name] = rate; }
+    if (!name) continue;
+    // 同名の重複行がある場合、非空の事業部を優先（空欄で上書きされないようにする）
+    if (memberDivision[name] === undefined || (div && !memberDivision[name])) memberDivision[name] = div;
+    if (rate) memberRate[name] = rate;
   }
 
   const jobSiteSheet = getOrCreateJobSiteSheet_(ss);
@@ -964,16 +1334,32 @@ function generateDivisionAllocation_(ss, records) {
     }
   }
 
-  const grRecords = records.filter(r => r.company === GROWISE && r.yakin !== '休み' && r.yakin !== '予定');
+  // 倉庫は工番なしのため事業部按分の対象外。旧データで工番マスタにヒットしてしまうケースを防ぐため明示的に除外
+  const grRecords = records.filter(r => r.company === GROWISE && r.yakin !== '休み' && r.yakin !== '予定' && r.yakin !== '倉庫');
+
+  // (氏名, 日付, 昼夜区分) → 行った jobNo のSet。1日に複数現場行ったら 1/N で按分する
+  const jobsByPDN = {};
+  grRecords.forEach(r => {
+    const jobNo = siteJobNo[r.genba + '|||' + r.loc];
+    if (!jobNo) return;
+    const nf = r.yakin === '夜勤' ? 'N' : 'D';
+    const k = r.name + '|' + r.date + '|' + nf;
+    if (!jobsByPDN[k]) jobsByPDN[k] = new Set();
+    jobsByPDN[k].add(jobNo);
+  });
 
   const byKey = {};
   grRecords.forEach(r => {
     const jobNo = siteJobNo[r.genba + '|||' + r.loc];
     if (!jobNo) return;
     const nightFlag = r.yakin === '夜勤' ? 'N' : 'D';
+    const pdnKey = r.name + '|' + r.date + '|' + nightFlag;
+    const jobCount = (jobsByPDN[pdnKey] || new Set()).size || 1;
+    const sharedKosu = 1 / jobCount; // 1人工を行った現場数で按分
     const key = jobNo + '|' + r.name + '|' + r.date + '|' + nightFlag;
-    if (!byKey[key] || r.kosu > byKey[key].kosu) {
-      byKey[key] = { jobNo, name: r.name, date: r.date, month: r.month, kosu: r.kosu };
+    // 同じ key（同 jobNo+昼夜）で複数レコードある場合は1度だけ計上（重複登録対策）
+    if (!byKey[key]) {
+      byKey[key] = { jobNo, name: r.name, date: r.date, month: r.month, kosu: sharedKosu };
     }
   });
 
@@ -1011,6 +1397,26 @@ function generateDivisionAllocation_(ss, records) {
   const rows = [];
   const formats = [];
 
+  // 按分%の計算: 工番事業部に50%固定 + 残り50%を稼働した事業部(工番事業部含む)で人工比按分
+  // 工番事業部が稼働ゼロ→工番事業部100% / 工番事業部不明→従来通り100%稼働按分
+  function calcAllocPercent_(kosuBreakdown, jobNoDiv) {
+    const totalKosu = divs.reduce((s, d) => s + (kosuBreakdown[d] || 0), 0);
+    const result = {};
+    divs.forEach(d => result[d] = 0);
+    const hasJobNoDiv = jobNoDiv && divs.includes(jobNoDiv);
+    if (hasJobNoDiv) {
+      result[jobNoDiv] = 50;
+      if (totalKosu > 0) {
+        divs.forEach(d => { result[d] += 50 * (kosuBreakdown[d] || 0) / totalKosu; });
+      } else {
+        result[jobNoDiv] += 50; // 稼働ゼロ→残り50%も工番事業部に
+      }
+    } else if (totalKosu > 0) {
+      divs.forEach(d => { result[d] = 100 * (kosuBreakdown[d] || 0) / totalKosu; });
+    }
+    return result;
+  }
+
   function buildHeader() {
     const h = ['工番', '元請名', '現場名', '売上'];
     divs.forEach(d => h.push(d + '人工'));
@@ -1024,13 +1430,14 @@ function generateDivisionAllocation_(ss, records) {
   }
   function buildRow(jobNo, kosuBreakdown, costBreakdown, revenue, showRevenue) {
     const info = siteInfo[jobNo] || { genba: '', loc: '' };
-    const rev = showRevenue ? revenue : 0;
+    const jobNoDiv = siteDivision[jobNo] || '';
     const totalKosu = divs.reduce((s, d) => s + (kosuBreakdown[d] || 0), 0);
     const totalCost = divs.reduce((s, d) => s + (costBreakdown[d] || 0), 0);
+    const alloc = calcAllocPercent_(kosuBreakdown, jobNoDiv);
     const row = [jobNo, info.genba, info.loc, showRevenue ? (revenue || 0) : ''];
     divs.forEach(d => row.push(kosuBreakdown[d] || 0));
     row.push(totalKosu);
-    divs.forEach(d => row.push(totalKosu > 0 ? Math.round((kosuBreakdown[d] || 0) / totalKosu * 1000) / 10 + '%' : '0%'));
+    divs.forEach(d => row.push(Math.round((alloc[d] || 0) * 10) / 10 + '%'));
     divs.forEach(d => row.push(Math.round(costBreakdown[d] || 0)));
     row.push(Math.round(totalCost));
     if (showRevenue) {
@@ -1134,10 +1541,20 @@ function generateDivisionAllocation_(ss, records) {
     const dataStartRow = 3;
     const dataEndRow = rows.length;
     if (dataEndRow >= dataStartRow) {
-      sheet.getRange(dataStartRow, 4, dataEndRow - dataStartRow + 1, 1).setNumberFormat('¥#,##0'); // 売上
+      const numRows = dataEndRow - dataStartRow + 1;
+      // 売上
+      sheet.getRange(dataStartRow, 4, numRows, 1).setNumberFormat('¥#,##0');
+      // 人工列 (div人工 + 合計人工) を強制的に通常数値書式に（残存¥や%書式を排除）
+      sheet.getRange(dataStartRow, 5, numRows, divs.length + 1).setNumberFormat('0.##');
+      // % 列 (文字列 "48%" 等で格納)。書式を一般にして文字列をそのまま表示
+      sheet.getRange(dataStartRow, 5 + divs.length + 1, numRows, divs.length).setNumberFormat('@');
+      // 原価列 (div原価 + 合計原価)
       const costStart = 4 + divs.length + 1 + divs.length + 1;
-      sheet.getRange(dataStartRow, costStart, dataEndRow - dataStartRow + 1, divs.length + 1).setNumberFormat('¥#,##0');
-      sheet.getRange(dataStartRow, costStart + divs.length + 1, dataEndRow - dataStartRow + 1, 1).setNumberFormat('¥#,##0'); // 粗利
+      sheet.getRange(dataStartRow, costStart, numRows, divs.length + 1).setNumberFormat('¥#,##0');
+      // 粗利
+      sheet.getRange(dataStartRow, costStart + divs.length + 1, numRows, 1).setNumberFormat('¥#,##0');
+      // 粗利率 (文字列)
+      sheet.getRange(dataStartRow, costStart + divs.length + 2, numRows, 1).setNumberFormat('@');
     }
   }
 
@@ -1155,6 +1572,96 @@ function generateDivisionAllocation_(ss, records) {
 }
 
 function dailySummary() { generateSummary_(); }
+
+// 元請名を「from」から「to」に統合（日報・アーカイブ・現場マスタ・元請マスタを全部書き換え）
+function mergeGenba_(ss, fromName, toName) {
+  const result = { nippoUpdated: 0, archiveUpdated: 0, jobsiteUpdated: 0, masterAction: 'none' };
+  // 日報データ / アーカイブ
+  [SHEET_NAME, ARCHIVE_SHEET].forEach((name, idx) => {
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) return;
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return;
+    const headers = data[0];
+    const gCol = headers.indexOf('元請名');
+    if (gCol < 0) return;
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][gCol] || '').trim() === fromName) {
+        sheet.getRange(i + 1, gCol + 1).setValue(toName);
+        if (idx === 0) result.nippoUpdated++; else result.archiveUpdated++;
+      }
+    }
+  });
+  // 現場マスタ
+  const jobSite = ss.getSheetByName(JOBSITE_SHEET);
+  if (jobSite) {
+    const data = jobSite.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0] || '').trim() === fromName) {
+        jobSite.getRange(i + 1, 1).setValue(toName);
+        result.jobsiteUpdated++;
+      }
+    }
+  }
+  // 元請マスタ
+  const genbaSheet = ss.getSheetByName(GENBA_MASTER_SHEET);
+  if (genbaSheet) {
+    const data = genbaSheet.getDataRange().getValues();
+    let fromRow = -1;
+    let toExists = false;
+    for (let i = 1; i < data.length; i++) {
+      const n = String(data[i][0] || '').trim();
+      if (n === fromName && fromRow < 0) fromRow = i;
+      if (n === toName) toExists = true;
+    }
+    if (fromRow >= 0) {
+      if (toExists) {
+        genbaSheet.deleteRow(fromRow + 1);
+        result.masterAction = 'deleted_duplicate';
+      } else {
+        genbaSheet.getRange(fromRow + 1, 1).setValue(toName);
+        result.masterAction = 'renamed';
+      }
+    } else {
+      result.masterAction = 'from_not_found';
+    }
+  }
+  return result;
+}
+
+// 工番を持つべきでないレコードの工番・事業部をクリア:
+// - 休み/倉庫/予定 モードのレコード
+// - 作業区分が「現場作業」以外のレコード（材料引取・現調・カギ借用・撤去品返却・着打ち・その他）
+// （旧仕様時代のデータ清掃用 / これ以降は新規発行時に正しく空のまま）
+function cleanupOrphanJobNos_(ss) {
+  let cleaned = 0;
+  [SHEET_NAME, ARCHIVE_SHEET].forEach(name => {
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) return;
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return;
+    const headers = data[0];
+    const yCol = headers.indexOf('夜勤');
+    const dCol = headers.indexOf('事業部');
+    const jCol = headers.indexOf('工番');
+    const wtCol = headers.indexOf('作業区分');
+    if (yCol < 0 || jCol < 0) return;
+    for (let i = 1; i < data.length; i++) {
+      const yakin = String(data[i][yCol] || '').trim();
+      const jobNo = String(data[i][jCol] || '').trim();
+      const div = dCol >= 0 ? String(data[i][dCol] || '').trim() : '';
+      const wt = wtCol >= 0 ? String(data[i][wtCol] || '').trim() : '';
+      const isMode = (yakin === '休み' || yakin === '倉庫' || yakin === '予定');
+      const isNonGenba = (wt && wt !== '現場作業');
+      if ((isMode || isNonGenba) && (jobNo || div)) {
+        if (jobNo) sheet.getRange(i + 1, jCol + 1).setValue('');
+        if (div && dCol >= 0) sheet.getRange(i + 1, dCol + 1).setValue('');
+        cleaned++;
+      }
+    }
+  });
+  return cleaned;
+}
 
 // ========== 読み(フリガナ)バックフィル ==========
 // スクリプトエディタから手動実行用。
@@ -1253,14 +1760,17 @@ function backfillJobNosForSheet_(ss, sheetName) {
   const col = (n) => headers.indexOf(n);
   const gCol = col('元請名'), lCol = col('現場名'), rCol = col('役割'), nCol = col('氏名');
   const cCol = col('会社'), yCol = col('夜勤'), dCol = col('事業部'), jCol = col('工番');
+  const wtCol = col('作業区分');
 
-  // 代表者マップ: (元請, 現場) → 最初に出現した代表者名
+  // 代表者マップ: (元請, 現場) → 最初に出現した代表者名（現場作業のみ対象）
   const leaderByKey = {};
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][cCol] || '').trim() !== GROWISE) continue;
     if (String(data[i][rCol] || '').trim() !== '代表') continue;
     const yakin = String(data[i][yCol] || '').trim();
     if (yakin === '休み' || yakin === '予定' || yakin === '倉庫') continue;
+    const wt = wtCol >= 0 ? String(data[i][wtCol] || '').trim() : '';
+    if (wt && wt !== '現場作業') continue;
     const key = String(data[i][gCol] || '').trim() + '|||' + String(data[i][lCol] || '').trim();
     if (!leaderByKey[key]) leaderByKey[key] = String(data[i][nCol] || '').trim();
   }
@@ -1273,6 +1783,8 @@ function backfillJobNosForSheet_(ss, sheetName) {
     if (String(data[i][cCol] || '').trim() !== GROWISE) continue;
     const yakin = String(data[i][yCol] || '').trim();
     if (yakin === '休み' || yakin === '予定' || yakin === '倉庫') continue;
+    const wt = wtCol >= 0 ? String(data[i][wtCol] || '').trim() : '';
+    if (wt && wt !== '現場作業') continue;
     if (String(data[i][jCol] || '').trim()) continue; // 既に工番あり
 
     const genba = String(data[i][gCol] || '').trim();
