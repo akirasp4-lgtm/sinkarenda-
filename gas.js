@@ -271,11 +271,46 @@ function doPost(e) {
       if (!targetSheet) return error('シートが見つかりません: ' + sheetName);
       const data = targetSheet.getDataRange().getValues();
       const tz = Session.getScriptTimeZone();
-      const formatted = data.map(row => row.map(v => {
+      // 期間フィルタ（任意）: 日報データ・アーカイブのみ作業日列で絞り込む
+      // dateFrom/dateTo は 'YYYY-MM-DD' 形式の文字列、両端含む
+      const dateFrom = String(body.dateFrom || '').trim();
+      const dateTo = String(body.dateTo || '').trim();
+      let filtered = data;
+      if ((dateFrom || dateTo) && (sheetName === SHEET_NAME || sheetName === ARCHIVE_SHEET) && data.length > 1) {
+        const headers = data[0];
+        const dateColIdx = headers.indexOf('作業日');
+        if (dateColIdx >= 0) {
+          const head = [data[0]];
+          const body_ = data.slice(1).filter(row => {
+            const v = row[dateColIdx];
+            const d = v instanceof Date
+              ? Utilities.formatDate(v, tz, 'yyyy-MM-dd')
+              : String(v || '').slice(0, 10);
+            if (dateFrom && d < dateFrom) return false;
+            if (dateTo && d > dateTo) return false;
+            return true;
+          });
+          filtered = head.concat(body_);
+        }
+      }
+      const formatted = filtered.map(row => row.map(v => {
         if (v instanceof Date) return Utilities.formatDate(v, tz, 'yyyy-MM-dd HH:mm:ss');
         return v;
       }));
       return ok({sheetName, data: formatted});
+    }
+
+    // Phase 2: 期間指定の月別確認表風データを返す（シートには書かず、直接 CSV 用 2D 配列を返す）
+    // body: { dateFrom, dateTo, company (任意、未指定なら全社) }
+    // 返却: { rows: [タイトル行, ヘッダ行, データ行×n, 合計行] } と、columns（日付列のラベル）
+    if (action === 'period_kakunin') {
+      const dateFrom = String(body.dateFrom || '').trim();
+      const dateTo = String(body.dateTo || '').trim();
+      if (!dateFrom || !dateTo) return error('開始日と終了日を指定してください');
+      if (dateFrom > dateTo) return error('開始日が終了日より後です');
+      const companyFilter = String(body.company || '').trim();
+      const result = generatePeriodKakuninData_(ss, dateFrom, dateTo, companyFilter);
+      return ok(result);
     }
 
     if (action === 'add_member') {
@@ -1040,6 +1075,116 @@ function generateMonthSummary_(ss, records) {
   sheet.setColumnWidth(1, 100); sheet.setColumnWidth(2, 120);
   for (let c = 3; c <= 5; c++) sheet.setColumnWidth(c, 100);
   sheet.setColumnWidth(6, 300);
+}
+
+// 期間指定の月別確認表風データを生成（シートには書かない、CSV化用の 2D 配列を返す）
+// dateFrom/dateTo は 'YYYY-MM-DD' 両端含む。companyFilter が空なら全社、'全社' も全社扱い。
+// 既存の generateKakuninTable_ と同じく、休み/予定レコードは合計から除外、
+// 同日 昼+夜勤は別バケットで max を取り合算する。
+function generatePeriodKakuninData_(ss, dateFrom, dateTo, companyFilter) {
+  const tz = Session.getScriptTimeZone();
+  // 日報データとアーカイブ両方からレコードを集める（期間によってはアーカイブ側にしかない可能性）
+  const allRecords = [];
+  [SHEET_NAME, ARCHIVE_SHEET].forEach(sname => {
+    const sh = ss.getSheetByName(sname);
+    if (!sh) return;
+    const data = sh.getDataRange().getValues();
+    if (data.length < 2) return;
+    const headers = data[0];
+    const idx = {
+      date: headers.indexOf('作業日'),
+      name: headers.indexOf('氏名'),
+      kosu: headers.indexOf('人工'),
+      yakin: headers.indexOf('夜勤'),
+      company: headers.indexOf('会社')
+    };
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      const d = row[idx.date] instanceof Date
+        ? Utilities.formatDate(row[idx.date], tz, 'yyyy-MM-dd')
+        : String(row[idx.date] || '').slice(0, 10);
+      if (!d || d < dateFrom || d > dateTo) continue;
+      const co = String(row[idx.company] || '');
+      if (companyFilter && companyFilter !== '全社' && co !== companyFilter) continue;
+      allRecords.push({
+        date: d,
+        name: String(row[idx.name] || ''),
+        kosu: Number(row[idx.kosu]) || 0,
+        yakin: String(row[idx.yakin] || ''),
+        company: co
+      });
+    }
+  });
+
+  // 期間内の日付リスト
+  const days = [];
+  const sd = new Date(dateFrom + 'T00:00:00');
+  const ed = new Date(dateTo + 'T00:00:00');
+  for (let d = new Date(sd); d <= ed; d.setDate(d.getDate() + 1)) {
+    days.push(Utilities.formatDate(d, tz, 'yyyy-MM-dd'));
+  }
+
+  // 実働(休み/予定以外)のあるメンバーのみ表示
+  const effRecords = allRecords.filter(r => r.yakin !== '休み' && r.yakin !== '予定');
+  const names = [...new Set(effRecords.map(r => r.name))].filter(Boolean).sort();
+
+  function getKosuForDay(name, dateStr) {
+    const dayRecords = allRecords.filter(r => r.name === name && r.date === dateStr);
+    const effective = dayRecords.filter(r => r.yakin !== '休み' && r.yakin !== '予定');
+    if (effective.length === 0) return 0;
+    let dayKosu = 0, nightKosu = 0;
+    effective.forEach(r => {
+      const k = Number(r.kosu) || 0;
+      if (r.yakin === '夜勤') {
+        if (k > nightKosu) nightKosu = k;
+      } else {
+        if (k > dayKosu) dayKosu = k;
+      }
+    });
+    return dayKosu + nightKosu;
+  }
+
+  const dayNames = ['日','月','火','水','木','金','土'];
+  // ヘッダ: ['名前 ▼', 'M/D(曜)', ..., '合計']
+  const header = ['名前 ▼'].concat(days.map(d => {
+    const dt = new Date(d + 'T00:00:00');
+    return (dt.getMonth() + 1) + '/' + dt.getDate() + '(' + dayNames[dt.getDay()] + ')';
+  })).concat(['合計']);
+
+  // タイトル行
+  const titleRow = ['期間: ' + dateFrom + ' 〜 ' + dateTo + (companyFilter && companyFilter !== '全社' ? ' / ' + companyFilter : ' / 全社')];
+
+  // データ行
+  const dataRows = names.map(name => {
+    const row = [name];
+    let total = 0;
+    days.forEach(d => {
+      const k = getKosuForDay(name, d);
+      row.push(k > 0 ? k : 0);
+      total += k;
+    });
+    row.push(total);
+    return row;
+  });
+
+  // 合計行
+  const totalRow = ['合計'];
+  let grandTotal = 0;
+  days.forEach(d => {
+    let s = 0;
+    names.forEach(n => { s += getKosuForDay(n, d); });
+    totalRow.push(s > 0 ? s : 0);
+    grandTotal += s;
+  });
+  totalRow.push(grandTotal);
+
+  return {
+    rows: [titleRow, header].concat(dataRows).concat([totalRow]),
+    dateFrom: dateFrom,
+    dateTo: dateTo,
+    days: days.length,
+    members: names.length
+  };
 }
 
 function generateKakuninTable_(ss, records) {

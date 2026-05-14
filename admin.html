@@ -514,7 +514,18 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="事業部別按分">事業部別按分</option>
     <option value="操作ログ">操作ログ</option>
   </select>
-  <button class="btn btn-secondary" id="csv-btn" onclick="downloadSheetCSV()">ダウンロード</button>
+  <div style="font-size:12px;color:#666;margin-bottom:4px;margin-top:4px">期間フィルタ（任意・日報データ／アーカイブのみ有効）</div>
+  <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;font-size:13px">
+    <input type="date" id="csv-date-from" style="flex:1;padding:6px;font-size:13px">
+    <span style="color:#999">〜</span>
+    <input type="date" id="csv-date-to" style="flex:1;padding:6px;font-size:13px">
+    <button class="btn btn-secondary btn-sm" onclick="clearCsvDateRange()" style="padding:4px 8px;font-size:12px">×</button>
+  </div>
+  <button class="btn btn-secondary" id="csv-btn" onclick="downloadSheetCSV()" style="margin-bottom:6px">ダウンロード</button>
+  <div style="border-top:1px dashed #ddd;margin-top:8px;padding-top:8px">
+    <div style="font-size:12px;color:#666;margin-bottom:4px;font-weight:500">📊 期間集計CSV（職人×日付の人工マトリクス・合計込み）</div>
+    <button class="btn btn-secondary" id="period-kakunin-btn" onclick="downloadPeriodKakuninCSV()">期間集計CSVをダウンロード</button>
+  </div>
 </div>
 <div style="display:flex;gap:8px;margin-top:8px">
   <button class="btn btn-secondary" style="flex:1" onclick="openSettings()">職人を管理</button>
@@ -2328,16 +2339,56 @@ function updateJimu(){
     entries.map(([name,v])=>`<tr><td>${esc(name)}</td><td><span class="company-badge">${esc(v.company)}</span></td><td>${v.days}日</td><td>${v.kosu.toFixed(1)}人工</td></tr>`).join(''):
     `<tr><td colspan="4" class="empty">データなし</td></tr>`;
 }
+// CSV ダウンロード（任意で期間フィルタ。日報データ／アーカイブのみ GAS 側でフィルタされる）
 async function downloadSheetCSV(){
   const sheetName=document.getElementById('csv-sheet').value;const btn=document.getElementById('csv-btn');btn.textContent='取得中...';btn.disabled=true;
-  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'get_sheet',sheet:sheetName}),headers:{'Content-Type':'text/plain'}});
+  const dateFrom=(document.getElementById('csv-date-from')||{}).value||'';
+  const dateTo=(document.getElementById('csv-date-to')||{}).value||'';
+  if(dateFrom && dateTo && dateFrom > dateTo){alert('開始日が終了日より後です');btn.textContent='ダウンロード';btn.disabled=false;return;}
+  const reqBody={action:'get_sheet',sheet:sheetName};
+  if(dateFrom)reqBody.dateFrom=dateFrom;
+  if(dateTo)reqBody.dateTo=dateTo;
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify(reqBody),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'&&json.data){const BOM='\uFEFF';const csvEsc=v=>{const s=String(v==null?'':v);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;};
       const csv=json.data.map(row=>row.map(csvEsc).join(',')).join('\n');const blob=new Blob([BOM+csv],{type:'text/csv;charset=utf-8;'});
-      const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`${sheetName}.csv`;a.click();}
+      const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+      const suffix=(dateFrom||dateTo)?`_${dateFrom||'始'}_${dateTo||'今'}`:'';
+      a.download=`${sheetName}${suffix}.csv`;a.click();}
     else alert('エラー：'+(json.message||'データなし'));}catch(e){alert('エラー：'+e.message);}
   btn.textContent='ダウンロード';btn.disabled=false;
 }
+
+function clearCsvDateRange(){
+  const f=document.getElementById('csv-date-from');if(f)f.value='';
+  const t=document.getElementById('csv-date-to');if(t)t.value='';
+}
+
+// 期間指定の月別確認表風 CSV を取得（GAS 側で集計してくれる）
+async function downloadPeriodKakuninCSV(){
+  const btn=document.getElementById('period-kakunin-btn');
+  const dateFrom=(document.getElementById('csv-date-from')||{}).value||'';
+  const dateTo=(document.getElementById('csv-date-to')||{}).value||'';
+  if(!dateFrom||!dateTo){alert('期間集計CSVは開始日と終了日の両方を指定してください');return;}
+  if(dateFrom > dateTo){alert('開始日が終了日より後です');return;}
+  btn.textContent='集計中...';btn.disabled=true;
+  const reqBody={action:'period_kakunin',dateFrom,dateTo};
+  if(currentCompany && currentCompany!=='全社')reqBody.company=currentCompany;
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify(reqBody),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'&&json.rows){
+      const BOM='﻿';const csvEsc=v=>{const s=String(v==null?'':v);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;};
+      const csv=json.rows.map(row=>row.map(csvEsc).join(',')).join('\n');
+      const blob=new Blob([BOM+csv],{type:'text/csv;charset=utf-8;'});
+      const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+      const co=(currentCompany&&currentCompany!=='全社')?`_${currentCompany}`:'';
+      a.download=`期間集計${co}_${dateFrom}_${dateTo}.csv`;a.click();
+    }else alert('エラー：'+(json.message||'データなし'));
+  }catch(e){alert('エラー：'+e.message);}
+  btn.textContent='期間集計CSVをダウンロード';btn.disabled=false;
+}
+
 async function runSummary(){
   const btn=document.getElementById('summary-btn');btn.textContent='集計中...';btn.disabled=true;
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'summarize'}),headers:{'Content-Type':'text/plain'}});
