@@ -1,0 +1,45 @@
+# =====================================================
+# このリポは GitHub Pages 用にファイルをルート直下で運用しているため、
+# ローカル作業用の素材・素材ソース・メモ等はすべて gitignore で除外する。
+# 必要なのは index.html / admin.html / president.html / gas.js / links.html
+# / manifest.json / icon.png のみ。
+# =====================================================
+
+# APIキー・機密情報（誤コミット防止）
+Create API Key.txt
+*.secret
+*.env
+.env*
+
+# Claude Code ローカル設定
+.claude/
+
+# OS / エディタ
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# ローカル作業用フォルダ（ローカルで編集→ルートにコピーする運用）
+deploy/
+docs/
+scripts/
+
+# ローカル作業用メモ（公開不要）
+向　デバッグ.txt
+引き継ぎ.md
+引き継ぎ_*.md
+ラインボットからの依頼.md
+ラインボットへの返信.md
+
+# スクリーンショット（配信不要）
+S__*.jpg
+S__*.jpeg
+S__*.png
+
+# 退避済みの素材
+icon_original_*.png
+icon_*_backup.png
+
+# Node
+node_modules/
+npm-debug.log*
