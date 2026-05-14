@@ -1302,9 +1302,8 @@ function exportPeriodKakuninAsXlsxBase64_(ss, dateFrom, dateTo, companyFilter) {
       tempSheet.getRange(2, 1, namesCount + 2, totalCols).setBorder(true, true, true, true, true, true);
     }
 
-    // 9) ヘッダ行を固定（オプション・見栄え用）
+    // 9) ヘッダ行を固定（行のみ。列を固定するとタイトル行のセル結合と競合してエラーになる）
     tempSheet.setFrozenRows(2);
-    tempSheet.setFrozenColumns(1);
 
     // 10) 一時シートに反映してから xlsx エクスポート（少し待つ）
     SpreadsheetApp.flush();
