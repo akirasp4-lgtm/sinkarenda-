@@ -526,6 +526,14 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <div style="font-size:12px;color:#666;margin-bottom:4px;font-weight:500">📊 期間集計CSV（職人×日付の人工マトリクス・合計込み）</div>
     <button class="btn btn-secondary" id="period-kakunin-btn" onclick="downloadPeriodKakuninCSV()">期間集計CSVをダウンロード</button>
   </div>
+  <div style="border-top:1px dashed #ddd;margin-top:8px;padding-top:8px">
+    <div style="font-size:12px;color:#666;margin-bottom:4px;font-weight:500">📥 Excel（.xlsx）— 色・罫線・書式そのまま</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn btn-secondary btn-sm" id="kakunin-xlsx-btn" onclick="downloadKakuninXlsx()" style="flex:1;min-width:140px">月別確認表（全期間）</button>
+      <button class="btn btn-secondary btn-sm" id="period-kakunin-xlsx-btn" onclick="downloadPeriodKakuninXlsx()" style="flex:1;min-width:140px">期間指定で出力</button>
+    </div>
+    <div style="font-size:11px;color:#999;margin-top:4px">※「期間指定で出力」は上の開始日／終了日が必要です</div>
+  </div>
 </div>
 <div style="display:flex;gap:8px;margin-top:8px">
   <button class="btn btn-secondary" style="flex:1" onclick="openSettings()">職人を管理</button>
@@ -2387,6 +2395,48 @@ async function downloadPeriodKakuninCSV(){
     }else alert('エラー：'+(json.message||'データなし'));
   }catch(e){alert('エラー：'+e.message);}
   btn.textContent='期間集計CSVをダウンロード';btn.disabled=false;
+}
+
+// base64 を Blob 化してダウンロードトリガー（xlsx 用の共通ヘルパー）
+function _downloadBase64Xlsx(base64, filename){
+  const bin=atob(base64);const u8=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)u8[i]=bin.charCodeAt(i);
+  const blob=new Blob([u8],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),60000);
+}
+
+// 月別確認表シート全体を xlsx で（色・罫線そのまま）
+async function downloadKakuninXlsx(){
+  const btn=document.getElementById('kakunin-xlsx-btn');btn.textContent='生成中...';btn.disabled=true;
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'export_kakunin_xlsx'}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'&&json.base64){
+      _downloadBase64Xlsx(json.base64,json.filename||'月別確認表.xlsx');
+    }else alert('エラー：'+(json.message||'不明'));
+  }catch(e){alert('エラー：'+e.message);}
+  btn.textContent='月別確認表（全期間）';btn.disabled=false;
+}
+
+// 期間指定 月別確認表（見た目付き）xlsx
+async function downloadPeriodKakuninXlsx(){
+  const btn=document.getElementById('period-kakunin-xlsx-btn');
+  const dateFrom=(document.getElementById('csv-date-from')||{}).value||'';
+  const dateTo=(document.getElementById('csv-date-to')||{}).value||'';
+  if(!dateFrom||!dateTo){alert('期間指定のxlsxは開始日と終了日の両方を指定してください');return;}
+  if(dateFrom>dateTo){alert('開始日が終了日より後です');return;}
+  btn.textContent='生成中...';btn.disabled=true;
+  const reqBody={action:'export_period_kakunin_xlsx',dateFrom,dateTo};
+  if(currentCompany&&currentCompany!=='全社')reqBody.company=currentCompany;
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify(reqBody),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'&&json.base64){
+      _downloadBase64Xlsx(json.base64,json.filename||'期間集計.xlsx');
+    }else alert('エラー：'+(json.message||'不明'));
+  }catch(e){alert('エラー：'+e.message);}
+  btn.textContent='期間指定で出力';btn.disabled=false;
 }
 
 async function runSummary(){

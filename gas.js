@@ -313,6 +313,27 @@ function doPost(e) {
       return ok(result);
     }
 
+    // 月別確認表シートを xlsx 形式（色・罫線・書式そのまま）でエクスポートして base64 で返す
+    if (action === 'export_kakunin_xlsx') {
+      const kSheet = ss.getSheetByName(KAKUNIN_SHEET);
+      if (!kSheet) return error('月別確認表シートが見つかりません。先に集計を更新してください');
+      const result = exportSheetAsXlsxBase64_(ss, kSheet);
+      return ok({base64: result.base64, filename: '月別確認表.xlsx'});
+    }
+
+    // 期間指定の月別確認表（見た目付き）を xlsx でエクスポート。一時シートを作って書式設定→xlsx化→削除
+    if (action === 'export_period_kakunin_xlsx') {
+      const dateFrom = String(body.dateFrom || '').trim();
+      const dateTo = String(body.dateTo || '').trim();
+      if (!dateFrom || !dateTo) return error('開始日と終了日を指定してください');
+      if (dateFrom > dateTo) return error('開始日が終了日より後です');
+      const companyFilter = String(body.company || '').trim();
+      const tag = (companyFilter && companyFilter !== '全社') ? '_' + companyFilter : '';
+      const filename = '期間集計' + tag + '_' + dateFrom + '_' + dateTo + '.xlsx';
+      const result = exportPeriodKakuninAsXlsxBase64_(ss, dateFrom, dateTo, companyFilter);
+      return ok({base64: result.base64, filename: filename});
+    }
+
     if (action === 'add_member') {
       const memberSheet = getOrCreateMemberSheet_(ss);
       const name = String(body.name || '').trim();
@@ -1185,6 +1206,115 @@ function generatePeriodKakuninData_(ss, dateFrom, dateTo, companyFilter) {
     days: days.length,
     members: names.length
   };
+}
+
+// 指定シートを xlsx として書き出し base64 で返す（書式・色・罫線そのまま保持）
+// 内部的に Google Sheets の export URL を OAuth トークン付きで叩く方式。
+function exportSheetAsXlsxBase64_(ss, sheet) {
+  const url = 'https://docs.google.com/spreadsheets/d/' + ss.getId() + '/export'
+    + '?format=xlsx&gid=' + sheet.getSheetId();
+  const resp = UrlFetchApp.fetch(url, {
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    muteHttpExceptions: true
+  });
+  if (resp.getResponseCode() >= 300) {
+    throw new Error('xlsxエクスポート失敗: HTTP ' + resp.getResponseCode());
+  }
+  const bytes = resp.getBlob().getBytes();
+  return { base64: Utilities.base64Encode(bytes) };
+}
+
+// 期間指定の月別確認表（見た目付き）を一時シートに描いて xlsx に書き出し、base64 で返す
+function exportPeriodKakuninAsXlsxBase64_(ss, dateFrom, dateTo, companyFilter) {
+  // 1) データを準備
+  const data = generatePeriodKakuninData_(ss, dateFrom, dateTo, companyFilter);
+  const rows = data.rows;
+  const daysInRange = data.days;
+  const namesCount = data.members;
+  const totalCols = 1 + daysInRange + 1; // 名前 + 日付×n + 合計
+
+  // 2) 一時シートを作成（重複名対策でタイムスタンプ）
+  const tempName = '_TMP期間集計_' + (new Date().getTime());
+  const tempSheet = ss.insertSheet(tempName);
+
+  try {
+    // 3) 値を一括書き込み（rows は可変長なので 2D 配列に揃える）
+    const writeData = rows.map(r => {
+      const out = [];
+      for (let i = 0; i < totalCols; i++) out.push(i < r.length ? r[i] : '');
+      return out;
+    });
+    tempSheet.getRange(1, 1, writeData.length, totalCols).setValues(writeData);
+
+    // 4) 列幅
+    tempSheet.setColumnWidth(1, 100);
+    for (let c = 2; c <= 1 + daysInRange; c++) tempSheet.setColumnWidth(c, 28);
+    tempSheet.setColumnWidth(totalCols, 50);
+
+    // 5) 書式：タイトル行（黄色背景、結合、太字）
+    const titleRow = tempSheet.getRange(1, 1, 1, totalCols);
+    titleRow.merge().setHorizontalAlignment('center').setFontSize(13)
+      .setFontWeight('bold').setBackground('#F9E400');
+
+    // 6) ヘッダ行：灰色背景、整数書式、土日色、太字
+    const headerRow = tempSheet.getRange(2, 1, 1, totalCols);
+    headerRow.setFontWeight('bold').setBackground('#CCCCCC').setHorizontalAlignment('center');
+    tempSheet.getRange(2, 2, 1, daysInRange).setNumberFormat('@');  // 文字として扱う（M/D(曜) なので数値解釈の心配は元々ないが念のため）
+    // 日付ごとに曜日色を適用
+    const sd = new Date(dateFrom + 'T00:00:00');
+    for (let i = 0; i < daysInRange; i++) {
+      const d = new Date(sd.getFullYear(), sd.getMonth(), sd.getDate() + i);
+      const dow = d.getDay();
+      const cell = tempSheet.getRange(2, 2 + i);
+      if (dow === 0) cell.setFontColor('#CC0000');
+      else if (dow === 6) cell.setFontColor('#0000CC');
+    }
+
+    // 7) データ行：交互背景、ゼロは薄色、土日列の背景
+    const dataStartRow = 3;
+    const dataEndRow = dataStartRow + namesCount - 1;
+    for (let ri = 0; ri < namesCount; ri++) {
+      const r = dataStartRow + ri;
+      const bg = ri % 2 === 0 ? '#FFFFFF' : '#F0FFF0';
+      tempSheet.getRange(r, 1, 1, totalCols).setBackground(bg);
+      tempSheet.getRange(r, 1).setFontWeight('bold');
+      tempSheet.getRange(r, 2, 1, totalCols - 1).setNumberFormat('0.##').setHorizontalAlignment('center');
+      // ゼロセルのフォント色 + 土日列の背景
+      for (let i = 0; i < daysInRange; i++) {
+        const d = new Date(sd.getFullYear(), sd.getMonth(), sd.getDate() + i);
+        const dow = d.getDay();
+        const cell = tempSheet.getRange(r, 2 + i);
+        const v = rows[2 + ri][1 + i];
+        if (v === 0) cell.setFontColor('#CCCCCC');
+        if (dow === 0) cell.setBackground('#FFE6E6');
+        else if (dow === 6) cell.setBackground('#E6E6FF');
+      }
+      tempSheet.getRange(r, totalCols).setFontWeight('bold').setHorizontalAlignment('center');
+    }
+
+    // 8) 合計行：黄色背景、太字、罫線
+    const totalRowNum = dataEndRow + 1;
+    tempSheet.getRange(totalRowNum, 1, 1, totalCols)
+      .setFontWeight('bold').setBackground('#FFF9C4').setHorizontalAlignment('center');
+    tempSheet.getRange(totalRowNum, 2, 1, totalCols - 1).setNumberFormat('0.##');
+    // テーブル全体に罫線
+    if (namesCount > 0) {
+      tempSheet.getRange(2, 1, namesCount + 2, totalCols).setBorder(true, true, true, true, true, true);
+    }
+
+    // 9) ヘッダ行を固定（オプション・見栄え用）
+    tempSheet.setFrozenRows(2);
+    tempSheet.setFrozenColumns(1);
+
+    // 10) 一時シートに反映してから xlsx エクスポート（少し待つ）
+    SpreadsheetApp.flush();
+
+    const result = exportSheetAsXlsxBase64_(ss, tempSheet);
+    return result;
+  } finally {
+    // 11) 一時シートを削除
+    try { ss.deleteSheet(tempSheet); } catch (e) { /* 削除失敗は黙殺 */ }
+  }
 }
 
 function generateKakuninTable_(ss, records) {
