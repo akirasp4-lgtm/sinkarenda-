@@ -304,6 +304,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   </div>
   <input type="text" id="s-genba" placeholder="例：〇〇電気" style="display:none;margin-bottom:12px">
   <label>現場名</label>
+  <input type="search" id="s-location-search" placeholder="🔍 現場名で絞り込み（部分一致）" oninput="onLocationSearch('s')" style="margin-bottom:4px;font-size:13px;padding:6px 10px;width:100%;box-sizing:border-box;border:1px solid #ddd;border-radius:6px">
   <select id="s-location-select" onchange="onLocationSelect('s')" style="margin-bottom:6px">
     <option value="">既存の現場から選択</option>
     <option value="__new__" style="color:#1D9E75;font-weight:600">＋ 新規現場として追加</option>
@@ -559,6 +560,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <select id="e-genba-select" onchange="onGenbaSelect('e')"><option value="">選択してください</option><option value="__manual__">直接入力する</option></select>
   <input type="text" id="e-genba" style="display:none;margin-bottom:12px">
   <label>現場名</label>
+  <input type="search" id="e-location-search" placeholder="🔍 現場名で絞り込み（部分一致）" oninput="onLocationSearch('e')" style="margin-bottom:4px;font-size:13px;padding:6px 10px;width:100%;box-sizing:border-box;border:1px solid #ddd;border-radius:6px">
   <select id="e-location-select" onchange="onLocationSelect('e')" style="margin-bottom:6px">
     <option value="">既存の現場から選択</option>
     <option value="__new__" style="color:#1D9E75;font-weight:600">＋ 新規現場として追加</option>
@@ -1296,6 +1298,8 @@ function updateLocationSuggestions(){
 }
 
 // 現場名プルダウンの populate（選択された元請の既存現場を表示）
+// - 最近使った順（lastUsed 日付の降順）で並べる
+// - 検索ボックス（p+'-location-search'）に入力があれば部分一致で絞り込み
 function populateLocationSelect(p){
   const sel=document.getElementById(p+'-location-select');
   if(!sel)return;
@@ -1303,11 +1307,28 @@ function populateLocationSelect(p){
   let pool=(allNippos||[]).filter(n=>!n.isGhost);
   if(currentCompany!=='全社')pool=pool.filter(n=>n.company===currentCompany);
   if(genba)pool=pool.filter(n=>n.genba===genba);
-  const locs=[...new Set(pool.filter(n=>n.loc).map(n=>n.loc))].sort();
+  // 現場名ごとに最新日を記録（最近使った順ソート用）
+  const lastUsed={};
+  pool.forEach(n=>{
+    if(!n.loc)return;
+    if(!lastUsed[n.loc]||(n.date||'')>lastUsed[n.loc])lastUsed[n.loc]=n.date||'';
+  });
+  let locs=Object.keys(lastUsed);
+  const totalCount=locs.length;
+  // 検索フィルタ
+  const searchEl=document.getElementById(p+'-location-search');
+  const q=(searchEl?searchEl.value:'').trim().toLowerCase();
+  if(q)locs=locs.filter(l=>l.toLowerCase().includes(q));
+  // 最近使った順にソート（日付降順、同日は五十音順）
+  locs.sort((a,b)=>{
+    const d=(lastUsed[b]||'').localeCompare(lastUsed[a]||'');
+    return d!==0?d:a.localeCompare(b);
+  });
   const currentVal=(document.getElementById(p+'-location')||{}).value||'';
-  // 既存リストに現在の値があるかチェック
   const inList=locs.includes(currentVal);
-  let html='<option value="">既存の現場から選択</option>';
+  // ラベルに件数を出す（絞り込み中はヒット件数/全件）
+  const labelTxt=q?`既存から選択（${locs.length}/${totalCount}件）`:`既存から選択（${totalCount}件・最近順）`;
+  let html=`<option value="">${esc(labelTxt)}</option>`;
   locs.forEach(l=>{
     html+=`<option value="${esc(l)}"${l===currentVal?' selected':''}>${esc(l)}</option>`;
   });
@@ -1323,6 +1344,11 @@ function populateLocationSelect(p){
   }else{
     if(input){input.style.display='none';input.value='';}
   }
+}
+
+// 検索ボックスの入力ハンドラ
+function onLocationSearch(p){
+  populateLocationSelect(p);
 }
 
 // 現場名プルダウン onchange
@@ -1560,6 +1586,7 @@ async function submitNippo(){
       applyWorkTypeLock('s');
       const _ls=document.getElementById('s-location-select');if(_ls)_ls.value='';
       const _li=document.getElementById('s-location');if(_li){_li.value='';_li.style.display='none';}
+      const _lse=document.getElementById('s-location-search');if(_lse)_lse.value='';
       const _lsim=document.getElementById('s-loc-similar');if(_lsim){_lsim.style.display='none';_lsim.innerHTML='';}
       document.getElementById('s-jobno-hint').style.display='none';
       document.getElementById('s-jobno-div-wrap').style.display='none';
@@ -2623,11 +2650,13 @@ function onGenbaSelect(p){
   }else{
     inp.style.display='none';inp.value=sel.value;
   }
-  // 元請変更時に現場プルダウンを再populate（現場名をリセット）
+  // 元請変更時に現場プルダウンを再populate（現場名と検索ボックスをリセット）
   const locInput=document.getElementById(p+'-location');
   const locSelect=document.getElementById(p+'-location-select');
+  const locSearch=document.getElementById(p+'-location-search');
   if(locInput)locInput.value='';
   if(locSelect)locSelect.value='';
+  if(locSearch)locSearch.value='';
   populateLocationSelect(p);
   if(p==='s'){updateLocationSuggestions();checkLocationJobNo();}
 }
