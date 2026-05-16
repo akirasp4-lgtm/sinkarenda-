@@ -1978,19 +1978,25 @@ function renderSiteCompletionRow_(g){
 async function toggleSiteCompletion_(genba,loc,completed){
   const msg=completed?`「${loc}」を完了にしますか？\n以後、新規の予定登録で現場プルダウンに出なくなります。\n（工番・既存の日報・集計には影響しません）`:`「${loc}」を進行中に戻しますか？`;
   if(!confirm(msg))return;
+  // 押下中表示：button を少しの間だけ無効化（連打防止）
+  const detailBody=document.getElementById('detail-fs-body');
+  if(detailBody)detailBody.querySelectorAll('button').forEach(b=>{if(b.textContent.includes('完了にする')||b.textContent.includes('進行中に戻す'))b.disabled=true;});
   try{
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update_site_status',genba,loc,completed,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'){
-      // ローカルの allJobsites を更新（再フェッチ無し）
+      // 楽観更新 → サーバとも同期するため loadData() で全体リフレッシュ
       const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
       if(j)j.completed=completed;
       else allJobsites.push({genba,loc,jobNo:'',completed});
       hapticSuccess();
+      // 詳細画面を即時に再描画（楽観更新の結果が見える）
+      if(typeof renderEventDetail==='function')renderEventDetail();
       showAlert(completed?`✓ 「${loc}」を完了にしました`:`↩ 「${loc}」を進行中に戻しました`,'ok');
-      renderEventDetail();
-      renderList&&renderList();
-      populateLocationSelect&&populateLocationSelect('s');
+      // サーバから最新データを再取得して全体を再描画
+      await loadData();
+      // 詳細画面がまだ開いていれば最終データで再描画
+      if(document.getElementById('cal-detail-modal')?.classList.contains('active')&&typeof renderEventDetail==='function')renderEventDetail();
     }else alert('エラー：'+(json.message||'不明'));
   }catch(e){alert('エラー：'+e.message);}
 }
