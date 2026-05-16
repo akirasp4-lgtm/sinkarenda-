@@ -547,6 +547,11 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="archive-desc" style="color:#1E3A8A">同じ会社が違う名前で登録されてしまった場合に、片方を残してもう片方のレコードを統合します。日報・アーカイブ・現場マスタ・元請マスタ全部を一括書き換え。</div>
   <button class="btn btn-secondary btn-sm" onclick="openMergeGenbaModal()">元請名をマージする</button>
 </div>
+<div class="archive-section" style="background:#F0F9FF;border-color:#7DD3FC;margin-top:8px">
+  <div class="archive-title" style="color:#075985">🔀 現場名を統合（マージ）</div>
+  <div class="archive-desc" style="color:#075985">同じ現場が表記揺れで別の現場として登録されている場合に統合します（例：「○○ビル」と「○○ビル新築」）。日報・アーカイブ・現場マスタ全部を書き換え、統合先の工番に統一されます。</div>
+  <button class="btn btn-secondary btn-sm" onclick="openMergeLocModal()">現場名をマージする</button>
+</div>
 <div class="archive-section" style="background:#E8F4FD;border-color:#85B7EB">
   <div class="archive-title" style="color:#0C447C">📊 スプレッドシート集計</div>
   <div class="archive-desc" style="color:#0C447C">会社別・月別の出勤日数・人工をスプレッドシートに自動集計します。毎朝6時にも自動更新されます。</div>
@@ -923,6 +928,31 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div style="display:flex;gap:8px">
     <button class="btn btn-secondary btn-sm" style="flex:1" onclick="document.getElementById('merge-genba-modal').classList.remove('active')">キャンセル</button>
     <button class="btn btn-sm" style="flex:1;background:#1E3A8A;color:#fff" onclick="runMergeGenba()">マージ実行</button>
+  </div>
+</div>
+</div>
+
+<div id="merge-loc-modal" class="modal-bg">
+<div class="modal" style="max-width:480px">
+  <div class="modal-title">🔀 現場名をマージ</div>
+  <p style="margin:0 0 12px;font-size:12px;color:#666">同じ元請の中で表記揺れになっている現場名を統合します。日報・アーカイブ・現場マスタを一括書き換え。<b>統合先に工番がある場合は日報の工番もそちらに統一されます。この操作は取り消せません。</b></p>
+  <label style="font-size:13px;color:#666">元請を選ぶ</label>
+  <select id="mloc-genba" style="margin-bottom:10px" onchange="updateMergeLocSelects()">
+    <option value="">選択してください</option>
+  </select>
+  <label style="font-size:13px;color:#666">統合する現場（消える方）</label>
+  <select id="mloc-from" style="margin-bottom:10px" onchange="updateMergeLocPreview()">
+    <option value="">先に元請を選んでください</option>
+  </select>
+  <label style="font-size:13px;color:#666">↓ こちらに統合</label>
+  <label style="font-size:13px;color:#666">残す現場（こちらに統一）</label>
+  <select id="mloc-to" style="margin-bottom:10px" onchange="updateMergeLocPreview()">
+    <option value="">先に元請を選んでください</option>
+  </select>
+  <div id="mloc-preview" style="font-size:12px;color:#666;background:#F3F4F6;padding:8px 10px;border-radius:6px;margin-bottom:12px;display:none"></div>
+  <div style="display:flex;gap:8px">
+    <button class="btn btn-secondary btn-sm" style="flex:1" onclick="document.getElementById('merge-loc-modal').classList.remove('active')">キャンセル</button>
+    <button class="btn btn-sm" style="flex:1;background:#075985;color:#fff" onclick="runMergeLoc()">マージ実行</button>
   </div>
 </div>
 </div>
@@ -2544,6 +2574,89 @@ async function runMergeGenba(){
     if(json.status==='ok'){
       alert(`✓ マージ完了\n\n日報更新: ${json.nippoUpdated||0}件\nアーカイブ更新: ${json.archiveUpdated||0}件\n現場マスタ更新: ${json.jobsiteUpdated||0}件\n元請マスタ: ${json.masterAction||'-'}`);
       document.getElementById('merge-genba-modal').classList.remove('active');
+      await loadData();
+    }else alert('エラー: '+json.message);
+  }catch(e){alert('エラー: '+e.message);}
+  finally{setLoading(false);}
+}
+
+// ===== 現場名マージ =====
+function openMergeLocModal(){
+  // 元請一覧（allNippos + allGenbaMaster から）
+  const genbas=[...new Set((allNippos||[]).filter(n=>!n.isGhost).map(n=>n.genba).filter(Boolean).concat(allGenbaMaster.map(g=>g.name)))].sort();
+  const gSel=document.getElementById('mloc-genba');
+  if(gSel){
+    gSel.innerHTML='<option value="">選択してください</option>'+genbas.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('');
+    gSel.value='';
+  }
+  ['mloc-from','mloc-to'].forEach(id=>{
+    const s=document.getElementById(id);
+    if(s)s.innerHTML='<option value="">先に元請を選んでください</option>';
+  });
+  document.getElementById('mloc-preview').style.display='none';
+  document.getElementById('merge-loc-modal').classList.add('active');
+}
+
+// 元請が選ばれたら from/to の現場名プルダウンを更新
+function updateMergeLocSelects(){
+  const genba=document.getElementById('mloc-genba').value;
+  const fromSel=document.getElementById('mloc-from');
+  const toSel=document.getElementById('mloc-to');
+  if(!genba){
+    [fromSel,toSel].forEach(s=>{if(s)s.innerHTML='<option value="">先に元請を選んでください</option>';});
+    document.getElementById('mloc-preview').style.display='none';
+    return;
+  }
+  // 日報・アーカイブから その元請の現場名一覧を作る（最近使った順）
+  const lastUsed={};
+  (allNippos||[]).forEach(n=>{
+    if(n.isGhost||!n.loc||n.genba!==genba)return;
+    if(!lastUsed[n.loc]||(n.date||'')>lastUsed[n.loc])lastUsed[n.loc]=n.date||'';
+  });
+  // 現場マスタにあるけど日報にない現場も拾う
+  (allJobsites||[]).forEach(j=>{
+    if(j.genba!==genba||!j.loc)return;
+    if(!(j.loc in lastUsed))lastUsed[j.loc]='';
+  });
+  let locs=Object.keys(lastUsed).sort((a,b)=>{
+    const d=(lastUsed[b]||'').localeCompare(lastUsed[a]||'');
+    return d!==0?d:a.localeCompare(b);
+  });
+  const opts='<option value="">選択してください</option>'+locs.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('');
+  if(fromSel)fromSel.innerHTML=opts;
+  if(toSel)toSel.innerHTML=opts;
+  document.getElementById('mloc-preview').style.display='none';
+}
+
+function updateMergeLocPreview(){
+  const genba=document.getElementById('mloc-genba').value;
+  const from=document.getElementById('mloc-from').value;
+  const to=document.getElementById('mloc-to').value;
+  const prev=document.getElementById('mloc-preview');
+  if(!genba||!from||!to){prev.style.display='none';return;}
+  if(from===to){prev.style.display='';prev.innerHTML='<span style="color:#dc2626">⚠️ 同じ現場名を選んでます</span>';return;}
+  const fromCount=(allNippos||[]).filter(n=>!n.isGhost&&n.genba===genba&&n.loc===from).length;
+  const toJ=(allJobsites||[]).find(j=>j.genba===genba&&j.loc===to);
+  const toJobNo=toJ?toJ.jobNo:'';
+  prev.style.display='';
+  prev.innerHTML=`📊 影響範囲（プレビュー）<br>「${esc(genba)} / ${esc(from)}」の日報 約 <b>${fromCount}</b> 件が「${esc(to)}」に書き換えられます。`+(toJobNo?`<br>工番も <b>${esc(toJobNo)}</b> に統一されます。`:'<br>統合先に工番がないため、日報の工番はそのまま残ります。');
+}
+
+async function runMergeLoc(){
+  const genba=document.getElementById('mloc-genba').value;
+  const from=document.getElementById('mloc-from').value;
+  const to=document.getElementById('mloc-to').value;
+  if(!genba||!from||!to){alert('元請、統合元、統合先の全てを選んでください');return;}
+  if(from===to){alert('同じ現場名です');return;}
+  if(!confirm(`本当に統合しますか？\n\n元請: ${genba}\n「${from}」→「${to}」\n\nこの操作は取り消せません。`))return;
+  try{
+    setLoading(true);
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'merge_loc',genba,fromLoc:from,toLoc:to,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){
+      const masterMsg={deleted_duplicate:'統合元行を削除',renamed:'統合元行を改名',to_only:'統合先のみ存在',none:'操作なし'}[json.masterAction]||json.masterAction;
+      alert(`✓ マージ完了\n\n日報更新: ${json.nippoUpdated||0}件\nアーカイブ更新: ${json.archiveUpdated||0}件\n現場マスタ: ${masterMsg}${json.toJobNo?`\n統一された工番: ${json.toJobNo}`:''}`);
+      document.getElementById('merge-loc-modal').classList.remove('active');
       await loadData();
     }else alert('エラー: '+json.message);
   }catch(e){alert('エラー: '+e.message);}

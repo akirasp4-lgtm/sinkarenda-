@@ -258,6 +258,20 @@ function doPost(e) {
       return ok(result);
     }
 
+    // 同じ元請内で「現場名」を統合する。日報・アーカイブ・現場マスタを書き換え。
+    // 統合先に工番がある場合は日報側の工番もそちらに統一する。
+    // body: { genba, fromLoc, toLoc, updatedBy }
+    if (action === 'merge_loc') {
+      const genba = String(body.genba || '').trim();
+      const fromLoc = String(body.fromLoc || '').trim();
+      const toLoc = String(body.toLoc || '').trim();
+      if (!genba || !fromLoc || !toLoc) return error('元請、統合元、統合先の現場名は必須です');
+      if (fromLoc === toLoc) return error('同じ現場名です');
+      const result = mergeLoc_(ss, genba, fromLoc, toLoc);
+      logOperation_(ss, 'merge_loc', genba + '/' + fromLoc + ' → ' + toLoc, JSON.stringify(result), updatedBy);
+      return ok(result);
+    }
+
     if (action === 'summarize') {
       generateSummary_();
       return ok({message: '集計を更新しました'});
@@ -2036,6 +2050,71 @@ function mergeGenba_(ss, fromName, toName) {
       }
     } else {
       result.masterAction = 'from_not_found';
+    }
+  }
+  return result;
+}
+
+// 同じ元請内で「現場名」を fromLoc から toLoc に統合する
+// 日報・アーカイブの現場名を書き換え、現場マスタも整理（toLoc 行があれば from を削除、なければ from を改名）
+// 統合先の現場マスタに工番がある場合は日報側の工番もそちらに統一する
+function mergeLoc_(ss, genba, fromLoc, toLoc) {
+  const result = { nippoUpdated: 0, archiveUpdated: 0, masterAction: 'none', toJobNo: '' };
+
+  // 1. 現場マスタを先に調べる（統合先の工番取得 + from/to 行の位置確認）
+  const jobSite = ss.getSheetByName(JOBSITE_SHEET);
+  let toJobNo = '';
+  let fromRowIdx = -1;
+  let toRowIdx = -1;
+  if (jobSite) {
+    const jData = jobSite.getDataRange().getValues();
+    for (let i = 1; i < jData.length; i++) {
+      const g = String(jData[i][0] || '').trim();
+      const l = String(jData[i][1] || '').trim();
+      if (g !== genba) continue;
+      if (l === toLoc) { toRowIdx = i; toJobNo = String(jData[i][2] || ''); }
+      if (l === fromLoc) { fromRowIdx = i; }
+    }
+  }
+  result.toJobNo = toJobNo;
+
+  // 2. 日報データ・アーカイブを書き換え（現場名 + 任意で工番）
+  [SHEET_NAME, ARCHIVE_SHEET].forEach((name, idx) => {
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) return;
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return;
+    const headers = data[0];
+    const gCol = headers.indexOf('元請名');
+    const lCol = headers.indexOf('現場名');
+    const jCol = headers.indexOf('工番');
+    if (gCol < 0 || lCol < 0) return;
+    let count = 0;
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][gCol] || '').trim() !== genba) continue;
+      if (String(data[i][lCol] || '').trim() !== fromLoc) continue;
+      sheet.getRange(i + 1, lCol + 1).setValue(toLoc);
+      if (toJobNo && jCol >= 0) sheet.getRange(i + 1, jCol + 1).setValue(toJobNo);
+      count++;
+    }
+    if (idx === 0) result.nippoUpdated = count; else result.archiveUpdated = count;
+  });
+
+  // 3. 現場マスタを整理
+  if (jobSite) {
+    if (fromRowIdx > 0 && toRowIdx > 0) {
+      // 両方ある → from 行を削除（売上などは to 側を残す）
+      jobSite.deleteRow(fromRowIdx + 1);
+      result.masterAction = 'deleted_duplicate';
+    } else if (fromRowIdx > 0) {
+      // from のみある → 現場名を toLoc に改名
+      jobSite.getRange(fromRowIdx + 1, 2).setValue(toLoc);
+      result.masterAction = 'renamed';
+    } else if (toRowIdx > 0) {
+      // to のみある → 何もしない（日報側だけ書き換えた）
+      result.masterAction = 'to_only';
+    } else {
+      result.masterAction = 'none';
     }
   }
   return result;
