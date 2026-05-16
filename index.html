@@ -294,6 +294,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="カギ借用">🗝️ カギ借用</option>
     <option value="材料引き取り">📦 材料引き取り</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
+    <option value="前乗り">🚗 前乗り</option>
     <option value="その他">📋 その他</option>
   </select>
   <div id="s-worktype-notice" style="color:#dc2626;font-size:13px;font-weight:600;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:8px 12px;margin-bottom:12px">⚠️ 最初に「作業区分」を選択してください。選択するまで以下の項目は入力できません。</div>
@@ -553,6 +554,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="カギ借用">🗝️ カギ借用</option>
     <option value="材料引き取り">📦 材料引き取り</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
+    <option value="前乗り">🚗 前乗り</option>
     <option value="その他">📋 その他</option>
   </select>
   <div id="e-worktype-notice" style="display:none;color:#dc2626;font-size:13px;font-weight:600;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:8px 12px;margin-bottom:12px">⚠️ 最初に「作業区分」を選択してください。選択するまで以下の項目は編集できません。</div>
@@ -651,6 +653,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
       <li><b>カギ借用</b>: カギの貸借や立会のみ — 工番なし</li>
       <li><b>材料引き取り</b>: 材料・道具の搬出入 — 工番なし</li>
       <li><b>撤去品返却</b>: 撤去物の返却作業 — 工番なし</li>
+      <li><b>前乗り</b>: 前日の移動・宿泊など実作業前の前乗り — 工番なし</li>
       <li><b>その他</b>: 上記以外 — 工番なし</li>
     </ul>
     <p style="font-size:12px;color:#666">集計（人工合計）は全区分を合算。カレンダーでは現場作業以外が黄色いタグで表示されます。</p>
@@ -1852,7 +1855,7 @@ function openCalDay(dateStr){
         }
       }
       const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
-      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','撤去品返却':'♻️','その他':'📋'};
+      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','撤去品返却':'♻️','前乗り':'🚗','その他':'📋'};
       const wt=g.workType||'現場作業';
       const wtEmoji=wtMap[wt]||'🏷️';
       const wtCls=wt==='現場作業'?'worktype-chip worktype-default':'worktype-chip';

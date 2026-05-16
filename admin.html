@@ -316,6 +316,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="カギ借用">🗝️ カギ借用</option>
     <option value="材料引き取り">📦 材料引き取り</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
+    <option value="前乗り">🚗 前乗り</option>
     <option value="その他">📋 その他</option>
   </select>
   <div id="s-worktype-notice" style="color:#dc2626;font-size:13px;font-weight:600;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:8px 12px;margin-bottom:12px">⚠️ 最初に「作業区分」を選択してください。選択するまで以下の項目は入力できません。</div>
@@ -607,6 +608,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="カギ借用">🗝️ カギ借用</option>
     <option value="材料引き取り">📦 材料引き取り</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
+    <option value="前乗り">🚗 前乗り</option>
     <option value="その他">📋 その他</option>
   </select>
   <div id="e-worktype-notice" style="display:none;color:#dc2626;font-size:13px;font-weight:600;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:8px 12px;margin-bottom:12px">⚠️ 最初に「作業区分」を選択してください。選択するまで以下の項目は編集できません。</div>
@@ -844,7 +846,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <h3>🏷 作業区分（必須・ゲート）</h3>
     <p>登録／編集モーダルでは <b>作業区分を最初に選択するまで他の項目が入力できません</b>（赤い警告バー表示）。表記揺れ防止と工番の正しい発番のためのガード。</p>
     <ul>
-      <li>区分: <b>現場作業 / 現調 / 着打ち / カギ借用 / 材料引き取り / 撤去品返却 / その他</b></li>
+      <li>区分: <b>現場作業 / 現調 / 着打ち / カギ借用 / 材料引き取り / 撤去品返却 / 前乗り / その他</b></li>
       <li>グローライズの<b>工番は「現場作業」のみ発行</b>（他の区分・休み・倉庫・予定では工番なし）</li>
       <li>集計上は<b>全区分を合算</b>。詳細画面・月別確認表では区分が見えるよう表示</li>
     </ul>
@@ -1900,7 +1902,7 @@ function openCalDay(dateStr){
         }
       }
       const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
-      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','撤去品返却':'♻️','その他':'📋'};
+      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','撤去品返却':'♻️','前乗り':'🚗','その他':'📋'};
       const wt=g.workType||'現場作業';
       const wtEmoji=wtMap[wt]||'🏷️';
       const wtCls=wt==='現場作業'?'worktype-chip worktype-default':'worktype-chip';
