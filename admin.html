@@ -2737,12 +2737,15 @@ async function openJobNoFix(){
           <input type="number" id="jnfix-rev-${idx}" value="${revenue||''}" placeholder="0" style="flex:1;margin:0">
           <button class="btn btn-sm" style="flex-shrink:0;background:#3B82F6;color:#fff" onclick="saveSiteRevenue(${idx},this.dataset.genba,this.dataset.loc)" data-genba="${esc(genba)}" data-loc="${esc(loc)}">売上保存</button>
         </div>
-        <div style="display:flex;gap:6px;align-items:center">
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
           <label style="font-size:11px;color:#666;white-space:nowrap;margin:0">ステータス:</label>
           <label style="font-size:12px;flex:1;display:flex;align-items:center;gap:6px;cursor:pointer">
             <input type="checkbox" ${completed?'checked':''} onchange="toggleJnfixCompleted(this,this.dataset.genba,this.dataset.loc,${idx})" data-genba="${esc(genba)}" data-loc="${esc(loc)}" style="width:18px;height:18px;margin:0">
             <span>完了にする（現場名プルダウンから非表示／工番・既存日報は不変）</span>
           </label>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end">
+          <button class="btn btn-sm" style="background:#fff;color:#dc2626;border:1px solid #FCA5A5;font-size:11px;padding:4px 10px" onclick="deleteSiteFromJnfix(this.dataset.genba,this.dataset.loc)" data-genba="${esc(genba)}" data-loc="${esc(loc)}">🗑️ この現場を削除</button>
         </div>
       </div>`;
     }).join('');
@@ -2812,6 +2815,29 @@ async function toggleJnfixCompleted(checkbox,genba,loc,idx){
       populateLocationSelect&&populateLocationSelect('e');
     }else{checkbox.checked=!completed;alert('エラー：'+(json.message||'不明'));}
   }catch(e){checkbox.checked=!completed;alert('エラー：'+e.message);}
+}
+
+// 工番修正モーダル内：1 現場を削除（日報参照あれば拒否、売上ありなら警告→force）
+async function deleteSiteFromJnfix(genba,loc){
+  if(!confirm(`「${genba} / ${loc||'（現場名なし）'}」を現場マスタから削除しますか？\n\n日報・アーカイブに参照があると削除できません（マージか完了フラグを使ってください）。\n\nこの操作は取り消せません。`))return;
+  try{
+    setLoading(true);
+    let res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'delete_site',genba,loc,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    let json=await res.json();
+    // 売上ありエラーなら force で再確認
+    if(json.status==='error' && json.message && json.message.includes('売上')){
+      if(confirm(json.message+'\n\n削除を続行しますか？')){
+        res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'delete_site',genba,loc,force:true,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+        json=await res.json();
+      }else{setLoading(false);return;}
+    }
+    if(json.status==='ok'){
+      showAlert(`✓ 「${loc||genba}」を削除しました（工番 ${json.oldJobNo||'-'}）`,'ok');
+      await loadData();
+      await openJobNoFix(); // モーダルを再読み込み
+    }else alert('エラー: '+(json.message||'不明'));
+  }catch(e){alert('エラー: '+e.message);}
+  finally{setLoading(false);}
 }
 
 async function saveJobNoFix(idx,genba,loc){

@@ -258,6 +258,57 @@ function doPost(e) {
       return ok(result);
     }
 
+    // 現場マスタから 1 行削除する。
+    // 日報・アーカイブのいずれかに参照があれば削除拒否（マージか完了フラグを促す）。
+    // body: { genba, loc, force (任意・売上があっても削除する場合 true), updatedBy }
+    if (action === 'delete_site') {
+      const genba = String(body.genba || '').trim();
+      const loc = String(body.loc || '').trim();
+      const force = !!body.force;
+      if (!genba) return error('元請名は必須です');
+      // 日報・アーカイブの参照チェック
+      let nippoRefs = 0;
+      let archiveRefs = 0;
+      [SHEET_NAME, ARCHIVE_SHEET].forEach((name, idx) => {
+        const sh = ss.getSheetByName(name);
+        if (!sh) return;
+        const d = sh.getDataRange().getValues();
+        if (d.length <= 1) return;
+        const headers = d[0];
+        const gCol = headers.indexOf('元請名');
+        const lCol = headers.indexOf('現場名');
+        if (gCol < 0 || lCol < 0) return;
+        let count = 0;
+        for (let i = 1; i < d.length; i++) {
+          if (String(d[i][gCol] || '').trim() === genba && String(d[i][lCol] || '').trim() === loc) count++;
+        }
+        if (idx === 0) nippoRefs = count; else archiveRefs = count;
+      });
+      if (nippoRefs > 0 || archiveRefs > 0) {
+        return error('日報またはアーカイブに参照があるため削除できません（日報:' + nippoRefs + '件 / アーカイブ:' + archiveRefs + '件）。マージ機能か完了フラグを使ってください。');
+      }
+      // 現場マスタから該当行を削除
+      const jobSite = getOrCreateJobSiteSheet_(ss);
+      const data = jobSite.getDataRange().getValues();
+      let revenueOnRow = 0;
+      let targetRow = -1;
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][0] || '').trim() === genba && String(data[i][1] || '').trim() === loc) {
+          revenueOnRow = Number(data[i][6] || 0);
+          targetRow = i;
+          break;
+        }
+      }
+      if (targetRow < 0) return error('現場マスタに該当現場が見つかりません');
+      if (revenueOnRow > 0 && !force) {
+        return error('この現場には売上 ' + revenueOnRow + ' 円 が入力されています。本当に削除する場合は再度実行してください（クライアントで force フラグ）。');
+      }
+      const oldJobNo = String(data[targetRow][2] || '');
+      jobSite.deleteRow(targetRow + 1);
+      logOperation_(ss, 'delete_site', genba + '/' + loc, '工番=' + oldJobNo + ' 売上=' + revenueOnRow, updatedBy);
+      return ok({deleted: genba + '/' + loc, oldJobNo: oldJobNo, revenue: revenueOnRow});
+    }
+
     // 同じ元請内で「現場名」を統合する。日報・アーカイブ・現場マスタを書き換え。
     // 統合先に工番がある場合は日報側の工番もそちらに統一する。
     // body: { genba, fromLoc, toLoc, updatedBy }
