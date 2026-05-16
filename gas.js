@@ -441,6 +441,25 @@ function doPost(e) {
       return error('現場マスタに該当現場が見つかりません');
     }
 
+    // 現場の「完了」フラグを設定/解除。工番・売上・既存日報には一切影響しない。
+    // body: { genba, loc, completed (bool), updatedBy }
+    if (action === 'update_site_status') {
+      const jobSiteSheet = getOrCreateJobSiteSheet_(ss);
+      const genba = String(body.genba || '').trim();
+      const loc = String(body.loc || '').trim();
+      const completed = !!body.completed;
+      if (!genba) return error('元請名は必須です');
+      const data = jobSiteSheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][0]).trim() === genba && String(data[i][1]).trim() === loc) {
+          jobSiteSheet.getRange(i + 1, 9).setValue(completed ? '✓' : '');
+          logOperation_(ss, 'update_site_status', genba + '/' + loc, completed ? '完了' : '進行中に戻す', updatedBy);
+          return ok({updated: genba + '/' + loc, completed: completed});
+        }
+      }
+      return error('現場マスタに該当現場が見つかりません');
+    }
+
     if (action === 'remove_member') {
       const memberSheet = getOrCreateMemberSheet_(ss);
       const name = String(body.name || '').trim();
@@ -804,7 +823,17 @@ function doGet(e) {
     const gData = genbaSheet.getDataRange().getValues();
     const genbaMaster = gData.length > 1 ? gData.slice(1).map(r => ({name: String(r[0]||''), company: String(r[1]||'')})).filter(g => g.name) : [];
 
-    return ok({rows, members, genbaMaster});
+    // 現場マスタも返す（完了フラグでプルダウンを絞り込むため）
+    const jobSiteSheet = getOrCreateJobSiteSheet_(ss);
+    const jData = jobSiteSheet.getDataRange().getValues();
+    const jobsites = jData.length > 1 ? jData.slice(1).map(r => ({
+      genba: String(r[0] || ''),
+      loc: String(r[1] || ''),
+      jobNo: String(r[2] || ''),
+      completed: String(r[8] || '').trim() !== ''
+    })).filter(j => j.genba) : [];
+
+    return ok({rows, members, genbaMaster, jobsites});
   } catch(err) {
     return error(err.toString());
   }
@@ -874,12 +903,13 @@ function getOrCreateJobSiteSheet_(ss) {
   let sheet = ss.getSheetByName(JOBSITE_SHEET);
   if (!sheet) {
     sheet = ss.insertSheet(JOBSITE_SHEET);
-    sheet.appendRow(['元請名', '現場名', '工番', '事業部', '年度', '連番', '売上', '読み']);
+    sheet.appendRow(['元請名', '現場名', '工番', '事業部', '年度', '連番', '売上', '読み', '完了']);
   } else {
-    ensureColumns_(sheet, 8);
-    const headers = sheet.getRange(1, 1, 1, 8).getValues()[0];
+    ensureColumns_(sheet, 9);
+    const headers = sheet.getRange(1, 1, 1, 9).getValues()[0];
     if (String(headers[6] || '').trim() !== '売上') sheet.getRange(1, 7).setValue('売上');
     if (String(headers[7] || '').trim() !== '読み') sheet.getRange(1, 8).setValue('読み');
+    if (String(headers[8] || '').trim() !== '完了') sheet.getRange(1, 9).setValue('完了');
   }
   return sheet;
 }

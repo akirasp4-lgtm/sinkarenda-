@@ -1059,6 +1059,7 @@ let currentCompany='全社';
 let allNippos=[];
 let allMembers=[];
 let allGenbaMaster=[];
+let allJobsites=[]; // 現場マスタ（完了フラグ等）。{genba, loc, jobNo, completed}
 let selectedMembers=[];
 let editSelectedMembers=[];
 let editIds=[];
@@ -1519,6 +1520,7 @@ async function loadData(){
       allGenbaMaster=json.genbaMaster.length>0&&typeof json.genbaMaster[0]==='object'
         ?json.genbaMaster:json.genbaMaster.map(g=>({name:g,company:'共通'}));
     }
+    if(json.jobsites)allJobsites=json.jobsites;
     initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();updateGmSelects();updateLocationSuggestions();refreshVehicleSelect('s');
   }catch(e){console.error(e);}
   setLoading(false);
@@ -1539,7 +1541,7 @@ function updateLocationSuggestions(){
   }
 }
 
-// 現場名プルダウンの populate（最近使った順 + 検索ボックス対応）
+// 現場名プルダウンの populate（最近使った順 + 検索ボックス対応 + 完了現場除外）
 function populateLocationSelect(p){
   const sel=document.getElementById(p+'-location-select');
   if(!sel)return;
@@ -1553,7 +1555,13 @@ function populateLocationSelect(p){
     if(!n.loc)return;
     if(!lastUsed[n.loc]||(n.date||'')>lastUsed[n.loc])lastUsed[n.loc]=n.date||'';
   });
-  let locs=Object.keys(lastUsed);
+  // 完了済みの現場を除外（編集中の現在値は残す）
+  const completedLocs={};
+  (allJobsites||[]).forEach(j=>{
+    if(j.completed && (!genba || j.genba===genba))completedLocs[j.loc]=true;
+  });
+  const currentVal0=(document.getElementById(p+'-location')||{}).value||'';
+  let locs=Object.keys(lastUsed).filter(l=>!completedLocs[l] || l===currentVal0);
   const totalCount=locs.length;
   // 検索フィルタ
   const searchEl=document.getElementById(p+'-location-search');
@@ -1934,10 +1942,42 @@ function renderEventDetail(){
     ${g.jobNo?`<div class="detail-row"><div class="detail-row-icon">🔖</div><div class="detail-row-content"><div class="detail-row-label">工番</div>${esc(g.jobNo)}</div></div>`:''}
     ${g.memo?`<div class="detail-row"><div class="detail-row-icon">📝</div><div class="detail-row-content"><div class="detail-row-label">メモ</div>${linkify(esc(g.memo).replace(/\n/g,'<br>'))}</div></div>`:''}
     ${g.updatedBy?`<div class="detail-row"><div class="detail-row-icon">🔄</div><div class="detail-row-content"><div class="detail-row-label">最終更新者</div>${esc(g.updatedBy)}</div></div>`:''}
+    ${renderSiteCompletionRow_(g)}
     <div style="text-align:center;color:#bbb;font-size:11px;padding:20px 0 8px">← 右スワイプで戻る　/　左スワイプで次の予定 →</div>
   `;
   document.getElementById('detail-fs-body').innerHTML=html;
 }
+
+// 現場の「完了」状態を表示＋切替UIを返す（admin は常にマーク可能）
+function renderSiteCompletionRow_(g){
+  if(!g.genba||!g.loc)return '';
+  const j=(allJobsites||[]).find(x=>x.genba===g.genba&&x.loc===g.loc);
+  const completed=!!(j&&j.completed);
+  if(completed){
+    return `<div class="detail-row"><div class="detail-row-icon">✅</div><div class="detail-row-content"><div class="detail-row-label">現場ステータス</div><span style="color:#1D9E75;font-weight:600">完了済み</span><button class="btn btn-secondary btn-sm" onclick="toggleSiteCompletion_('${esc(g.genba)}','${esc(g.loc)}',false)" style="margin-left:8px;font-size:12px;padding:4px 10px">進行中に戻す</button></div></div>`;
+  }
+  return `<div class="detail-row"><div class="detail-row-icon">🚧</div><div class="detail-row-content"><div class="detail-row-label">現場ステータス</div>進行中<button class="btn btn-secondary btn-sm" onclick="toggleSiteCompletion_('${esc(g.genba)}','${esc(g.loc)}',true)" style="margin-left:8px;font-size:12px;padding:4px 10px">この現場を完了にする</button></div></div>`;
+}
+
+async function toggleSiteCompletion_(genba,loc,completed){
+  const msg=completed?`「${loc}」を完了にしますか？\n以後、新規の予定登録で現場プルダウンに出なくなります。\n（工番・既存の日報・集計には影響しません）`:`「${loc}」を進行中に戻しますか？`;
+  if(!confirm(msg))return;
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_site_status',genba,loc,completed,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){
+      const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
+      if(j)j.completed=completed;
+      else allJobsites.push({genba,loc,jobNo:'',completed});
+      hapticSuccess();
+      showAlert(completed?`✓ 「${loc}」を完了にしました`:`↩ 「${loc}」を進行中に戻しました`,'ok');
+      renderEventDetail();
+      populateLocationSelect&&populateLocationSelect('s');
+      populateLocationSelect&&populateLocationSelect('e');
+    }else alert('エラー：'+(json.message||'不明'));
+  }catch(e){alert('エラー：'+e.message);}
+}
+
 function shiftDetailEvent(delta){
   if(!detailGroups.length)return;
   detailIdx=(detailIdx+delta+detailGroups.length)%detailGroups.length;
@@ -2527,24 +2567,35 @@ async function openJobNoFix(){
     });
     const html=rows.map((r,idx)=>{
       const genba=String(r[0]||''),loc=String(r[1]||''),jobNo=String(r[2]||''),div=String(r[3]||''),revenue=Number(r[6]||0);
+      const completed=String(r[8]||'').trim()!==''; // I列: 完了
       const ldK=leaderMap[genba+'|||'+loc];
       const ldName=ldK?ldK.name:'';
       const ldMember=ldName?allMembers.find(m=>m.name===ldName&&m.company==='グローライズ'):null;
       const ldDiv=ldMember?ldMember.division:'';
       const divOpts=DIVISIONS.map(d=>`<option value="${d}"${d===div?' selected':''}>${d}</option>`).join('');
-      const searchText=[genba,loc,jobNo,div,ldName].filter(Boolean).join(' ').toLowerCase();
-      return `<div data-search="${esc(searchText)}" style="border:1px solid #ddd;border-radius:8px;padding:10px;margin-bottom:8px;background:#fafafa">
-        <div style="font-size:13px;margin-bottom:4px"><b>${esc(genba)}</b> / ${esc(loc||'（現場名なし）')}</div>
+      const searchText=[genba,loc,jobNo,div,ldName,completed?'完了':'進行中'].filter(Boolean).join(' ').toLowerCase();
+      const bg=completed?'#F0FDF4':'#fafafa';
+      const border=completed?'#86EFAC':'#ddd';
+      const statusBadge=completed?'<span style="background:#1D9E75;color:#fff;font-size:10px;padding:2px 6px;border-radius:10px;margin-left:6px">✅ 完了</span>':'';
+      return `<div data-search="${esc(searchText)}" data-completed="${completed?'1':'0'}" style="border:1px solid ${border};border-radius:8px;padding:10px;margin-bottom:8px;background:${bg}">
+        <div style="font-size:13px;margin-bottom:4px"><b>${esc(genba)}</b> / ${esc(loc||'（現場名なし）')}${statusBadge}</div>
         <div style="font-size:12px;color:#666;margin-bottom:6px">現在: <b>${esc(jobNo)}</b>（${esc(div)}）${ldName?`　代表: ${esc(ldName)}${ldDiv?`（${esc(ldDiv)}）`:''}`:''}</div>
         <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
           <label style="font-size:11px;color:#666;white-space:nowrap;margin:0">事業部:</label>
           <select id="jnfix-div-${idx}" style="flex:1;margin-bottom:0">${divOpts}</select>
           <button class="btn btn-sm" style="flex-shrink:0;background:#1D9E75;color:#fff" onclick="saveJobNoFix(${idx},this.dataset.genba,this.dataset.loc)" data-genba="${esc(genba)}" data-loc="${esc(loc)}">工番更新</button>
         </div>
-        <div style="display:flex;gap:6px;align-items:center">
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
           <label style="font-size:11px;color:#666;white-space:nowrap;margin:0">売上(円):</label>
           <input type="number" id="jnfix-rev-${idx}" value="${revenue||''}" placeholder="0" style="flex:1;margin:0">
           <button class="btn btn-sm" style="flex-shrink:0;background:#3B82F6;color:#fff" onclick="saveSiteRevenue(${idx},this.dataset.genba,this.dataset.loc)" data-genba="${esc(genba)}" data-loc="${esc(loc)}">売上保存</button>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <label style="font-size:11px;color:#666;white-space:nowrap;margin:0">ステータス:</label>
+          <label style="font-size:12px;flex:1;display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" ${completed?'checked':''} onchange="toggleJnfixCompleted(this,this.dataset.genba,this.dataset.loc,${idx})" data-genba="${esc(genba)}" data-loc="${esc(loc)}" style="width:18px;height:18px;margin:0">
+            <span>完了にする（現場名プルダウンから非表示／工番・既存日報は不変）</span>
+          </label>
         </div>
       </div>`;
     }).join('');
@@ -2578,6 +2629,42 @@ async function saveSiteRevenue(idx,genba,loc){
     if(json.status==='ok'){showAlert('売上を保存しました（'+(json.jobNo||'')+'）','ok');}
     else alert('エラー：'+json.message);
   }catch(e){alert('エラー：'+e.message);}
+}
+
+// 工番修正モーダル内の「完了」チェックボックス変更ハンドラ
+async function toggleJnfixCompleted(checkbox,genba,loc,idx){
+  const completed=checkbox.checked;
+  const msg=completed?`「${loc||'（現場名なし）'}」を完了にしますか？\n以後、現場名プルダウンに表示されなくなります。\n（工番・売上・既存の日報には影響しません）`:`「${loc||'（現場名なし）'}」を進行中に戻しますか？`;
+  if(!confirm(msg)){checkbox.checked=!completed;return;}
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_site_status',genba,loc,completed,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){
+      // allJobsites 更新
+      const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
+      if(j)j.completed=completed;
+      else allJobsites.push({genba,loc,jobNo:'',completed});
+      showAlert(completed?`✓ 「${loc||genba}」を完了にしました`:`↩ 「${loc||genba}」を進行中に戻しました`,'ok');
+      // 行の色をすぐ更新（再オープン無し）
+      const card=checkbox.closest('[data-search]');
+      if(card){
+        card.style.background=completed?'#F0FDF4':'#fafafa';
+        card.style.borderColor=completed?'#86EFAC':'#ddd';
+        card.dataset.completed=completed?'1':'0';
+        // バッジ追加・削除
+        const titleDiv=card.querySelector('div:first-child');
+        const existingBadge=titleDiv?.querySelector('span[style*="✅"]');
+        if(completed && !existingBadge && titleDiv){
+          titleDiv.insertAdjacentHTML('beforeend','<span style="background:#1D9E75;color:#fff;font-size:10px;padding:2px 6px;border-radius:10px;margin-left:6px">✅ 完了</span>');
+        }else if(!completed && existingBadge){
+          existingBadge.remove();
+        }
+      }
+      // プルダウンが開いている可能性に備えて再描画
+      populateLocationSelect&&populateLocationSelect('s');
+      populateLocationSelect&&populateLocationSelect('e');
+    }else{checkbox.checked=!completed;alert('エラー：'+(json.message||'不明'));}
+  }catch(e){checkbox.checked=!completed;alert('エラー：'+e.message);}
 }
 
 async function saveJobNoFix(idx,genba,loc){

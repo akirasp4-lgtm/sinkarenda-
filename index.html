@@ -952,6 +952,7 @@ let currentCompany='';
 let allNippos=[];
 let allMembers=[];
 let allGenbaMaster=[];
+let allJobsites=[]; // 現場マスタ（完了フラグ等）。{genba, loc, jobNo, completed}
 let selectedMembers=[];
 let editSelectedMembers=[];
 let editIds=[];
@@ -1335,6 +1336,7 @@ function updateLocationSuggestions(){
 // 現場名プルダウンの populate（選択された元請の既存現場を表示）
 // - 最近使った順（lastUsed 日付の降順）で並べる
 // - 検索ボックス（p+'-location-search'）に入力があれば部分一致で絞り込み
+// - 現場マスタで「完了」フラグが立っている現場は除外（現在編集中の値は残す）
 function populateLocationSelect(p){
   const sel=document.getElementById(p+'-location-select');
   if(!sel)return;
@@ -1348,7 +1350,14 @@ function populateLocationSelect(p){
     if(!n.loc)return;
     if(!lastUsed[n.loc]||(n.date||'')>lastUsed[n.loc])lastUsed[n.loc]=n.date||'';
   });
-  let locs=Object.keys(lastUsed);
+  // 完了済みの現場をマップに（{loc: true}）
+  const completedLocs={};
+  (allJobsites||[]).forEach(j=>{
+    if(j.completed && (!genba || j.genba===genba))completedLocs[j.loc]=true;
+  });
+  // 現在の入力値は残す（編集中など）
+  const currentVal0=(document.getElementById(p+'-location')||{}).value||'';
+  let locs=Object.keys(lastUsed).filter(l=>!completedLocs[l] || l===currentVal0);
   const totalCount=locs.length;
   // 検索フィルタ
   const searchEl=document.getElementById(p+'-location-search');
@@ -1712,6 +1721,7 @@ async function loadData(){
       if(json.genbaMaster.length>0&&typeof json.genbaMaster[0]==='object')allGenbaMaster=json.genbaMaster;
       else allGenbaMaster=json.genbaMaster.map(g=>({name:g,company:'共通'}));
     }
+    if(json.jobsites)allJobsites=json.jobsites;
     initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();updateGmSelects();
     updateLocationSuggestions();
     refreshVehicleSelect('s');
@@ -1933,6 +1943,7 @@ function renderEventDetail(){
     ${g.jobNo?`<div class="detail-row"><div class="detail-row-icon">🔖</div><div class="detail-row-content"><div class="detail-row-label">工番</div>${esc(g.jobNo)}</div></div>`:''}
     ${g.memo?`<div class="detail-row"><div class="detail-row-icon">📝</div><div class="detail-row-content"><div class="detail-row-label">メモ</div>${linkify(esc(g.memo).replace(/\n/g,'<br>'))}</div></div>`:''}
     ${g.updatedBy?`<div class="detail-row"><div class="detail-row-icon">🔄</div><div class="detail-row-content"><div class="detail-row-label">最終更新者</div>${esc(g.updatedBy)}</div></div>`:''}
+    ${renderSiteCompletionRow_(g)}
     <div style="text-align:center;color:#bbb;font-size:11px;padding:20px 0 8px">← 右スワイプで戻る　/　左スワイプで次の予定 →</div>
   `;
   document.getElementById('detail-fs-body').innerHTML=html;
@@ -1942,6 +1953,46 @@ function shiftDetailEvent(delta){
   // 同じ日の中で次/前の予定にループ
   detailIdx=(detailIdx+delta+detailGroups.length)%detailGroups.length;
   renderEventDetail();
+}
+
+// 現場の「完了」状態を表示＋切替UIを返す
+function renderSiteCompletionRow_(g){
+  if(!g.genba||!g.loc)return ''; // 元請・現場名がそろっている時だけ
+  // この予定の代表者または管理者ならボタン表示
+  const leader=(g.members||[]).find(m=>m.role==='代表');
+  const me=getUsername();
+  const isLeader=leader&&me&&leader.name===me;
+  const canMark=isAdmin||isLeader;
+  const j=(allJobsites||[]).find(x=>x.genba===g.genba&&x.loc===g.loc);
+  const completed=!!(j&&j.completed);
+  if(completed){
+    const btn=canMark?`<button class="btn btn-secondary btn-sm" onclick="toggleSiteCompletion_('${esc(g.genba)}','${esc(g.loc)}',false)" style="margin-left:8px;font-size:12px;padding:4px 10px">進行中に戻す</button>`:'';
+    return `<div class="detail-row"><div class="detail-row-icon">✅</div><div class="detail-row-content"><div class="detail-row-label">現場ステータス</div><span style="color:#1D9E75;font-weight:600">完了済み</span>${btn}</div></div>`;
+  }
+  if(canMark){
+    return `<div class="detail-row"><div class="detail-row-icon">🚧</div><div class="detail-row-content"><div class="detail-row-label">現場ステータス</div>進行中<button class="btn btn-secondary btn-sm" onclick="toggleSiteCompletion_('${esc(g.genba)}','${esc(g.loc)}',true)" style="margin-left:8px;font-size:12px;padding:4px 10px">この現場を完了にする</button></div></div>`;
+  }
+  return ''; // マーク権限ない一般ユーザーには非表示
+}
+
+async function toggleSiteCompletion_(genba,loc,completed){
+  const msg=completed?`「${loc}」を完了にしますか？\n以後、新規の予定登録で現場プルダウンに出なくなります。\n（工番・既存の日報・集計には影響しません）`:`「${loc}」を進行中に戻しますか？`;
+  if(!confirm(msg))return;
+  try{
+    const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update_site_status',genba,loc,completed,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){
+      // ローカルの allJobsites を更新（再フェッチ無し）
+      const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
+      if(j)j.completed=completed;
+      else allJobsites.push({genba,loc,jobNo:'',completed});
+      hapticSuccess();
+      showAlert(completed?`✓ 「${loc}」を完了にしました`:`↩ 「${loc}」を進行中に戻しました`,'ok');
+      renderEventDetail();
+      renderList&&renderList();
+      populateLocationSelect&&populateLocationSelect('s');
+    }else alert('エラー：'+(json.message||'不明'));
+  }catch(e){alert('エラー：'+e.message);}
 }
 function editFromDetail(){
   const idx=detailIdx;
