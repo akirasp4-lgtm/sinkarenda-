@@ -1050,13 +1050,17 @@ function setMode(p,mode){
   modeState[p]=next;
   // モードに応じて作業区分プルダウンも同期
   syncWorkTypeWithMode(p,next,cur);
+  // souko/yasumi モードから抜ける時に loc に残っているタスク文字列をクリア
+  if((cur==='souko'||cur==='yasumi')&&next!==cur){
+    const locEl=document.getElementById(p+'-location');
+    if(locEl)locEl.value='';
+  }
   MODES.forEach(m=>{
     const el=document.getElementById(p+'-'+m+'-toggle');
     if(el)el.classList.toggle('active',m===next);
   });
   applyYasumiLock(p,true);
   updateSoukoTasksVisibility(p);
-  applyWorkTypeLock(p);
   hapticTap();
 }
 
@@ -1097,6 +1101,9 @@ function onWorkTypeChange(p){
   // 通常作業区分（現場作業など）を選んだら、もし souko/yasumi だったら解除
   else if(!desiredMode && (cur==='souko'||cur==='yasumi')){
     modeState[p]='';
+    // souko/yasumi から抜ける時に loc に残っているタスク文字列をクリア
+    const locEl=document.getElementById(p+'-location');
+    if(locEl)locEl.value='';
     MODES.forEach(m=>{
       const el=document.getElementById(p+'-'+m+'-toggle');
       if(el)el.classList.remove('active');
@@ -1121,7 +1128,6 @@ function applyMode(p,mode){
   });
   applyYasumiLock(p,false);
   updateSoukoTasksVisibility(p);
-  applyWorkTypeLock(p);
 }
 
 // ===== 倉庫タスク（複数選択可・必須） =====
@@ -1168,7 +1174,15 @@ function updateSoukoTasksVisibility(p){
   if(!wrap)return;
   const isSouko=modeState[p]==='souko';
   wrap.style.display=isSouko?'':'none';
-  if(isSouko)renderSoukoTaskChips(p);
+  if(isSouko){
+    // 現場名入力欄を強制非表示（loc はタスク文字列で使われるのでユーザーには見せない）
+    const locInput=document.getElementById(p+'-location');
+    if(locInput)locInput.style.display='none';
+    // 現場名プルダウンの値を初期化（チップを使うため）
+    const locSel=document.getElementById(p+'-location-select');
+    if(locSel)locSel.value='';
+    renderSoukoTaskChips(p);
+  }
 }
 // 休み/倉庫モード時は入力欄を無効化。clearValues=true なら入力済みの値もクリア（ユーザーがトグルを押した時）
 function applyYasumiLock(p,clearValues){
@@ -1213,9 +1227,12 @@ function applyYasumiLock(p,clearValues){
 }
 
 // 作業区分が空白の時、以下の入力欄を全部ロックする（ゲート機構）
+// 注意: souko/yasumi モード中は applyYasumiLock 側がロックを管理するため、
+// ここでは触らない（上書きしてしまうとモードロックが解除されるバグになる）
 function applyWorkTypeLock(p){
   const wt=document.getElementById(p+'-work-type');
   const isEmpty=!wt||!wt.value;
+  const isModeLocked=modeState[p]==='yasumi'||modeState[p]==='souko';
   const notice=document.getElementById(p+'-worktype-notice');
   if(notice)notice.style.display=isEmpty?'':'none';
   const fieldIds=[
@@ -1230,6 +1247,8 @@ function applyWorkTypeLock(p){
       el.disabled=true;
       el.style.opacity='0.45';
       el.style.cursor='not-allowed';
+    }else if(isModeLocked){
+      // 倉庫/休みモードのロックを applyYasumiLock に任せる（ここでは上書きしない）
     }else{
       el.disabled=false;
       el.style.opacity='';
