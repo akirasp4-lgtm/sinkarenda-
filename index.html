@@ -286,7 +286,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <div><label>終了日（連続入力）</label><input type="date" id="s-date-end" onchange="refreshVehicleSelect('s')"></div>
   </div>
   <label>作業区分<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
-  <select id="s-work-type" onchange="applyWorkTypeLock('s')">
+  <select id="s-work-type" onchange="onWorkTypeChange('s')">
     <option value="">▼ まず作業区分を選んでください</option>
     <option value="現場作業">⛑️ 現場作業（工番発行）</option>
     <option value="現調">📐 現調</option>
@@ -295,6 +295,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="材料引き取り">📦 材料引き取り</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
     <option value="前乗り">🚗 前乗り</option>
+    <option value="倉庫作業">🏭 倉庫作業</option>
+    <option value="休み">🏖️ 休み</option>
     <option value="その他">📋 その他</option>
   </select>
   <div id="s-worktype-notice" style="color:#dc2626;font-size:13px;font-weight:600;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:8px 12px;margin-bottom:12px">⚠️ 最初に「作業区分」を選択してください。選択するまで以下の項目は入力できません。</div>
@@ -551,7 +553,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <div class="modal">
   <div class="modal-title" id="edit-title">編集</div>
   <label>作業区分<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
-  <select id="e-work-type" onchange="applyWorkTypeLock('e')">
+  <select id="e-work-type" onchange="onWorkTypeChange('e')">
     <option value="">▼ まず作業区分を選んでください</option>
     <option value="現場作業">⛑️ 現場作業（工番発行）</option>
     <option value="現調">📐 現調</option>
@@ -560,6 +562,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="材料引き取り">📦 材料引き取り</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
     <option value="前乗り">🚗 前乗り</option>
+    <option value="倉庫作業">🏭 倉庫作業</option>
+    <option value="休み">🏖️ 休み</option>
     <option value="その他">📋 その他</option>
   </select>
   <div id="e-worktype-notice" style="display:none;color:#dc2626;font-size:13px;font-weight:600;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:8px 12px;margin-bottom:12px">⚠️ 最初に「作業区分」を選択してください。選択するまで以下の項目は編集できません。</div>
@@ -664,6 +668,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
       <li><b>材料引き取り</b>: 材料・道具の搬出入 — 工番なし</li>
       <li><b>撤去品返却</b>: 撤去物の返却作業 — 工番なし</li>
       <li><b>前乗り</b>: 前日の移動・宿泊など実作業前の前乗り — 工番なし</li>
+      <li><b>🏭 倉庫作業</b>: 選ぶと自動的に倉庫モード ON、倉庫タスクが選べる — 工番なし</li>
+      <li><b>🏖️ 休み</b>: 選ぶと自動的に休みモード ON、他項目は不要 — 工番なし</li>
       <li><b>その他</b>: 上記以外 — 工番なし</li>
     </ul>
     <p style="font-size:12px;color:#666">集計（人工合計）は全区分を合算。カレンダーでは現場作業以外が黄色いタグで表示されます。</p>
@@ -1042,22 +1048,80 @@ function setMode(p,mode){
   const cur=modeState[p];
   const next=cur===mode?'':mode;
   modeState[p]=next;
+  // モードに応じて作業区分プルダウンも同期
+  syncWorkTypeWithMode(p,next,cur);
   MODES.forEach(m=>{
     const el=document.getElementById(p+'-'+m+'-toggle');
     if(el)el.classList.toggle('active',m===next);
   });
   applyYasumiLock(p,true);
   updateSoukoTasksVisibility(p);
+  applyWorkTypeLock(p);
   hapticTap();
+}
+
+// 作業区分プルダウンとモードを同期させる
+// next: 切替後のモード, prev: 切替前のモード
+function syncWorkTypeWithMode(p,next,prev){
+  const wt=document.getElementById(p+'-work-type');
+  if(!wt)return;
+  if(next==='souko'){wt.value='倉庫作業';return;}
+  if(next==='yasumi'){wt.value='休み';return;}
+  // souko/yasumi から抜けた場合は現場作業に戻す
+  if(prev==='souko'||prev==='yasumi'){
+    wt.value='現場作業';
+  }
+}
+
+// 作業区分プルダウン変更時のハンドラ
+// 倉庫作業 / 休み を選んだら自動的に該当モードに切替
+function onWorkTypeChange(p){
+  const wt=document.getElementById(p+'-work-type');
+  const v=wt?wt.value:'';
+  let desiredMode=null;
+  if(v==='倉庫作業')desiredMode='souko';
+  else if(v==='休み')desiredMode='yasumi';
+  // 現在のモードを取得（夜勤/予定 はここでは触らず温存）
+  const cur=modeState[p]||'';
+  // souko/yasumi モードに切替が必要
+  if(desiredMode && cur!==desiredMode){
+    modeState[p]=desiredMode;
+    MODES.forEach(m=>{
+      const el=document.getElementById(p+'-'+m+'-toggle');
+      if(el)el.classList.toggle('active',m===desiredMode);
+    });
+    applyYasumiLock(p,true);
+    updateSoukoTasksVisibility(p);
+    hapticTap();
+  }
+  // 通常作業区分（現場作業など）を選んだら、もし souko/yasumi だったら解除
+  else if(!desiredMode && (cur==='souko'||cur==='yasumi')){
+    modeState[p]='';
+    MODES.forEach(m=>{
+      const el=document.getElementById(p+'-'+m+'-toggle');
+      if(el)el.classList.remove('active');
+    });
+    applyYasumiLock(p,true);
+    updateSoukoTasksVisibility(p);
+    hapticTap();
+  }
+  applyWorkTypeLock(p);
 }
 function applyMode(p,mode){
   modeState[p]=mode||'';
+  // 倉庫/休み モードのときは作業区分プルダウンも対応する値に揃える
+  const wt=document.getElementById(p+'-work-type');
+  if(wt){
+    if(modeState[p]==='souko')wt.value='倉庫作業';
+    else if(modeState[p]==='yasumi')wt.value='休み';
+  }
   MODES.forEach(m=>{
     const el=document.getElementById(p+'-'+m+'-toggle');
     if(el)el.classList.toggle('active',m===modeState[p]);
   });
   applyYasumiLock(p,false);
   updateSoukoTasksVisibility(p);
+  applyWorkTypeLock(p);
 }
 
 // ===== 倉庫タスク（複数選択可・必須） =====
