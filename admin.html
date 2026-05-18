@@ -314,7 +314,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="現調">📐 現調</option>
     <option value="着打ち">🔨 着打ち</option>
     <option value="カギ借用">🗝️ カギ借用</option>
-    <option value="材料引き取り">📦 材料引き取り</option>
+    <option value="材料引取・検品">📦 材料引取・検品</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
     <option value="前乗り">🚗 前乗り</option>
     <option value="倉庫作業">🏭 倉庫作業</option>
@@ -613,7 +613,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="現調">📐 現調</option>
     <option value="着打ち">🔨 着打ち</option>
     <option value="カギ借用">🗝️ カギ借用</option>
-    <option value="材料引き取り">📦 材料引き取り</option>
+    <option value="材料引取・検品">📦 材料引取・検品</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
     <option value="前乗り">🚗 前乗り</option>
     <option value="倉庫作業">🏭 倉庫作業</option>
@@ -869,7 +869,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <h3>🏷 作業区分（必須・ゲート）</h3>
     <p>登録／編集モーダルでは <b>作業区分を最初に選択するまで他の項目が入力できません</b>（赤い警告バー表示）。表記揺れ防止と工番の正しい発番のためのガード。</p>
     <ul>
-      <li>区分: <b>現場作業 / 現調 / 着打ち / カギ借用 / 材料引き取り / 撤去品返却 / 前乗り / 倉庫作業 / 休み / その他</b></li>
+      <li>区分: <b>現場作業 / 現調 / 着打ち / カギ借用 / 材料引取・検品 / 撤去品返却 / 前乗り / 倉庫作業 / 休み / その他</b></li>
       <li><b>🏭 倉庫作業</b>を選ぶと自動で倉庫モードに切替、倉庫タスク選択UIが出現（工番なし）</li>
       <li><b>🏖️ 休み</b>を選ぶと自動で休みモードに切替（工番なし、人工0）</li>
       <li>グローライズの<b>工番は「現場作業」のみ発行</b>（他の区分・休み・倉庫・予定では工番なし）</li>
@@ -2042,7 +2042,7 @@ function openCalDay(dateStr){
         }
       }
       const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
-      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','撤去品返却':'♻️','前乗り':'🚗','その他':'📋'};
+      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','材料引取・検品':'📦','撤去品返却':'♻️','前乗り':'🚗','倉庫作業':'🏭','休み':'🏖️','その他':'📋'};
       const wt=g.workType||'現場作業';
       const wtEmoji=wtMap[wt]||'🏷️';
       const wtCls=wt==='現場作業'?'worktype-chip worktype-default':'worktype-chip';

@@ -292,7 +292,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="現調">📐 現調</option>
     <option value="着打ち">🔨 着打ち</option>
     <option value="カギ借用">🗝️ カギ借用</option>
-    <option value="材料引き取り">📦 材料引き取り</option>
+    <option value="材料引取・検品">📦 材料引取・検品</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
     <option value="前乗り">🚗 前乗り</option>
     <option value="倉庫作業">🏭 倉庫作業</option>
@@ -559,7 +559,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="現調">📐 現調</option>
     <option value="着打ち">🔨 着打ち</option>
     <option value="カギ借用">🗝️ カギ借用</option>
-    <option value="材料引き取り">📦 材料引き取り</option>
+    <option value="材料引取・検品">📦 材料引取・検品</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
     <option value="前乗り">🚗 前乗り</option>
     <option value="倉庫作業">🏭 倉庫作業</option>
@@ -665,7 +665,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
       <li><b>現調</b>: 現地調査 — 工番なし</li>
       <li><b>着打ち</b>: 着工前の打合せ — 工番なし</li>
       <li><b>カギ借用</b>: カギの貸借や立会のみ — 工番なし</li>
-      <li><b>材料引き取り</b>: 材料・道具の搬出入 — 工番なし</li>
+      <li><b>材料引取・検品</b>: 材料・道具の搬出入＋検品 — 工番なし</li>
       <li><b>撤去品返却</b>: 撤去物の返却作業 — 工番なし</li>
       <li><b>前乗り</b>: 前日の移動・宿泊など実作業前の前乗り — 工番なし</li>
       <li><b>🏭 倉庫作業</b>: 選ぶと自動的に倉庫モード ON、倉庫タスクが選べる — 工番なし</li>
@@ -2016,7 +2016,7 @@ function openCalDay(dateStr){
         }
       }
       const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
-      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','撤去品返却':'♻️','前乗り':'🚗','その他':'📋'};
+      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','材料引取・検品':'📦','撤去品返却':'♻️','前乗り':'🚗','倉庫作業':'🏭','休み':'🏖️','その他':'📋'};
       const wt=g.workType||'現場作業';
       const wtEmoji=wtMap[wt]||'🏷️';
       const wtCls=wt==='現場作業'?'worktype-chip worktype-default':'worktype-chip';
