@@ -332,6 +332,11 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <div><label>退勤</label><input type="time" id="s-end" value="17:00"></div>
   </div>
   <div class="toggle-row toggle-souko" id="s-souko-toggle" onclick="setMode('s','souko')"><span class="t-icon">🏭</span><span class="t-label">倉庫</span></div>
+  <div id="s-souko-tasks-wrap" style="display:none;background:#FFF7ED;border:2px solid #FED7AA;border-radius:10px;padding:12px;margin-bottom:10px">
+    <div style="font-size:14px;font-weight:700;color:#9A3412;margin-bottom:10px">🏭 今日の倉庫作業<span style="color:#dc2626;margin-left:6px">*</span><span style="font-size:11px;font-weight:400;color:#9A3412;margin-left:6px">(複数選択可・1つ以上必須)</span></div>
+    <div id="s-souko-tasks" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+    <div id="s-souko-tasks-error" style="display:none;color:#dc2626;font-size:12px;margin-top:8px;font-weight:600">⚠️ 倉庫作業を1つ以上タップして選んでください</div>
+  </div>
   <div class="toggle-row toggle-yakin" id="s-yakin-toggle" onclick="setMode('s','yakin')"><span class="t-icon">🌙</span><span class="t-label">夜勤</span></div>
   <div class="toggle-row toggle-yasumi" id="s-yasumi-toggle" onclick="setMode('s','yasumi')"><span class="t-icon">🏖️</span><span class="t-label">休み</span></div>
   <div class="toggle-row toggle-yotei" id="s-yotei-toggle" onclick="setMode('s','yotei')"><span class="t-icon">📌</span><span class="t-label">予定</span></div>
@@ -579,6 +584,11 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <div><label>退勤</label><input type="time" id="e-end"></div>
   </div>
   <div class="toggle-row toggle-souko" id="e-souko-toggle" onclick="setMode('e','souko')"><span class="t-icon">🏭</span><span class="t-label">倉庫</span></div>
+  <div id="e-souko-tasks-wrap" style="display:none;background:#FFF7ED;border:2px solid #FED7AA;border-radius:10px;padding:12px;margin-bottom:10px">
+    <div style="font-size:14px;font-weight:700;color:#9A3412;margin-bottom:10px">🏭 今日の倉庫作業<span style="color:#dc2626;margin-left:6px">*</span><span style="font-size:11px;font-weight:400;color:#9A3412;margin-left:6px">(複数選択可・1つ以上必須)</span></div>
+    <div id="e-souko-tasks" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+    <div id="e-souko-tasks-error" style="display:none;color:#dc2626;font-size:12px;margin-top:8px;font-weight:600">⚠️ 倉庫作業を1つ以上タップして選んでください</div>
+  </div>
   <div class="toggle-row toggle-yakin" id="e-yakin-toggle" onclick="setMode('e','yakin')"><span class="t-icon">🌙</span><span class="t-label">夜勤</span></div>
   <div class="toggle-row toggle-yasumi" id="e-yasumi-toggle" onclick="setMode('e','yasumi')"><span class="t-icon">🏖️</span><span class="t-label">休み</span></div>
   <div class="toggle-row toggle-yotei" id="e-yotei-toggle" onclick="setMode('e','yotei')"><span class="t-icon">📌</span><span class="t-label">予定</span></div>
@@ -673,6 +683,14 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
       <li>入力した後にON にすると<b>入力済みの値は自動でクリア</b>されます（操作者・日付・代表者・同行メンバーは残ります）</li>
       <li>元請名は<b>入力不要</b>になります</li>
       <li>もう一度同じトグルを押すと解除され、入力欄が再び有効化されます</li>
+    </ul>
+    <p style="margin-top:8px;color:#9A3412;font-weight:600">🆕 🏭倉庫モード時の作業内容選択</p>
+    <ul style="font-size:13px">
+      <li>🏭倉庫 をONにすると <b>「今日の倉庫作業」セクション</b>が出現します</li>
+      <li>選択肢: <b>🧹清掃 / 📦備品管理 / 🔧工具メンテナンス / 🚚入荷対応 / 📤出荷準備 / ♻️廃材処理</b></li>
+      <li>該当する作業を <b>1 つ以上タップ</b>して選択（複数選択可）</li>
+      <li>選んだ作業はカレンダーに「🏭 清掃、備品管理」のように表示されます</li>
+      <li>誰が何の倉庫作業をしているか後から振り返れます</li>
     </ul>
     <p style="margin-top:8px;color:#1D9E75;font-weight:600">🆕 工番が発行されないモード</p>
     <ul style="font-size:13px">
@@ -1029,6 +1047,7 @@ function setMode(p,mode){
     if(el)el.classList.toggle('active',m===next);
   });
   applyYasumiLock(p,true);
+  updateSoukoTasksVisibility(p);
   hapticTap();
 }
 function applyMode(p,mode){
@@ -1038,6 +1057,54 @@ function applyMode(p,mode){
     if(el)el.classList.toggle('active',m===modeState[p]);
   });
   applyYasumiLock(p,false);
+  updateSoukoTasksVisibility(p);
+}
+
+// ===== 倉庫タスク（複数選択可・必須） =====
+const WAREHOUSE_TASKS=[
+  {key:'清掃',icon:'🧹'},
+  {key:'備品管理',icon:'📦'},
+  {key:'工具メンテナンス',icon:'🔧'},
+  {key:'入荷対応',icon:'🚚'},
+  {key:'出荷準備',icon:'📤'},
+  {key:'廃材処理',icon:'♻️'}
+];
+function parseSoukoTasks(loc){
+  if(!loc)return [];
+  return String(loc).split(/[、,]/).map(s=>s.trim()).filter(Boolean);
+}
+function renderSoukoTaskChips(p){
+  const container=document.getElementById(p+'-souko-tasks');
+  if(!container)return;
+  const locEl=document.getElementById(p+'-location');
+  const selected=parseSoukoTasks(locEl?locEl.value:'');
+  container.innerHTML=WAREHOUSE_TASKS.map(t=>{
+    const isSel=selected.includes(t.key);
+    const style=isSel
+      ? 'background:#EA580C;color:#fff;border-color:#EA580C;box-shadow:0 2px 4px rgba(234,88,12,0.3)'
+      : 'background:#fff;color:#9A3412;border-color:#FED7AA';
+    return `<button type="button" onclick="toggleSoukoTask('${p}','${esc(t.key)}')" style="${style};border:2px solid;border-radius:10px;padding:10px 14px;font-size:14px;font-weight:600;min-height:42px;flex:1 1 calc(50% - 4px);min-width:120px;cursor:pointer">${t.icon} ${esc(t.key)}</button>`;
+  }).join('');
+  const err=document.getElementById(p+'-souko-tasks-error');
+  if(err)err.style.display=selected.length===0?'':'none';
+}
+function toggleSoukoTask(p,key){
+  const locEl=document.getElementById(p+'-location');
+  if(!locEl)return;
+  const current=parseSoukoTasks(locEl.value);
+  const idx=current.indexOf(key);
+  if(idx>=0)current.splice(idx,1);
+  else current.push(key);
+  locEl.value=current.join('、');
+  renderSoukoTaskChips(p);
+  hapticTap();
+}
+function updateSoukoTasksVisibility(p){
+  const wrap=document.getElementById(p+'-souko-tasks-wrap');
+  if(!wrap)return;
+  const isSouko=modeState[p]==='souko';
+  wrap.style.display=isSouko?'':'none';
+  if(isSouko)renderSoukoTaskChips(p);
 }
 // 休み/倉庫モード時は入力欄を無効化。clearValues=true なら入力済みの値もクリア（ユーザーがトグルを押した時）
 function applyYasumiLock(p,clearValues){
@@ -1558,6 +1625,16 @@ async function submitNippo(){
   const _wtVal=(document.getElementById('s-work-type')||{}).value||'';
   if(!_wtVal){showAlert('作業区分を選択してください','err');return;}
   if(!yasumi && !souko && !genba){showAlert('元請名は必須です（休み・倉庫モード時は不要）','err');return;}
+  // 倉庫モードのとき、倉庫作業タスクが1つ以上選ばれているか
+  if(souko){
+    const tasks=parseSoukoTasks(loc);
+    if(tasks.length===0){
+      showAlert('倉庫作業を1つ以上選んでください','err');
+      const err=document.getElementById('s-souko-tasks-error');
+      if(err)err.style.display='';
+      return;
+    }
+  }
   if(!leader){showAlert('代表者を選択してください','err');return;}
   // 異常値検出
   if(!yasumi){
@@ -1801,10 +1878,10 @@ function renderCalendar(){
       const type=g.yakin?'yakin':g.yasumi?'yasumi':g.souko?'souko':g.yotei?'yotei':'';
       const defaultColorMap={yakin:'#2C2C5A',yasumi:'#E8384F',souko:'#8B5E3C',yotei:'#3B82F6','':'#1D9E75'};
       const bg=g.color||defaultColorMap[type]||'#1D9E75';
-      // 休み/倉庫は元請名の有無に関わらず「🏖️ 休み」「🏭 倉庫」で統一表示
+      // 休み/倉庫は元請名の有無に関わらず統一表示。倉庫はタスク内容を表示
       let label;
       if(g.yasumi)label='🏖️ 休み';
-      else if(g.souko)label='🏭 倉庫';
+      else if(g.souko)label=g.loc?`🏭 ${g.loc}`:'🏭 倉庫';
       else{
         label=g.loc||g.genba;
         if(!label){
@@ -1919,10 +1996,10 @@ function renderEventDetail(){
   if(g.yasumi)badges.push('🏖️ 休み');
   if(g.yotei)badges.push('📌 予定');
   const wt=g.workType&&g.workType!=='現場作業'?g.workType:'現場作業';
-  // 休み/倉庫は元請名を表示せず統一ラベル
+  // 休み/倉庫は元請名を表示せず統一ラベル。倉庫はタスク内容を表示
   let detailTitle;
   if(g.yasumi)detailTitle='🏖️ 休み';
-  else if(g.souko)detailTitle='🏭 倉庫';
+  else if(g.souko)detailTitle=g.loc?`🏭 ${esc(g.loc)}`:'🏭 倉庫';
   else{
     detailTitle=esc(g.genba);
     if(!detailTitle){
@@ -2202,6 +2279,16 @@ async function saveEdit(){
   const _eWtVal=(document.getElementById('e-work-type')||{}).value||'';
   if(!_eWtVal){alert('作業区分を選択してください');return;}
   if(!yasumi && !souko && !genba){alert('元請名は必須です（休み・倉庫モード時は不要）');return;}
+  // 倉庫モードのとき、倉庫作業タスクが1つ以上選ばれているか
+  if(souko){
+    const tasks=parseSoukoTasks(loc);
+    if(tasks.length===0){
+      alert('倉庫作業を1つ以上選んでください');
+      const err=document.getElementById('e-souko-tasks-error');
+      if(err)err.style.display='';
+      return;
+    }
+  }
   if(!leader){alert('代表者を選択してください');return;}
   if(!getUsername()){alert('編集者の名前が未設定です。右下の「変更」から名前を設定してください');openUsernameModal();return;}
   if(!yasumi){
@@ -2987,7 +3074,7 @@ async function shareGroup(g){
   const lines=[];
   lines.push(`【${dateStr} の予定】`);
   if(g.yasumi)lines.push('🏖️ 休み');
-  else if(g.souko)lines.push('🏭 倉庫');
+  else if(g.souko)lines.push(g.loc?`🏭 倉庫: ${g.loc}`:'🏭 倉庫');
   else{
     if(g.genba)lines.push(`元請: ${g.genba}`);
     if(g.loc)lines.push(`現場: ${g.loc}`);
