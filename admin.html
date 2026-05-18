@@ -1955,12 +1955,29 @@ function showAlert(msg,type){
 }
 
 // ===== カレンダー =====
+// 登録日時(ISO or 「YYYY/M/D HH:MM:SS」)を「YYYY/M/D HH:MM」にローカルタイム整形
+function formatTimestamp(s){
+  if(!s)return '';
+  const d=new Date(s);
+  if(isNaN(d))return String(s);
+  const y=d.getFullYear();
+  const m=d.getMonth()+1;
+  const dd=d.getDate();
+  const h=String(d.getHours()).padStart(2,'0');
+  const mn=String(d.getMinutes()).padStart(2,'0');
+  return `${y}/${m}/${dd} ${h}:${mn}`;
+}
+
 function groupNippos(nippos){
   const groups={};
   nippos.forEach(n=>{
     const key=n.id||`${n.date}__${n.genba}__${n.loc}__${n.start}__${n.end}__${n.kosu}__${n.memo}`;
-    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,color:n.color,jobNo:n.jobNo,workType:n.workType||'',vehicle:n.vehicle||'',isGhost:!!n.isGhost,originalId:n.originalId||''};
+    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,timestamp:n.timestamp||'',color:n.color,jobNo:n.jobNo,workType:n.workType||'',vehicle:n.vehicle||'',isGhost:!!n.isGhost,originalId:n.originalId||''};
     groups[key].members.push({name:n.name,role:n.role});if(n.id)groups[key].ids.push(n.id);
+    if(n.timestamp && n.timestamp>(groups[key].timestamp||'')){
+      groups[key].timestamp=n.timestamp;
+      if(n.updatedBy)groups[key].updatedBy=n.updatedBy;
+    }
   });
   return Object.values(groups).sort((a,b)=>a.date.localeCompare(b.date));
 }
@@ -2117,7 +2134,7 @@ function renderEventDetail(){
     ${g.vehicle?`<div class="detail-row"><div class="detail-row-icon">🚗</div><div class="detail-row-content"><div class="detail-row-label">車両</div>${esc(g.vehicle)}</div></div>`:''}
     ${g.jobNo?`<div class="detail-row"><div class="detail-row-icon">🔖</div><div class="detail-row-content"><div class="detail-row-label">工番</div>${esc(g.jobNo)}</div></div>`:''}
     ${g.memo?`<div class="detail-row"><div class="detail-row-icon">📝</div><div class="detail-row-content"><div class="detail-row-label">メモ</div>${linkify(esc(g.memo).replace(/\n/g,'<br>'))}</div></div>`:''}
-    ${g.updatedBy?`<div class="detail-row"><div class="detail-row-icon">🔄</div><div class="detail-row-content"><div class="detail-row-label">最終更新者</div>${esc(g.updatedBy)}</div></div>`:''}
+    ${g.updatedBy||g.timestamp?`<div class="detail-row"><div class="detail-row-icon">🔄</div><div class="detail-row-content"><div class="detail-row-label">最終更新</div>${esc(g.updatedBy||'')}${g.timestamp?` <span style="color:#666;font-size:12px;margin-left:6px">${esc(formatTimestamp(g.timestamp))}</span>`:''}</div></div>`:''}
     ${renderSiteCompletionRow_(g)}
     <div style="text-align:center;color:#bbb;font-size:11px;padding:20px 0 8px">← 右スワイプで戻る　/　左スワイプで次の予定 →</div>
   `;
