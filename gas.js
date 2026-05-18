@@ -847,7 +847,7 @@ function doPost(e) {
         date: headers.indexOf('作業日'),
         name: headers.indexOf('氏名'),
         role: headers.indexOf('役割'),
-        loc: headers.indexOf('現場名'),
+        memo: headers.indexOf('メモ'),
         yakin: headers.indexOf('夜勤'),
         workType: headers.indexOf('作業区分'),
         company: headers.indexOf('会社'),
@@ -862,10 +862,11 @@ function doPost(e) {
         if (d !== date) continue;
         // 倉庫モードのレコードのみ（夜勤カラムが '倉庫'）
         if (String(r[idx.yakin] || '') !== '倉庫') continue;
+        // 倉庫タスクはメモ欄に格納されている
         entries.push({
           name: String(r[idx.name] || ''),
           role: String(r[idx.role] || ''),
-          tasks: String(r[idx.loc] || ''),
+          tasks: String(r[idx.memo] || ''),
           company: String(r[idx.company] || ''),
           id: String(r[idx.id] || '')
         });

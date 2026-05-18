@@ -1146,8 +1146,9 @@ function parseSoukoTasks(loc){
 function renderSoukoTaskChips(p){
   const container=document.getElementById(p+'-souko-tasks');
   if(!container)return;
-  const locEl=document.getElementById(p+'-location');
-  const selected=parseSoukoTasks(locEl?locEl.value:'');
+  // タスクは メモ欄 に格納する
+  const memoEl=document.getElementById(p+'-memo');
+  const selected=parseSoukoTasks(memoEl?memoEl.value:'');
   container.innerHTML=WAREHOUSE_TASKS.map(t=>{
     const isSel=selected.includes(t.key);
     const style=isSel
@@ -1159,13 +1160,13 @@ function renderSoukoTaskChips(p){
   if(err)err.style.display=selected.length===0?'':'none';
 }
 function toggleSoukoTask(p,key){
-  const locEl=document.getElementById(p+'-location');
-  if(!locEl)return;
-  const current=parseSoukoTasks(locEl.value);
+  const memoEl=document.getElementById(p+'-memo');
+  if(!memoEl)return;
+  const current=parseSoukoTasks(memoEl.value);
   const idx=current.indexOf(key);
   if(idx>=0)current.splice(idx,1);
   else current.push(key);
-  locEl.value=current.join('、');
+  memoEl.value=current.join('、');
   renderSoukoTaskChips(p);
   hapticTap();
 }
@@ -1709,9 +1710,9 @@ async function submitNippo(){
   const _wtVal=(document.getElementById('s-work-type')||{}).value||'';
   if(!_wtVal){showAlert('作業区分を選択してください','err');return;}
   if(!yasumi && !souko && !genba){showAlert('元請名は必須です（休み・倉庫モード時は不要）','err');return;}
-  // 倉庫モードのとき、倉庫作業タスクが1つ以上選ばれているか
+  // 倉庫モードのとき、倉庫作業タスクが1つ以上選ばれているか（メモ欄に格納）
   if(souko){
-    const tasks=parseSoukoTasks(loc);
+    const tasks=parseSoukoTasks(memo);
     if(tasks.length===0){
       showAlert('倉庫作業を1つ以上選んでください','err');
       const err=document.getElementById('s-souko-tasks-error');
@@ -1980,10 +1981,10 @@ function renderCalendar(){
       const type=g.yakin?'yakin':g.yasumi?'yasumi':g.souko?'souko':g.yotei?'yotei':'';
       const defaultColorMap={yakin:'#2C2C5A',yasumi:'#E8384F',souko:'#8B5E3C',yotei:'#3B82F6','':'#1D9E75'};
       const bg=g.color||defaultColorMap[type]||'#1D9E75';
-      // 休み/倉庫は元請名の有無に関わらず統一表示。倉庫はタスク内容を表示
+      // 休み/倉庫は元請名の有無に関わらず統一表示。倉庫はタスク内容(メモ欄)を表示
       let label;
       if(g.yasumi)label='🏖️ 休み';
-      else if(g.souko)label=g.loc?`🏭 ${g.loc}`:'🏭 倉庫';
+      else if(g.souko)label=g.memo?`🏭 ${g.memo}`:'🏭 倉庫';
       else{
         label=g.loc||g.genba;
         if(!label){
@@ -2098,10 +2099,10 @@ function renderEventDetail(){
   if(g.yasumi)badges.push('🏖️ 休み');
   if(g.yotei)badges.push('📌 予定');
   const wt=g.workType&&g.workType!=='現場作業'?g.workType:'現場作業';
-  // 休み/倉庫は元請名を表示せず統一ラベル。倉庫はタスク内容を表示
+  // 休み/倉庫は元請名を表示せず統一ラベル。倉庫はタスク内容(メモ欄)を表示
   let detailTitle;
   if(g.yasumi)detailTitle='🏖️ 休み';
-  else if(g.souko)detailTitle=g.loc?`🏭 ${esc(g.loc)}`:'🏭 倉庫';
+  else if(g.souko)detailTitle=g.memo?`🏭 ${esc(g.memo)}`:'🏭 倉庫';
   else{
     detailTitle=esc(g.genba);
     if(!detailTitle){
@@ -2381,9 +2382,9 @@ async function saveEdit(){
   const _eWtVal=(document.getElementById('e-work-type')||{}).value||'';
   if(!_eWtVal){alert('作業区分を選択してください');return;}
   if(!yasumi && !souko && !genba){alert('元請名は必須です（休み・倉庫モード時は不要）');return;}
-  // 倉庫モードのとき、倉庫作業タスクが1つ以上選ばれているか
+  // 倉庫モードのとき、倉庫作業タスクが1つ以上選ばれているか（メモ欄に格納）
   if(souko){
-    const tasks=parseSoukoTasks(loc);
+    const tasks=parseSoukoTasks(memo);
     if(tasks.length===0){
       alert('倉庫作業を1つ以上選んでください');
       const err=document.getElementById('e-souko-tasks-error');
@@ -3176,7 +3177,7 @@ async function shareGroup(g){
   const lines=[];
   lines.push(`【${dateStr} の予定】`);
   if(g.yasumi)lines.push('🏖️ 休み');
-  else if(g.souko)lines.push(g.loc?`🏭 倉庫: ${g.loc}`:'🏭 倉庫');
+  else if(g.souko)lines.push(g.memo?`🏭 倉庫: ${g.memo}`:'🏭 倉庫');
   else{
     if(g.genba)lines.push(`元請: ${g.genba}`);
     if(g.loc)lines.push(`現場: ${g.loc}`);
