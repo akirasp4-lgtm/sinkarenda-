@@ -832,6 +832,56 @@ function doPost(e) {
       }
     }
 
+    // LINEボット連携: 指定日（既定は今日）の倉庫作業者一覧を返す
+    // body: { token, date (YYYY-MM-DD, 省略時は今日) }
+    if (action === 'warehouse_today') {
+      if (String(body.token || '') !== VEHICLE_RES_TOKEN) return error('認証失敗');
+      const tz = Session.getScriptTimeZone();
+      const date = String(body.date || '').trim() || Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+      const sh = ss.getSheetByName(SHEET_NAME);
+      if (!sh) return error('日報シートが見つかりません');
+      const data = sh.getDataRange().getValues();
+      if (data.length < 2) return ok({date: date, entries: [], grouped: []});
+      const headers = data[0];
+      const idx = {
+        date: headers.indexOf('作業日'),
+        name: headers.indexOf('氏名'),
+        role: headers.indexOf('役割'),
+        loc: headers.indexOf('現場名'),
+        yakin: headers.indexOf('夜勤'),
+        workType: headers.indexOf('作業区分'),
+        company: headers.indexOf('会社'),
+        id: headers.indexOf('ID')
+      };
+      const entries = [];
+      for (let i = 1; i < data.length; i++) {
+        const r = data[i];
+        const d = r[idx.date] instanceof Date
+          ? Utilities.formatDate(r[idx.date], tz, 'yyyy-MM-dd')
+          : String(r[idx.date] || '').slice(0, 10);
+        if (d !== date) continue;
+        // 倉庫モードのレコードのみ（夜勤カラムが '倉庫'）
+        if (String(r[idx.yakin] || '') !== '倉庫') continue;
+        entries.push({
+          name: String(r[idx.name] || ''),
+          role: String(r[idx.role] || ''),
+          tasks: String(r[idx.loc] || ''),
+          company: String(r[idx.company] || ''),
+          id: String(r[idx.id] || '')
+        });
+      }
+      // ID 単位でグループ化（同じグループ＝同じ tasks）
+      const groupMap = {};
+      entries.forEach(e => {
+        const k = e.id || (e.tasks + '|' + e.company);
+        if (!groupMap[k]) groupMap[k] = {tasks: e.tasks, company: e.company, leader: '', members: []};
+        if (e.role === '代表' && !groupMap[k].leader) groupMap[k].leader = e.name;
+        groupMap[k].members.push(e.name);
+      });
+      const grouped = Object.values(groupMap);
+      return ok({date: date, entries: entries, grouped: grouped});
+    }
+
     if (action === 'remove_genba') {
       const genbaSheet = getOrCreateGenbaSheet_(ss);
       const name = String(body.name || '').trim();
