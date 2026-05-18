@@ -1209,8 +1209,9 @@ function applyYasumiLock(p,clearValues){
     if(gm){gm.value='';gm.style.display='none';}
     const locEl=document.getElementById(p+'-location');
     if(locEl)locEl.value='';
-    const wt=document.getElementById(p+'-work-type');
-    if(wt)wt.value='現場作業';
+    // 注意: 旧設計では workType を '現場作業' に reset していたが、新設計では
+    // 倉庫作業/休み が workType に入る必要があるため reset 行を削除。
+    // workType は呼び出し元(setMode/onWorkTypeChange)で正しい値が設定済み。
     const startEl=document.getElementById(p+'-start');
     if(startEl)startEl.value='08:00';
     const endEl=document.getElementById(p+'-end');
