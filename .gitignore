@@ -4,28 +4,33 @@
 # このフォルダで `git clone` すれば別PCでもすぐに作業継続できる。
 # =====================================================
 
-# === 機密情報（誤コミット防止） ===
+# === ローカルのみの集約フォルダ（公開しない） ===
+# Create API Key.txt / スクリーンショット / 個人メモ / 旧アセット など
+# 別 PC で git clone しても _local/ は作られない
+_local/
+
+# === Claude Code のローカル設定（PC固有） ===
+.claude/
+
+# === ローカル作業用フォルダ（root が canonical） ===
+deploy/
+scripts/
+
+# === 個別の機密ファイル（万一 _local/ 外にあっても除外） ===
 Create API Key.txt
 *.secret
 *.env
 .env*
-
-# === Claude Code のローカル設定（PC固有） ===
-.claude/
 
 # === OS / エディタ系 ===
 Thumbs.db
 .DS_Store
 desktop.ini
 
-# === 個人作業メモ（公開不要） ===
+# === 個別の個人メモ・素材バックアップ（万一 root に戻された場合の保険） ===
 向　デバッグ.txt
-
-# === 旧素材バックアップ ===
 icon_original_*.png
 icon_*_backup.png
-
-# === スクリーンショット（配信不要） ===
 S__*.jpg
 S__*.jpeg
 S__*.png
@@ -33,9 +38,3 @@ S__*.png
 # === Node ===
 node_modules/
 npm-debug.log*
-
-# === ローカル作業用フォルダ（root が正・deploy はローカルのミラー） ===
-# - 別PCには clone してこない（不要）
-# - 既存PCで残ってる場合は無視
-deploy/
-scripts/
