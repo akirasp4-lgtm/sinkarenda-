@@ -7,6 +7,7 @@ const SUMMARY_COMPANY = '会社別集計';
 const SUMMARY_MONTH = '月別集計';
 const KAKUNIN_SHEET = '月別確認表';
 const BILLING_SHEET = '元請別請求集計';
+const BILLING_FILTER_SHEET = '元請別請求集計_フィルタ用';
 const ALLOCATION_SHEET = '事業部別按分';
 const OPLOG_SHEET = '操作ログ';
 const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両'];
@@ -330,7 +331,7 @@ function doPost(e) {
 
     if (action === 'get_sheet') {
       const sheetName = body.sheet || '';
-      const allowed = [SHEET_NAME, ARCHIVE_SHEET, MEMBER_SHEET, GENBA_MASTER_SHEET, JOBSITE_SHEET, SUMMARY_COMPANY, SUMMARY_MONTH, KAKUNIN_SHEET, BILLING_SHEET, ALLOCATION_SHEET, OPLOG_SHEET];
+      const allowed = [SHEET_NAME, ARCHIVE_SHEET, MEMBER_SHEET, GENBA_MASTER_SHEET, JOBSITE_SHEET, SUMMARY_COMPANY, SUMMARY_MONTH, KAKUNIN_SHEET, BILLING_SHEET, BILLING_FILTER_SHEET, ALLOCATION_SHEET, OPLOG_SHEET];
       if (!allowed.includes(sheetName)) return error('無効なシート名です');
       const targetSheet = ss.getSheetByName(sheetName);
       if (!targetSheet) return error('シートが見つかりません: ' + sheetName);
@@ -390,7 +391,7 @@ function doPost(e) {
     // 日報データ／アーカイブで dateFrom/dateTo 指定があれば一時シートを作って絞り込んでからエクスポート
     if (action === 'export_sheet_xlsx') {
       const sheetName = body.sheet || '';
-      const allowed = [SHEET_NAME, ARCHIVE_SHEET, MEMBER_SHEET, GENBA_MASTER_SHEET, JOBSITE_SHEET, SUMMARY_COMPANY, SUMMARY_MONTH, KAKUNIN_SHEET, BILLING_SHEET, ALLOCATION_SHEET, OPLOG_SHEET];
+      const allowed = [SHEET_NAME, ARCHIVE_SHEET, MEMBER_SHEET, GENBA_MASTER_SHEET, JOBSITE_SHEET, SUMMARY_COMPANY, SUMMARY_MONTH, KAKUNIN_SHEET, BILLING_SHEET, BILLING_FILTER_SHEET, ALLOCATION_SHEET, OPLOG_SHEET];
       if (!allowed.includes(sheetName)) return error('無効なシート名です');
       const targetSheet = ss.getSheetByName(sheetName);
       if (!targetSheet) return error('シートが見つかりません: ' + sheetName);
@@ -1167,6 +1168,7 @@ function generateSummary_() {
   generateCompanySummary_(ss, mainRecords);
   generateMonthSummary_(ss, mainRecords);
   generateBillingSummary_(ss, mainRecords);
+  generateBillingFilterSheet_(ss, mainRecords);
 
   const allRecords = [...mainRecords, ...archiveRecords];
   generateKakuninTable_(ss, allRecords);
@@ -1822,6 +1824,163 @@ function generateBillingSummary_(ss, records) {
   for (let c = 4; c <= Math.min(maxCols, 35); c++) sheet.setColumnWidth(c, 26);
   if (maxCols >= 36) sheet.setColumnWidth(Math.min(maxCols, 36), 50);
   if (currentRow > 1) { const borderCols = Math.min(maxCols, 35); sheet.getRange(1, 1, currentRow - 1, borderCols).setBorder(true, true, true, true, true, true, '#DDDDDD', SpreadsheetApp.BorderStyle.SOLID); }
+}
+
+// 元請別請求集計の「フィルタ用」シート（フラット構造）
+// - マージなし・空白行なし → AutoFilter が全範囲で機能する
+// - 列構成: 月(テキスト) / 会社名 / 現場名 / 名前(or 合計) / 1日〜31日 / 合計（計36列）
+// - 月をまたいで会社名・現場名でフィルタを掛けて集計できる
+// - 案件サブ合計行も同居（名前列=「合計」）
+function generateBillingFilterSheet_(ss, records) {
+  let sheet = ss.getSheetByName(BILLING_FILTER_SHEET);
+  if (sheet) { sheet.clear(); sheet.clearFormats(); }
+  else sheet = ss.insertSheet(BILLING_FILTER_SHEET);
+  // 既存フィルタを除去（再生成時の衝突防止）
+  try { const f = sheet.getFilter(); if (f) f.remove(); } catch (e) {}
+  ensureColumns_(sheet, 36);
+
+  // 倉庫は元請に請求しない作業のため除外
+  const workRecords = records.filter(r => r.yakin !== '休み' && r.yakin !== '予定' && r.yakin !== '倉庫');
+  const months = [...new Set(workRecords.map(r => r.month).filter(Boolean))].sort().reverse();
+  const genbas = [...new Set(workRecords.map(r => r.genba).filter(Boolean))].sort();
+
+  // ヘッダー行
+  const header = ['月', '会社名', '現場名', '名前'];
+  for (let d = 1; d <= 31; d++) header.push(d + '日');
+  header.push('合計');
+
+  const rows = [header];
+  // 合計行のインデックス（後で背景色つけるため）
+  const totalRowIndices = [];
+
+  months.forEach(month => {
+    const parts = month.split('-');
+    const year = Number(parts[0]);
+    const mon = Number(parts[1]);
+    const monthLabel = year + '年' + mon + '月';
+    const daysInMonth = new Date(year, mon, 0).getDate();
+    const mr = workRecords.filter(r => r.month === month);
+
+    // 1日に複数現場行ったら 1/N で按分（昼/夜勤は別カウント）
+    const sitesByPDN = {};
+    mr.forEach(r => {
+      const dn = r.yakin === '夜勤' ? 'N' : 'D';
+      const k = r.name + '|' + r.date + '|' + dn;
+      if (!sitesByPDN[k]) sitesByPDN[k] = new Set();
+      sitesByPDN[k].add(r.genba + '|||' + (r.loc || '（現場名なし）'));
+    });
+
+    genbas.forEach(genba => {
+      const gr = mr.filter(r => r.genba === genba);
+      if (gr.length === 0) return;
+      const locs = [...new Set(gr.map(r => r.loc || '（現場名なし）'))].sort();
+      locs.forEach(loc => {
+        const lr = gr.filter(r => (r.loc || '（現場名なし）') === loc);
+        const namesInLoc = [...new Set(lr.map(r => r.name))].sort();
+        const activeNames = namesInLoc.filter(name => calcEffective_(lr, name).kosu > 0);
+        if (activeNames.length === 0) return;
+
+        // 各人の行
+        activeNames.forEach(name => {
+          const row = [monthLabel, genba, loc, name];
+          let rowTotal = 0;
+          for (let d = 1; d <= 31; d++) {
+            if (d > daysInMonth) { row.push(''); continue; }
+            const dateStr = year + '-' + String(mon).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+            const dayRecs = lr.filter(r => r.name === name && r.date === dateStr);
+            const hasDay = dayRecs.some(r => r.yakin !== '夜勤');
+            const hasNight = dayRecs.some(r => r.yakin === '夜勤');
+            let kosu = 0;
+            if (hasDay) {
+              const sCnt = (sitesByPDN[name + '|' + dateStr + '|D'] || new Set()).size || 1;
+              kosu += 1 / sCnt;
+            }
+            if (hasNight) {
+              const sCnt = (sitesByPDN[name + '|' + dateStr + '|N'] || new Set()).size || 1;
+              kosu += 1 / sCnt;
+            }
+            row.push(kosu);
+            rowTotal += kosu;
+          }
+          row.push(rowTotal);
+          rows.push(row);
+        });
+
+        // 案件の合計行
+        const totalRow = [monthLabel, genba, loc, '合計'];
+        let grandTotal = 0;
+        for (let d = 1; d <= 31; d++) {
+          if (d > daysInMonth) { totalRow.push(''); continue; }
+          const dateStr = year + '-' + String(mon).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+          let daySum = 0;
+          activeNames.forEach(name => {
+            const dayRecs = lr.filter(r => r.name === name && r.date === dateStr);
+            const hasDay = dayRecs.some(r => r.yakin !== '夜勤');
+            const hasNight = dayRecs.some(r => r.yakin === '夜勤');
+            if (hasDay) {
+              const sCnt = (sitesByPDN[name + '|' + dateStr + '|D'] || new Set()).size || 1;
+              daySum += 1 / sCnt;
+            }
+            if (hasNight) {
+              const sCnt = (sitesByPDN[name + '|' + dateStr + '|N'] || new Set()).size || 1;
+              daySum += 1 / sCnt;
+            }
+          });
+          totalRow.push(daySum);
+          grandTotal += daySum;
+        }
+        totalRow.push(grandTotal);
+        rows.push(totalRow);
+        totalRowIndices.push(rows.length); // 1-based 合計行の最終 index
+      });
+    });
+  });
+
+  if (rows.length === 1) {
+    // データなし: ヘッダーだけ書いて終了
+    sheet.getRange(1, 1, 1, 36).setValues(rows)
+      .setFontWeight('bold').setBackground('#E8F4FD').setHorizontalAlignment('center');
+    return;
+  }
+
+  // 一括書き込み
+  sheet.getRange(1, 1, rows.length, 36).setValues(rows);
+
+  // ヘッダー書式
+  sheet.getRange(1, 1, 1, 36)
+    .setFontWeight('bold').setBackground('#E8F4FD').setHorizontalAlignment('center');
+
+  // 月列をテキスト書式（Excel での日付シリアル化防止）
+  sheet.getRange(2, 1, rows.length - 1, 1).setNumberFormat('@');
+
+  // 日付列・合計列の数値書式（0は非表示）
+  sheet.getRange(2, 5, rows.length - 1, 32).setNumberFormat('0.0;-0.0;').setHorizontalAlignment('center');
+
+  // 合計行のハイライト
+  totalRowIndices.forEach(r => {
+    sheet.getRange(r, 1, 1, 36).setBackground('#FFF9C4').setFontWeight('bold');
+  });
+
+  // 列幅
+  sheet.setColumnWidth(1, 80);    // 月
+  sheet.setColumnWidth(2, 150);   // 会社名
+  sheet.setColumnWidth(3, 220);   // 現場名
+  sheet.setColumnWidth(4, 70);    // 名前
+  for (let c = 5; c <= 35; c++) sheet.setColumnWidth(c, 32);  // 1〜31日
+  sheet.setColumnWidth(36, 60);   // 合計
+
+  // フリーズ（1行＋4列）
+  sheet.setFrozenRows(1);
+  sheet.setFrozenColumns(4);
+
+  // AutoFilter（全範囲）
+  try {
+    sheet.getRange(1, 1, rows.length, 36).createFilter();
+  } catch (e) { /* createFilter は既存フィルタがあれば失敗するが、上で除去済み */ }
+
+  // 罫線
+  sheet.getRange(1, 1, rows.length, 36)
+    .setBorder(true, true, true, true, true, true, '#DDDDDD', SpreadsheetApp.BorderStyle.SOLID);
 }
 
 function generateDivisionAllocation_(ss, records) {
