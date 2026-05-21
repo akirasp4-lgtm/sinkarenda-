@@ -848,6 +848,7 @@ function doPost(e) {
         date: headers.indexOf('作業日'),
         name: headers.indexOf('氏名'),
         role: headers.indexOf('役割'),
+        loc: headers.indexOf('現場名'),
         memo: headers.indexOf('メモ'),
         yakin: headers.indexOf('夜勤'),
         workType: headers.indexOf('作業区分'),
@@ -863,11 +864,14 @@ function doPost(e) {
         if (d !== date) continue;
         // 倉庫モードのレコードのみ（夜勤カラムが '倉庫'）
         if (String(r[idx.yakin] || '') !== '倉庫') continue;
-        // 倉庫タスクはメモ欄に格納されている
+        // 倉庫タスクはメモ欄に格納（現行仕様）。旧データで現場名カラムに入って
+        // いるケースがあるため、memo が空なら loc にフォールバック。
+        const memoVal = String(r[idx.memo] || '');
+        const locVal = String(r[idx.loc] || '');
         entries.push({
           name: String(r[idx.name] || ''),
           role: String(r[idx.role] || ''),
-          tasks: String(r[idx.memo] || ''),
+          tasks: memoVal || locVal,
           company: String(r[idx.company] || ''),
           id: String(r[idx.id] || '')
         });
