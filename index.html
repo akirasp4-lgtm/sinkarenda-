@@ -316,8 +316,9 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div id="s-loc-similar" style="display:none;background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:8px 10px;margin-bottom:12px;font-size:13px;color:#92400E"></div>
   <datalist id="s-location-list"></datalist>
   <div id="s-vehicle-wrap">
-    <label>🚗 車両</label>
-    <select id="s-vehicle"><option value="">使用しない</option></select>
+    <label>🚗 車両<span style="font-size:11px;font-weight:400;color:#666;margin-left:6px">(複数選択可・未選択=使用しない)</span></label>
+    <input type="hidden" id="s-vehicle" value="">
+    <div id="s-vehicle-chips" style="display:flex;flex-wrap:wrap;gap:8px"></div>
   </div>
   <div class="jobno-hint" id="s-jobno-hint"></div>
   <div id="s-jobno-div-wrap" style="display:none;margin-bottom:12px">
@@ -580,8 +581,9 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div id="e-loc-similar" style="display:none;background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:8px 10px;margin-bottom:12px;font-size:13px;color:#92400E"></div>
   <datalist id="e-location-list"></datalist>
   <div id="e-vehicle-wrap">
-    <label>🚗 車両</label>
-    <select id="e-vehicle"><option value="">使用しない</option></select>
+    <label>🚗 車両<span style="font-size:11px;font-weight:400;color:#666;margin-left:6px">(複数選択可・未選択=使用しない)</span></label>
+    <input type="hidden" id="e-vehicle" value="">
+    <div id="e-vehicle-chips" style="display:flex;flex-wrap:wrap;gap:8px"></div>
   </div>
   <div class="grid2">
     <div><label>出勤</label><input type="time" id="e-start"></div>
@@ -641,7 +643,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
       <li><b>作業区分</b>を選ぶ ⚠️ <b>必須・最初に選ぶ</b>（選ぶまで以下の項目が入力できません）</li>
       <li><b>元請名</b>をプルダウンから選択（なければ ➕ で追加）</li>
       <li><b>現場名</b>をプルダウンから選ぶ／🔍検索ボックスで絞り込み（最近使った順で並ぶ）。新規は「＋ 新規現場として追加」</li>
-      <li><b>🚗 車両</b>（任意・グローライズのみ）— 同日に他予定で予約済みは選択不可</li>
+      <li><b>🚗 車両</b>（任意・グローライズのみ・複数選択可）— 同日に他予定で予約済みは選択不可。2 台で行く時は両方の chip を ON</li>
       <li><b>代表者</b>を選ぶ（その日の現場責任者）</li>
       <li><b>同行者</b>（代表以外のメンバー）を選ぶ</li>
       <li><b>出勤/退勤時間</b>と<b>メモ</b>を入力</li>
@@ -737,14 +739,14 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   </div>
 
   <div class="help-section">
-    <h3>🚗 車両セレクタ</h3>
-    <p>予定登録時に、使用する車両をプルダウンから選べます。</p>
+    <h3>🚗 車両セレクタ <span style="color:#1D9E75;font-size:12px">🆕 複数選択対応</span></h3>
+    <p>予定登録時に、使用する車両を <b>chip ボタンで複数選択</b>できます。</p>
     <ul>
-      <li>「使用しない」がデフォルト。車両不要なら空のままでOK</li>
+      <li>未選択 = 「使用しない」。1 台ならその chip だけ ON、2 台以上で行くなら複数選択</li>
       <li>選んだ日に<b>他の予定で既に予約済みの車両</b>はグレーアウト＋「使用中」表示で選べません</li>
       <li>連続入力（複数日）の場合は、その期間中いずれかの日で予約済みなら選択不可</li>
       <li>編集モーダルでも同じ動作（自分自身のグループは除外して判定）</li>
-      <li>選んだ車両は<b>日別モーダルのカード</b>と<b>詳細画面</b>に「🚗 ◯◯」と表示</li>
+      <li>複数選んだ場合、シート・詳細・共有テキストには「メビウス、ヤリス」のようにカンマ区切りで保存</li>
       <li>🏖️休み / 🏭倉庫 をONにすると車両セレクタも自動でロック＆クリア</li>
     </ul>
     <p style="color:#1D9E75;font-size:12px;margin-top:6px">登録できる車両: ダブルキャブ / ユニック / 高所作業車 / ハイエース（白・シルバー・白2）/ タウンエース / ProBox / ジムニー / クリッパー（シルバー）</p>
@@ -1210,6 +1212,9 @@ function applyYasumiLock(p,clearValues){
     el.style.opacity=isLocked?'0.45':'';
     el.style.cursor=isLocked?'not-allowed':'';
   });
+  // 車両 chip コンテナもロック（chip 自体はボタン群なので pointerEvents で制御）
+  const vchip=document.getElementById(p+'-vehicle-chips');
+  if(vchip){vchip.style.pointerEvents=isLocked?'none':'';vchip.style.opacity=isLocked?'0.45':'';}
   // カラーピッカーもロック
   const cp=document.getElementById(p+'-color-picker');
   if(cp){cp.style.pointerEvents=isLocked?'none':'';cp.style.opacity=isLocked?'0.45':'';}
@@ -1231,6 +1236,8 @@ function applyYasumiLock(p,clearValues){
     if(memoEl)memoEl.value='';
     const vehEl=document.getElementById(p+'-vehicle');
     if(vehEl)vehEl.value='';
+    // chip も再描画して未選択状態に
+    if(typeof refreshVehicleSelect==='function')refreshVehicleSelect(p);
     const hint=document.getElementById(p+'-jobno-hint');
     if(hint)hint.style.display='none';
     const divWrap=document.getElementById(p+'-jobno-div-wrap');
@@ -1267,6 +1274,12 @@ function applyWorkTypeLock(p){
       el.style.cursor='';
     }
   });
+  // 車両 chip コンテナもゲートする（隠し input ではなく chip 群が操作対象）
+  const vchipEl=document.getElementById(p+'-vehicle-chips');
+  if(vchipEl){
+    if(isEmpty){vchipEl.style.pointerEvents='none';vchipEl.style.opacity='0.45';}
+    else if(!isModeLocked){vchipEl.style.pointerEvents='';vchipEl.style.opacity='';}
+  }
   ['souko','yakin','yasumi','yotei'].forEach(m=>{
     const el=document.getElementById(p+'-'+m+'-toggle');
     if(!el)return;
@@ -1291,7 +1304,13 @@ function applyWorkTypeLock(p){
   if(!isEmpty)applyYasumiLock(p,false);
 }
 
+// 車両文字列を配列に分解（カンマ区切り、半角/全角どちらも許容）
+function parseVehicles(v){
+  if(!v)return [];
+  return String(v).split(/[、,]/).map(s=>s.trim()).filter(Boolean);
+}
 // 車両セレクタ: 指定日に他の予定で使用中の車両は disabled で表示する
+// 1 予定で複数車両（カンマ区切り）に対応
 function getVehicleUsageMap(dates,excludeIds){
   const exclude=new Set(excludeIds||[]);
   const used={};
@@ -1300,29 +1319,53 @@ function getVehicleUsageMap(dates,excludeIds){
     if(n.isGhost)return;
     if(exclude.has(n.id))return;
     if(!dates.includes(n.date))return;
-    if(!used[n.vehicle])used[n.vehicle]={name:'',dates:new Set()};
-    used[n.vehicle].dates.add(n.date);
-    used[n.vehicle].name=n.name||used[n.vehicle].name;
+    parseVehicles(n.vehicle).forEach(v=>{
+      if(!used[v])used[v]={name:'',dates:new Set()};
+      used[v].dates.add(n.date);
+      used[v].name=n.name||used[v].name;
+    });
   });
   return used;
 }
+// chip 群を描画。selectId は隠し input の id（'s-vehicle'/'e-vehicle'）。
+// 隠し input の value にカンマ区切り文字列で選択中車両を保持。
 function renderVehicleOptions(selectId,dates,currentValue,excludeIds){
-  const sel=document.getElementById(selectId);if(!sel)return;
+  const inp=document.getElementById(selectId);if(!inp)return;
   const list=getCompanyVehicles();
   // 車両未登録の会社では車両フィールド自体を非表示
   const wrap=document.getElementById(selectId+'-wrap');
   if(wrap)wrap.style.display=list.length>0?'':'none';
+  // 隠し input に現在値を反映
+  inp.value=currentValue||'';
+  const selected=parseVehicles(currentValue||'');
   const used=getVehicleUsageMap(dates||[],excludeIds||[]);
-  let html='<option value="">使用しない</option>';
-  list.forEach(v=>{
-    const u=used[v.name];
-    const isUsed=!!u&&v.name!==currentValue;
-    const label=esc(v.name)+(isUsed?'  ／  使用中':'');
-    const dis=isUsed?' disabled':'';
-    const sel_=v.name===currentValue?' selected':'';
-    html+=`<option value="${esc(v.name)}"${sel_}${dis}>${label}</option>`;
-  });
-  sel.innerHTML=html;
+  const container=document.getElementById(selectId+'-chips');
+  if(!container)return;
+  container.innerHTML=list.map(v=>{
+    const isSel=selected.includes(v.name);
+    const isUsed=!!used[v.name]&&!isSel;
+    const style=isUsed
+      ? 'background:#f5f5f5;color:#999;border-color:#ddd;cursor:not-allowed;opacity:0.7'
+      : isSel
+      ? 'background:#1D9E75;color:#fff;border-color:#1D9E75;box-shadow:0 2px 4px rgba(29,158,117,0.3);cursor:pointer'
+      : 'background:#fff;color:#1D9E75;border-color:#A7F3D0;cursor:pointer';
+    const onclick=isUsed?'':`onclick="toggleVehicleChip('${selectId}','${esc(v.name)}')"`;
+    const label=esc(v.name)+(isUsed?' ／使用中':'');
+    return `<button type="button" ${onclick} style="${style};border:2px solid;border-radius:10px;padding:8px 12px;font-size:13px;font-weight:600;min-height:38px;flex:0 1 auto">🚗 ${label}</button>`;
+  }).join('');
+}
+// chip クリックで隠し input の文字列を更新 → 再描画
+function toggleVehicleChip(selectId,name){
+  const inp=document.getElementById(selectId);if(!inp)return;
+  const current=parseVehicles(inp.value);
+  const idx=current.indexOf(name);
+  if(idx>=0)current.splice(idx,1);
+  else current.push(name);
+  inp.value=current.join('、');
+  // 同じ prefix で再描画
+  const p=selectId.charAt(0);
+  refreshVehicleSelect(p);
+  hapticTap();
 }
 function getInputDates(p){
   const ds=document.getElementById(p+'-date');
@@ -1777,10 +1820,23 @@ async function submitNippo(){
   const workType=(document.getElementById('s-work-type')||{}).value||'現場作業';
   const vehicle=(document.getElementById('s-vehicle')||{}).value||'';
   // 車両のダブルブッキング再チェック（他のユーザーが同時に登録した場合の保険）
+  // 複数車両に対応: 選択された各車両を 1 台ずつチェック
   if(vehicle){
-    const conflictDates=dates.filter(d=>allNippos.some(n=>!n.isGhost&&n.vehicle===vehicle&&n.date===d));
-    if(conflictDates.length>0){
-      const proceed=confirm(`車両「${vehicle}」は以下の日に既に予約があります:\n${conflictDates.map(formatDate).join('\n')}\nそれでも登録しますか？`);
+    const selectedVehs=parseVehicles(vehicle);
+    const conflictPairs=[];
+    dates.forEach(d=>{
+      allNippos.forEach(n=>{
+        if(n.isGhost||n.date!==d||!n.vehicle)return;
+        parseVehicles(n.vehicle).forEach(v=>{
+          if(selectedVehs.includes(v)&&!conflictPairs.find(c=>c.date===d&&c.vehicle===v)){
+            conflictPairs.push({date:d,vehicle:v});
+          }
+        });
+      });
+    });
+    if(conflictPairs.length>0){
+      const lines=conflictPairs.map(c=>`・${formatDate(c.date)}　${c.vehicle}`).join('\n');
+      const proceed=confirm(`以下の車両は既に予約があります:\n${lines}\nそれでも登録しますか？`);
       if(!proceed){isSubmitting=false;return;}
     }
   }
@@ -1801,6 +1857,7 @@ async function submitNippo(){
       document.getElementById('s-memo').value='';document.getElementById('s-leader').value='';
       document.getElementById('s-date-end').value='';
       const _v=document.getElementById('s-vehicle');if(_v)_v.value='';
+      refreshVehicleSelect('s');
       const _wt=document.getElementById('s-work-type');if(_wt)_wt.value='';
       applyWorkTypeLock('s');
       const _ls=document.getElementById('s-location-select');if(_ls)_ls.value='';
@@ -2444,10 +2501,23 @@ async function saveEdit(){
     }
   }
   // 車両ダブルブッキング再チェック（編集中グループのIDは除外）
+  // 複数車両に対応
   if(vehicle){
-    const conflictDates=dates.filter(d=>allNippos.some(n=>!n.isGhost&&n.vehicle===vehicle&&n.date===d&&!excludeIds.has(n.id)));
-    if(conflictDates.length>0){
-      const proceed=confirm(`車両「${vehicle}」は以下の日に他の予定で予約があります:\n${conflictDates.map(formatDate).join('\n')}\nそれでも保存しますか？`);
+    const selectedVehs=parseVehicles(vehicle);
+    const conflictPairs=[];
+    dates.forEach(d=>{
+      allNippos.forEach(n=>{
+        if(n.isGhost||n.date!==d||!n.vehicle||excludeIds.has(n.id))return;
+        parseVehicles(n.vehicle).forEach(v=>{
+          if(selectedVehs.includes(v)&&!conflictPairs.find(c=>c.date===d&&c.vehicle===v)){
+            conflictPairs.push({date:d,vehicle:v});
+          }
+        });
+      });
+    });
+    if(conflictPairs.length>0){
+      const lines=conflictPairs.map(c=>`・${formatDate(c.date)}　${c.vehicle}`).join('\n');
+      const proceed=confirm(`以下の車両は他の予定で予約があります:\n${lines}\nそれでも保存しますか？`);
       if(!proceed){return;}
     }
   }
@@ -2699,15 +2769,21 @@ function renderVehicleList(){
     days.push({date:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),m:d.getMonth()+1,dd:d.getDate(),dow:d.getDay()});
   }
   const dayNames=['日','月','火','水','木','金','土'];
-  const cn=(allNippos||[]).filter(n=>!n.isGhost&&n.vehicle&&vehicleNames.has(n.vehicle));
+  // n.vehicle にカンマ区切りで複数台入る可能性があるので、後段で展開してフィルタする
+  const cn=(allNippos||[]).filter(n=>!n.isGhost&&n.vehicle&&parseVehicles(n.vehicle).some(v=>vehicleNames.has(v)));
   let html='';
   days.forEach(d=>{
-    // この日の予約をグループ化
+    // この日の予約をグループ化（1 予定で複数車両のときは各車両ごとに行を出す）
     const dayEntries=cn.filter(n=>n.date===d.date);
     const byKey={};
-    dayEntries.forEach(e=>{const key=(e.id||'')+'__'+e.vehicle;if(!byKey[key])byKey[key]={vehicle:e.vehicle,leader:'',members:[],genba:e.genba,loc:e.loc};
-      if(e.role==='代表')byKey[key].leader=e.name;
-      byKey[key].members.push(e.name);
+    dayEntries.forEach(e=>{
+      parseVehicles(e.vehicle).forEach(veh=>{
+        if(!vehicleNames.has(veh))return;
+        const key=(e.id||'')+'__'+veh;
+        if(!byKey[key])byKey[key]={vehicle:veh,leader:'',members:[],genba:e.genba,loc:e.loc};
+        if(e.role==='代表')byKey[key].leader=e.name;
+        byKey[key].members.push(e.name);
+      });
     });
     const groups=Object.values(byKey);
     const dowCls=d.dow===0?' sun':d.dow===6?' sat':'';
@@ -2753,7 +2829,7 @@ function renderVehicleWeek(){
   list.forEach(v=>{
     html+='<tr><td class="name-col">'+esc(v.name)+'</td>';
     days.forEach(d=>{
-      const entries=cn.filter(n=>n.vehicle===v.name&&n.date===d.date);
+      const entries=cn.filter(n=>n.date===d.date&&parseVehicles(n.vehicle).includes(v.name));
       const byGroup={};
       entries.forEach(e=>{const gid=e.id||(e.date+'__'+e.start+'__'+e.genba);if(!byGroup[gid])byGroup[gid]={leader:'',members:[],genba:e.genba,loc:e.loc};
         if(e.role==='代表')byGroup[gid].leader=e.name;
