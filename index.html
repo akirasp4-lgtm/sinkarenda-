@@ -2187,6 +2187,10 @@ function renderEventDetail(){
       else if(g.yakin)detailTitle='🌙 夜勤';
     }
   }
+  // 行の工番列が空でも、現場マスタに発行済みの工番があれば表示する
+  // （グローライズ以外の会社の代表が登録すると行の工番が空のまま保存されるため）
+  const masterJobNo=(!g.jobNo&&g.genba&&g.loc)?(((allJobsites||[]).find(j=>j.genba===g.genba&&j.loc===g.loc)||{}).jobNo||''):'';
+  const displayJobNo=g.jobNo||masterJobNo;
   const html=`
     <div class="detail-title-row">
       <div class="detail-color-bar" style="background:${esc(color)}"></div>
@@ -2200,7 +2204,7 @@ function renderEventDetail(){
     ${(g.yasumi||g.yotei)?'':`<div class="detail-row"><div class="detail-row-icon">🔢</div><div class="detail-row-content"><div class="detail-row-label">人工</div>${totalKo}</div></div>`}
     ${g.company?`<div class="detail-row"><div class="detail-row-icon">🏢</div><div class="detail-row-content"><div class="detail-row-label">会社</div>${esc(g.company)}</div></div>`:''}
     ${g.vehicle?`<div class="detail-row"><div class="detail-row-icon">🚗</div><div class="detail-row-content"><div class="detail-row-label">車両</div>${esc(g.vehicle)}</div></div>`:''}
-    ${g.jobNo?`<div class="detail-row"><div class="detail-row-icon">🔖</div><div class="detail-row-content"><div class="detail-row-label">工番</div>${esc(g.jobNo)}</div></div>`:''}
+    ${displayJobNo?`<div class="detail-row"><div class="detail-row-icon">🔖</div><div class="detail-row-content"><div class="detail-row-label">工番</div>${esc(displayJobNo)}${masterJobNo&&!g.jobNo?` <span style="color:#888;font-size:11px;margin-left:6px">（現場マスタ参照）</span>`:''}</div></div>`:''}
     ${g.memo&&!g.souko?`<div class="detail-row"><div class="detail-row-icon">📝</div><div class="detail-row-content"><div class="detail-row-label">メモ</div>${linkify(esc(g.memo).replace(/\n/g,'<br>'))}</div></div>`:''}
     ${g.updatedBy||g.timestamp?`<div class="detail-row"><div class="detail-row-icon">🔄</div><div class="detail-row-content"><div class="detail-row-label">最終更新</div>${esc(g.updatedBy||'')}${g.timestamp?` <span style="color:#666;font-size:12px;margin-left:6px">${esc(formatTimestamp(g.timestamp))}</span>`:''}</div></div>`:''}
     ${renderSiteCompletionRow_(g)}
