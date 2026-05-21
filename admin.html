@@ -2338,8 +2338,8 @@ function copyGroupToInput_(g){
   applyMode('s',g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'');
   // 作業区分が入った状態でゲート機構を再評価し、登録ボタンを有効化
   applyWorkTypeLock('s');
-  // 車両はコピー対象外（毎回選び直す）→ 隠し input をクリアして chip 群を未選択状態で再描画
-  const _v=document.getElementById('s-vehicle');if(_v)_v.value='';
+  // 車両もコピー（コピー元の chip 選択状態をそのまま反映）
+  const _v=document.getElementById('s-vehicle');if(_v)_v.value=g.vehicle||'';
   refreshVehicleSelect('s');
   const leader=g.members.find(m=>m.role==='代表');document.getElementById('s-leader').value=leader?leader.name:'';
   selectedMembers=[];const shokunin=getShokunin();g.members.filter(m=>m.role==='同行').forEach(m=>{const i=shokunin.indexOf(m.name);if(i>=0)selectedMembers.push(i);});
