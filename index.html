@@ -568,6 +568,10 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="その他">📋 その他</option>
   </select>
   <div id="e-worktype-notice" style="display:none;color:#dc2626;font-size:13px;font-weight:600;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:8px 12px;margin-bottom:12px">⚠️ 最初に「作業区分」を選択してください。選択するまで以下の項目は編集できません。</div>
+  <div id="e-date-wrap">
+    <label>作業日<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
+    <input type="date" id="e-date" onchange="onEditDateChange()">
+  </div>
   <label>元請名</label>
   <select id="e-genba-select" onchange="onGenbaSelect('e')"><option value="">選択してください</option><option value="__manual__">直接入力する</option></select>
   <input type="text" id="e-genba" style="display:none;margin-bottom:12px">
@@ -2422,12 +2426,23 @@ function copyToInput(idx){
   showAlert('予定をコピーしました。日付を入力して登録してください。','ok');
 }
 
+// 編集モーダルの作業日変更時：車両のダブルブッキング判定を新しい日付で再評価
+function onEditDateChange(){
+  const v=document.getElementById('e-date').value;
+  if(!v)return;
+  window._editDates=[v];
+  if(typeof refreshVehicleSelect==='function')refreshVehicleSelect('e');
+}
+
 function openEditModal(idx,groupsOverride){
   bulkEditMode=false;
   const groups=groupsOverride!==null?groupsOverride:getDisplayedGroups();
   const g=groups[idx];if(!g)return;
   editIds=[...new Set(g.ids)];editDate=g.date;
   window._editIds=editIds;window._editDates=[editDate];
+  // 単一編集時は作業日フィールドを表示・入力可能に
+  const dateWrap=document.getElementById('e-date-wrap');if(dateWrap)dateWrap.style.display='';
+  document.getElementById('e-date').value=g.date||'';
   setGenbaValue('e',g.genba);
   document.getElementById('e-location').value=g.loc||'';
   populateLocationSelect('e');
@@ -2490,7 +2505,15 @@ async function saveEdit(){
   const color=selectedColor.e||CAL_COLORS[0];
   const workType=(document.getElementById('e-work-type')||{}).value||'現場作業';
   const vehicle=(document.getElementById('e-vehicle')||{}).value||'';
-  const dates=bulkEditMode?editDates:[editDate];
+  // 一括編集時は元の日付配列を維持、単一編集時はフィールドから読み取る
+  let dates;
+  if(bulkEditMode){
+    dates=editDates;
+  }else{
+    const editedDate=document.getElementById('e-date').value;
+    if(!editedDate){alert('作業日が空です');return;}
+    dates=[editedDate];
+  }
   const excludeIds=new Set(editIds||[]);
   // メンバー被りチェック（編集中グループ自身は除外、予定モードレコードは除外）
   if(!yotei){
@@ -2647,6 +2670,8 @@ function openBulkEditModal(){
   editIds=[...new Set(targets.flatMap(g=>g.ids))];
   editDates=targets.map(g=>g.date);
   window._editIds=editIds;window._editDates=editDates;
+  // 一括編集時は作業日フィールドを非表示（複数日まとめて単一日付に変えるのは UI として複雑なので未対応）
+  const dateWrap=document.getElementById('e-date-wrap');if(dateWrap)dateWrap.style.display='none';
   const g=targets[0];
   setGenbaValue('e',g.genba);
   document.getElementById('e-location').value=g.loc||'';
