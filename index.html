@@ -2327,6 +2327,11 @@ function copyGroupToInput_(g){
   document.getElementById('s-date-end').value='';
   const mode=g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'';
   applyMode('s',mode);
+  // 作業区分が入った状態でゲート機構を再評価し、登録ボタンを有効化
+  applyWorkTypeLock('s');
+  // 車両はコピー対象外（毎回選び直す）→ 隠し input をクリアして chip 群を未選択状態で再描画
+  const _v=document.getElementById('s-vehicle');if(_v)_v.value='';
+  refreshVehicleSelect('s');
   const leader=g.members.find(m=>m.role==='代表');
   document.getElementById('s-leader').value=leader?leader.name:'';
   selectedMembers=[];
