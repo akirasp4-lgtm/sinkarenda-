@@ -1283,7 +1283,7 @@ async function shareGroup(g){
   const lines=[];
   lines.push(`【${dateStr} の予定】`);
   if(g.yasumi)lines.push('🏖️ 休み');
-  else if(g.souko)lines.push(g.memo?`🏭 倉庫: ${g.memo}`:'🏭 倉庫');
+  else if(g.souko){const t=g.memo||g.loc||'';lines.push(t?`🏭 倉庫: ${t}`:'🏭 倉庫');}
   else{
     if(g.genba)lines.push(`元請: ${g.genba}`);
     if(g.loc)lines.push(`現場: ${g.loc}`);
@@ -2034,9 +2034,10 @@ function renderCalendar(){
       const type=g.yakin?'yakin':g.yasumi?'yasumi':g.souko?'souko':g.yotei?'yotei':'';
       const map={yakin:'#2C2C5A',yasumi:'#E8384F',souko:'#8B5E3C',yotei:'#3B82F6','':'#1D9E75'};
       // 休み/倉庫は元請名の有無に関わらず統一表示。倉庫はタスク内容(メモ欄)を表示
+      // タスク格納先は メモ欄が現行仕様。旧データで loc に入っているケースは loc にフォールバック
       let label;
       if(g.yasumi)label='🏖️ 休み';
-      else if(g.souko)label=g.memo?`🏭 ${g.memo}`:'🏭 倉庫';
+      else if(g.souko){const t=g.memo||g.loc||'';label=t?`🏭 ${t}`:'🏭 倉庫';}
       else{
         label=g.loc||g.genba;
         if(!label){
@@ -2130,10 +2131,11 @@ function renderEventDetail(){
   const totalKo=(g.kosu*g.members.length).toFixed(1);
   const badges=[];if(g.souko)badges.push('🏭 倉庫');if(g.yakin)badges.push('🌙 夜勤');if(g.yasumi)badges.push('🏖️ 休み');if(g.yotei)badges.push('📌 予定');
   const wt=g.workType&&g.workType!=='現場作業'?g.workType:'現場作業';
-  // 休み/倉庫は元請名を表示せず統一ラベル。倉庫はタスク内容(メモ欄)を表示
+  // 休み/倉庫は元請名を表示せず統一ラベル。倉庫はタスク内容を表示
+  // タスク格納先は メモ欄が現行仕様。旧データで loc に入っているケースは loc にフォールバック
   let detailTitle;
   if(g.yasumi)detailTitle='🏖️ 休み';
-  else if(g.souko)detailTitle=g.memo?`🏭 ${esc(g.memo)}`:'🏭 倉庫';
+  else if(g.souko){const t=g.memo||g.loc||'';detailTitle=t?`🏭 ${esc(t)}`:'🏭 倉庫';}
   else{
     detailTitle=esc(g.genba);
     if(!detailTitle){
@@ -2148,7 +2150,7 @@ function renderEventDetail(){
     </div>
     <div class="detail-period">${dateStr}　${esc(g.start||'')}〜${esc(g.end||'')}</div>
     ${badges.length?`<div style="padding:0 0 8px 18px">${badges.map(b=>`<span style="display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;background:#f2f2f7;margin-right:6px">${b}</span>`).join('')}</div>`:''}
-    ${g.loc?`<div class="detail-row"><div class="detail-row-icon">📍</div><div class="detail-row-content"><div class="detail-row-label">現場名</div>${esc(g.loc)}</div></div>`:''}
+    ${g.loc&&!g.souko?`<div class="detail-row"><div class="detail-row-icon">📍</div><div class="detail-row-content"><div class="detail-row-label">現場名</div>${esc(g.loc)}</div></div>`:''}
     <div class="detail-row"><div class="detail-row-icon">🏷️</div><div class="detail-row-content"><div class="detail-row-label">作業区分</div>${esc(wt)}</div></div>
     <div class="detail-row"><div class="detail-row-icon">👥</div><div class="detail-row-content"><div class="detail-row-label">メンバー（${g.members.length}人）</div>${memberLine||'—'}</div></div>
     ${(g.yasumi||g.yotei)?'':`<div class="detail-row"><div class="detail-row-icon">🔢</div><div class="detail-row-content"><div class="detail-row-label">人工</div>${totalKo}</div></div>`}
