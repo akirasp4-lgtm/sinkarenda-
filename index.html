@@ -1216,6 +1216,9 @@ function applyYasumiLock(p,clearValues){
     el.style.opacity=isLocked?'0.45':'';
     el.style.cursor=isLocked?'not-allowed':'';
   });
+  // 代表者は休み/倉庫モードでも選択可能（誰が休みを取ったか/誰が倉庫作業をするか記録するため）
+  const leaderEl=document.getElementById(p+'-leader');
+  if(leaderEl){leaderEl.disabled=false;leaderEl.style.opacity='';leaderEl.style.cursor='';}
   // 車両 chip コンテナもロック（chip 自体はボタン群なので pointerEvents で制御）
   const vchip=document.getElementById(p+'-vehicle-chips');
   if(vchip){vchip.style.pointerEvents=isLocked?'none':'';vchip.style.opacity=isLocked?'0.45':'';}
