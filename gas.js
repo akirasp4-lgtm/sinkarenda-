@@ -1843,10 +1843,17 @@ function generateBillingFilterSheet_(ss, records) {
   try { const f = sheet.getFilter(); if (f) f.remove(); } catch (e) {}
   ensureColumns_(sheet, 36);
 
-  // 倉庫は元請に請求しない作業のため除外
-  const workRecords = records.filter(r => r.yakin !== '休み' && r.yakin !== '予定' && r.yakin !== '倉庫');
+  // 休み/予定は除外。倉庫は genba='', loc='倉庫作業' に正規化してフィルタ用シートに含める
+  // （通常の請求集計シート generateBillingSummary_ は変更なし — 倉庫除外のまま）
+  const workRecords = records
+    .filter(r => r.yakin !== '休み' && r.yakin !== '予定')
+    .map(r => r.yakin === '倉庫'
+      ? Object.assign({}, r, { genba: '', loc: '倉庫作業' })
+      : r);
   const months = [...new Set(workRecords.map(r => r.month).filter(Boolean))].sort().reverse();
   const genbas = [...new Set(workRecords.map(r => r.genba).filter(Boolean))].sort();
+  // 倉庫作業が存在する場合は空 genba ブロックを末尾に追加（倉庫は元請名が空）
+  if (workRecords.some(r => r.loc === '倉庫作業' && !r.genba)) genbas.push('');
 
   // ヘッダー行
   const header = ['月', '会社名', '現場名', '名前'];
