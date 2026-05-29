@@ -1472,7 +1472,7 @@ function switchCompany(c){
   currentCompany=c;
   try{localStorage.setItem('genba-company',c);}catch(e){}
   selectedMembers=[];editSelectedMembers=[];
-  renderCompanyBar();initMemberUI();renderList();updateAvailability();updateJimu();updateGenbaFilter();updateGmSelects();updateNoticeBar();
+  renderCompanyBar();initMemberUI();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();updateNoticeBar();
   refreshVehicleSelect('s');
   // 車確認タブを開いていれば再描画
   if(typeof renderVehicleWeek==='function'){renderVehicleWeek();renderVehicleList();}
@@ -1497,7 +1497,7 @@ function switchTab(t){
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   const target=document.getElementById('screen-'+t);
   if(target)target.classList.add('active');
-  if(t==='genba')updateGmSelects();
+  if(t==='genba')refreshGmTab();
   if(t==='list')renderList();
   if(t==='input')initColorPicker('s',selectedColor.s);
   if(t==='vehicle'){if(!vehicleWeekStart)initVehicleWeek();renderVehicleWeek();renderVehicleList();}
@@ -1961,7 +1961,7 @@ async function loadData(){
       else allGenbaMaster=json.genbaMaster.map(g=>({name:g,company:'共通'}));
     }
     if(json.jobsites)allJobsites=json.jobsites;
-    initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();updateGmSelects();
+    initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();
     updateLocationSuggestions();
     refreshVehicleSelect('s');
     checkUsername();
@@ -2572,6 +2572,40 @@ async function saveEdit(){
 }
 
 // ========== 現場別管理 ==========
+// 探し方モード: 'genba' | 'person' | 'pin'
+let gmMode = 'genba';
+let pinFilterMode = 'overdue'; // 'overdue' | 'month'
+
+function refreshGmTab() {
+  if (gmMode === 'genba') updateGmSelects();
+  else if (gmMode === 'person') renderPersonFilter();
+  else if (gmMode === 'pin') renderPinFilter();
+}
+
+function setGmMode(mode) {
+  gmMode = mode;
+  ['genba','person','pin'].forEach(m => {
+    const btn = document.getElementById('gm-mode-' + m);
+    if (btn) btn.classList.toggle('active', m === mode);
+  });
+  const cards = {
+    genba: document.getElementById('gm-filter-genba'),
+    person: document.getElementById('gm-filter-person'),
+    pin: document.getElementById('gm-filter-pin'),
+  };
+  Object.entries(cards).forEach(([k, el]) => {
+    if (el) el.style.display = k === mode ? '' : 'none';
+  });
+  document.getElementById('gm-list-wrap').style.display = 'none';
+  refreshGmTab();
+}
+
+function getActiveGmGroups() {
+  if (gmMode === 'person') return getPersonGroups();
+  if (gmMode === 'pin') return getPinGroups();
+  return getGmGroups();
+}
+
 function updateGmSelects(){
   const nippos=filteredNippos().filter(n=>!n.isGhost);
   const genbas=[...new Set(nippos.map(n=>n.genba).filter(Boolean))].sort();
@@ -2621,7 +2655,7 @@ function getGmGroups(){
 }
 
 function renderGmList(){
-  const groups=getGmGroups();
+  const groups=getActiveGmGroups();
   const wrap=document.getElementById('gm-list-wrap');
   if(groups.length===0){wrap.style.display='none';return;}
   wrap.style.display='block';
@@ -2634,14 +2668,15 @@ function renderGmList(){
     if(g.souko)badges.push('<span class="souko-badge">🏭倉庫</span>');
     if(g.yotei)badges.push('<span class="yotei-badge-tag">📌予定</span>');
     const updaterHtml = g.updatedBy ? `<span style="font-size:11px;color:#999;margin-left:8px;">🔄 更新: ${esc(g.updatedBy)}</span>` : '';
-    return`<div class="gm-day-row">
+    const _overdueStyle=(gmMode==='pin'&&pinFilterMode==='overdue')?' style="border-left:3px solid #ff3b30;padding-left:12px"':'';
+    return`<div class="gm-day-row"${_overdueStyle}>
       <input type="checkbox" class="gm-day-check" data-idx="${idx}" onchange="updateGmDeleteBar()">
       <div class="gm-day-info">
         <div class="gm-day-date">${formatDate(g.date)}</div>
         <div class="gm-day-members">${esc(memberNames)}${updaterHtml}</div>
         ${badges.length?`<div style="margin-top:4px">${badges.join('')}</div>`:''}
       </div>
-      <button class="gm-edit-btn" onclick="openEditModal(${idx},getGmGroups())">編集</button>
+      <button class="gm-edit-btn" onclick="openEditModal(${idx},getActiveGmGroups())">編集</button>
     </div>`;
   }).join('');
   updateGmDeleteBar();
@@ -2664,7 +2699,7 @@ function toggleGmSelectAll(){
 }
 
 function openBulkEditModal(){
-  const groups=getGmGroups();
+  const groups=getActiveGmGroups();
   const checked=[...document.querySelectorAll('.gm-day-check:checked')];
   if(checked.length===0)return;
   const targets=checked.map(c=>groups[Number(c.dataset.idx)]).filter(Boolean);
@@ -2700,7 +2735,7 @@ function openBulkEditModal(){
 }
 
 async function deleteGmChecked(){
-  const groups=getGmGroups();
+  const groups=getActiveGmGroups();
   const checked=[...document.querySelectorAll('.gm-day-check:checked')];
   if(checked.length===0)return;
   const targets=checked.map(c=>groups[Number(c.dataset.idx)]).filter(Boolean);
