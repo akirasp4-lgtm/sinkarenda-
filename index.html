@@ -2774,6 +2774,78 @@ async function deleteGmChecked(){
   setLoading(false);
 }
 
+// ========== 人で探す ==========
+function renderPersonFilter() {
+  const pSel = document.getElementById('gm-person');
+  if (pSel) {
+    const shokunin = getShokunin();
+    const curP = pSel.value;
+    pSel.innerHTML = '<option value="">人を選択</option>' +
+      shokunin.map(s => `<option value="${esc(s)}"${s===curP?' selected':''}>${esc(s)}</option>`).join('');
+  }
+  const mSel = document.getElementById('gm-person-month');
+  if (mSel) {
+    const nippos = filteredNippos().filter(n => !n.isGhost);
+    const months = [...new Set(nippos.map(n => (n.date||'').slice(0,7)).filter(Boolean))].sort().reverse();
+    const curM = mSel.value;
+    mSel.innerHTML = '<option value="">全期間</option>' + months.map(m => {
+      const p = m.split('-');
+      return `<option value="${m}"${m===curM?' selected':''}>${p[0]}年${Number(p[1])}月</option>`;
+    }).join('');
+  }
+  renderGmList();
+}
+
+function getPersonGroups() {
+  const person = (document.getElementById('gm-person')||{}).value || '';
+  const month  = (document.getElementById('gm-person-month')||{}).value || '';
+  if (!person) return [];
+  let nippos = filteredNippos().filter(n => !n.isGhost);
+  if (month) nippos = nippos.filter(n => (n.date||'').startsWith(month));
+  return groupNippos(nippos)
+    .filter(g => g.members.some(m => m.name === person))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+// ========== 予定ピン一覧 ==========
+function renderPinFilter() {
+  const mSel = document.getElementById('gm-pin-month');
+  if (mSel) {
+    const nippos = filteredNippos().filter(n => !n.isGhost && n.yotei);
+    const months = [...new Set(nippos.map(n => (n.date||'').slice(0,7)).filter(Boolean))].sort().reverse();
+    const curM = mSel.value;
+    mSel.innerHTML = '<option value="">月を選択</option>' + months.map(m => {
+      const p = m.split('-');
+      return `<option value="${m}"${m===curM?' selected':''}>${p[0]}年${Number(p[1])}月</option>`;
+    }).join('');
+  }
+  renderGmList();
+}
+
+function setPinFilterMode(mode) {
+  pinFilterMode = mode;
+  ['overdue','month'].forEach(m => {
+    const btn = document.getElementById('gm-pin-' + m + '-btn');
+    if (btn) btn.classList.toggle('active', m === mode);
+  });
+  const mSel = document.getElementById('gm-pin-month');
+  if (mSel) mSel.style.display = mode === 'month' ? '' : 'none';
+  renderGmList();
+}
+
+function getPinGroups() {
+  const _t = new Date();
+  const today = _t.getFullYear() + '-' + String(_t.getMonth()+1).padStart(2,'0') + '-' + String(_t.getDate()).padStart(2,'0');
+  let nippos = filteredNippos().filter(n => !n.isGhost && n.yotei);
+  if (pinFilterMode === 'overdue') {
+    nippos = nippos.filter(n => (n.date||'') < today);
+  } else {
+    const month = (document.getElementById('gm-pin-month')||{}).value || '';
+    if (month) nippos = nippos.filter(n => (n.date||'').startsWith(month));
+  }
+  return groupNippos(nippos).sort((a, b) => a.date.localeCompare(b.date));
+}
+
 // ========== 空き確認 ==========
 let availWeekStart=null;
 function getMonday(d){const dt=new Date(d);const day=dt.getDay();const diff=dt.getDate()-day+(day===0?-6:1);return new Date(dt.getFullYear(),dt.getMonth(),diff);}
