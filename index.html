@@ -146,6 +146,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 .veh-table .name-col{text-align:left;font-weight:500;padding-left:6px;min-width:80px;white-space:nowrap;font-size:11px;background:#fafafa}
 .week-sun th,.week-sun{color:#E8384F!important}
 .week-sat th,.week-sat{color:#3B82F6!important}
+.gm-mode-bar{display:flex;gap:8px;margin-bottom:8px}.gm-mode-bar .btn{flex:1;font-size:12px;padding:6px 4px}.btn-secondary.active{background:#1D9E75 !important;color:#fff !important;border-color:#1D9E75 !important}
 .gm-day-row{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid #f0f0f0}
 .gm-day-row:last-child{border-bottom:none}
 .gm-day-check{width:22px;height:22px;flex-shrink:0;cursor:pointer;accent-color:#ff3b30}
@@ -448,7 +449,13 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 
 <div id="screen-genba" class="screen">
 <div class="page-title">現場別管理</div>
-<div class="card">
+<div class="gm-mode-bar">
+  <button id="gm-mode-genba" class="btn btn-secondary active" onclick="setGmMode('genba')">🏗️ 現場で探す</button>
+  <button id="gm-mode-person" class="btn btn-secondary" onclick="setGmMode('person')">👤 人で探す</button>
+  <button id="gm-mode-pin" class="btn btn-secondary" onclick="setGmMode('pin')">📌 予定だけ</button>
+</div>
+<!-- 現場フィルタ（既存） -->
+<div id="gm-filter-genba" class="card">
   <label>元請名 / 月</label>
   <div style="display:flex;gap:8px;margin-bottom:8px">
     <select id="gm-genba" onchange="onGmGenbaChange()" style="flex:2;margin-bottom:0"><option value="">元請を選択</option></select>
@@ -456,6 +463,21 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   </div>
   <label>現場名</label>
   <select id="gm-location" onchange="renderGmList()" style="margin-bottom:0"><option value="">現場を選択</option></select>
+</div>
+<!-- 人フィルタ（新規） -->
+<div id="gm-filter-person" class="card" style="display:none">
+  <label>人を選ぶ</label>
+  <select id="gm-person" onchange="renderGmList()" style="margin-bottom:8px"><option value="">人を選択</option></select>
+  <label>月（任意）</label>
+  <select id="gm-person-month" onchange="renderGmList()"><option value="">全期間</option></select>
+</div>
+<!-- 予定ピンフィルタ（新規） -->
+<div id="gm-filter-pin" class="card" style="display:none">
+  <div style="display:flex;gap:8px;margin-bottom:8px">
+    <button id="gm-pin-overdue-btn" class="btn btn-secondary active" style="flex:1;font-size:12px" onclick="setPinFilterMode('overdue')">📌 期限切れのみ</button>
+    <button id="gm-pin-month-btn" class="btn btn-secondary" style="flex:1;font-size:12px" onclick="setPinFilterMode('month')">月で絞る</button>
+  </div>
+  <select id="gm-pin-month" onchange="renderGmList()" style="display:none"><option value="">月を選択</option></select>
 </div>
 <div id="gm-list-wrap" style="display:none">
   <div class="card" style="padding:12px 16px">
