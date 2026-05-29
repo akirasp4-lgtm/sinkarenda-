@@ -381,7 +381,9 @@ function setPinFilterMode(mode) {
 }
 
 function getPinGroups() {
-  const today = new Date().toISOString().slice(0, 10);
+  // today はローカル時間で算出（toISOString は UTC なので日本の朝0〜9時に1日ズレる）
+  const _t = new Date();
+  const today = _t.getFullYear() + '-' + String(_t.getMonth()+1).padStart(2,'0') + '-' + String(_t.getDate()).padStart(2,'0');
   let nippos = filteredNippos().filter(n => !n.isGhost && n.yotei);
   if (pinFilterMode === 'overdue') {
     nippos = nippos.filter(n => (n.date||'') < today);
