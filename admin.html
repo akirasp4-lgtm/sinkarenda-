@@ -2830,7 +2830,15 @@ function renderBillingTable(){
 function onBillingRateInput(el){
   const key=el.dataset.genba+'|||'+el.dataset.loc+'|||'+el.dataset.name;
   billingDirty[key]=el.value===''?'':Number(el.value);
-  renderBillingTable(); // 金額を即再計算（入力欄の値は billingDirty に保持されるので保たれる）
+  // その行の金額セルだけ更新（全体再描画しないので入力中もフォーカスが外れない）
+  const tr=el.closest('tr');
+  if(tr){
+    const manDays=Number(tr.children[2].textContent)||0;
+    const amountCell=tr.querySelector('.bill-amount');
+    const amount=(el.value!==''&&el.value!=null)?(manDays*Number(el.value)):'';
+    if(amountCell)amountCell.textContent=(amount===''?'-':amount.toLocaleString());
+  }
+  updateBillingTotal();
 }
 
 async function onBillingMethodChange(el){
