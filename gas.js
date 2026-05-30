@@ -8,6 +8,8 @@ const SUMMARY_MONTH = '月別集計';
 const KAKUNIN_SHEET = '月別確認表';
 const BILLING_SHEET = '元請別請求集計';
 const BILLING_FILTER_SHEET = '元請別請求集計_フィルタ用';
+const BILLING_RATE_SHEET = '請求単価マスタ';
+const BILLING_CALC_SHEET = '請求計算';
 const ALLOCATION_SHEET = '事業部別按分';
 const OPLOG_SHEET = '操作ログ';
 const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両'];
@@ -507,6 +509,88 @@ function doPost(e) {
       return error('現場マスタに該当現場が見つかりません');
     }
 
+    if (action === 'get_billing_rates') {
+      const sheet = getOrCreateBillingRateSheet_(ss);
+      const data = sheet.getDataRange().getValues();
+      const rates = data.length > 1 ? data.slice(1).map(r => ({
+        genba: String(r[0] || ''),
+        loc: String(r[1] || ''),
+        name: String(r[2] || ''),
+        rate: Number(r[3] || 0)
+      })).filter(x => x.genba) : [];
+      return ok({rates: rates});
+    }
+
+    if (action === 'save_billing_rate') {
+      const sheet = getOrCreateBillingRateSheet_(ss);
+      const genba = String(body.genba || '').trim();
+      const loc = String(body.loc || '').trim();
+      const name = String(body.name || '').trim();
+      const rate = Number(body.rate || 0);
+      if (!genba || !name) return error('元請名・職人名は必須です');
+      const now = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
+      const data = sheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][0]).trim() === genba && String(data[i][1]).trim() === loc && String(data[i][2]).trim() === name) {
+          sheet.getRange(i + 1, 4).setValue(rate);
+          sheet.getRange(i + 1, 5).setValue(now);
+          return ok({updated: true});
+        }
+      }
+      sheet.appendRow([genba, loc, name, rate, now]);
+      return ok({added: true});
+    }
+
+    if (action === 'update_site_billing_method') {
+      const jobSiteSheet = getOrCreateJobSiteSheet_(ss);
+      const genba = String(body.genba || '').trim();
+      const loc = String(body.loc || '').trim();
+      const method = String(body.method || '応援').trim();
+      const data = jobSiteSheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][0]).trim() === genba && String(data[i][1]).trim() === loc) {
+          jobSiteSheet.getRange(i + 1, 10).setValue(method);
+          logOperation_(ss, 'update_site_billing_method', genba + '/' + loc, '方式=' + method, updatedBy);
+          return ok({updated: true});
+        }
+      }
+      return error('現場マスタに該当現場が見つかりません');
+    }
+
+    if (action === 'generate_billing_calc_xlsx') {
+      const genba = String(body.genba || '');
+      const month = String(body.month || '');
+      const lines = Array.isArray(body.lines) ? body.lines : [];
+      let sheet = ss.getSheetByName(BILLING_CALC_SHEET);
+      if (sheet) { sheet.clear(); } else { sheet = ss.insertSheet(BILLING_CALC_SHEET); }
+      sheet.appendRow([genba + '　' + month + '　請求計算']);
+      sheet.appendRow(['現場名', '職人名', '出面数', '単価', '金額', '経費', '方式']);
+      const dataStart = 3; // 1=タイトル 2=ヘッダ 3=先頭データ
+      lines.forEach(ln => {
+        const r = sheet.getLastRow() + 1;
+        const isOuen = String(ln.method || '応援') === '応援';
+        const amountFormula = isOuen ? '=C' + r + '*D' + r : ''; // 金額=出面×単価（応援のみ）
+        sheet.appendRow([
+          String(ln.loc || ''), String(ln.name || ''),
+          Number(ln.manDays || 0), Number(ln.rate || 0),
+          amountFormula, isOuen ? Number(ln.expense || 0) : 0,
+          String(ln.method || '応援')
+        ]);
+      });
+      const dataEnd = sheet.getLastRow();
+      if (dataEnd >= dataStart) {
+        const totalRow = dataEnd + 1;
+        sheet.getRange(totalRow, 1).setValue('合計');
+        sheet.getRange(totalRow, 5).setFormula('=SUM(E' + dataStart + ':E' + dataEnd + ')');
+        sheet.getRange(totalRow, 6).setFormula('=SUM(F' + dataStart + ':F' + dataEnd + ')');
+        sheet.getRange(totalRow + 1, 4).setValue('請求合計');
+        sheet.getRange(totalRow + 1, 5).setFormula('=E' + totalRow + '+F' + totalRow);
+      }
+      SpreadsheetApp.flush();
+      const result = exportSheetAsXlsxBase64_(ss, sheet);
+      return ok({base64: result.base64, filename: '請求計算_' + genba + '_' + month + '.xlsx'});
+    }
+
     // 現場の「完了」フラグを設定/解除。工番・売上・既存日報には一切影響しない。
     // body: { genba, loc, completed (bool), updatedBy }
     if (action === 'update_site_status') {
@@ -951,7 +1035,8 @@ function doGet(e) {
       genba: String(r[0] || ''),
       loc: String(r[1] || ''),
       jobNo: String(r[2] || ''),
-      completed: String(r[8] || '').trim() !== ''
+      completed: String(r[8] || '').trim() !== '',
+      billingMethod: String(r[9] || '').trim() || '応援'
     })).filter(j => j.genba) : [];
 
     return ok({rows, members, genbaMaster, jobsites});
@@ -1024,13 +1109,23 @@ function getOrCreateJobSiteSheet_(ss) {
   let sheet = ss.getSheetByName(JOBSITE_SHEET);
   if (!sheet) {
     sheet = ss.insertSheet(JOBSITE_SHEET);
-    sheet.appendRow(['元請名', '現場名', '工番', '事業部', '年度', '連番', '売上', '読み', '完了']);
+    sheet.appendRow(['元請名', '現場名', '工番', '事業部', '年度', '連番', '売上', '読み', '完了', '請求方式']);
   } else {
-    ensureColumns_(sheet, 9);
-    const headers = sheet.getRange(1, 1, 1, 9).getValues()[0];
+    ensureColumns_(sheet, 10);
+    const headers = sheet.getRange(1, 1, 1, 10).getValues()[0];
     if (String(headers[6] || '').trim() !== '売上') sheet.getRange(1, 7).setValue('売上');
     if (String(headers[7] || '').trim() !== '読み') sheet.getRange(1, 8).setValue('読み');
     if (String(headers[8] || '').trim() !== '完了') sheet.getRange(1, 9).setValue('完了');
+    if (String(headers[9] || '').trim() !== '請求方式') sheet.getRange(1, 10).setValue('請求方式');
+  }
+  return sheet;
+}
+
+function getOrCreateBillingRateSheet_(ss) {
+  let sheet = ss.getSheetByName(BILLING_RATE_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(BILLING_RATE_SHEET);
+    sheet.appendRow(['元請名', '現場名', '職人名', '単価', '更新日時']);
   }
   return sheet;
 }
