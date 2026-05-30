@@ -2741,6 +2741,120 @@ function getPinGroups() {
   return groupNippos(nippos).sort((a, b) => a.date.localeCompare(b.date));
 }
 
+// ===== 請求計算 =====
+let billingRates = [];   // [{genba,loc,name,rate}]
+let billingDirty = {};   // 画面で編集した単価 key->rate（保存用）
+
+async function initBillingTab(){
+  // 単価マスタを取得
+  try{
+    const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'get_billing_rates'}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok')billingRates=json.rates||[];
+  }catch(e){console.error('単価マスタ取得失敗',e);}
+  populateBillingSelectors();
+}
+
+function populateBillingSelectors(){
+  const nippos=filteredNippos().filter(n=>!n.isGhost);
+  const genbas=[...new Set(nippos.map(n=>n.genba).filter(Boolean))].sort();
+  const gSel=document.getElementById('bill-genba');
+  const curG=gSel.value;
+  gSel.innerHTML='<option value="">元請を選択</option>'+genbas.map(g=>`<option value="${esc(g)}"${g===curG?' selected':''}>${esc(g)}</option>`).join('');
+  const mSel=document.getElementById('bill-month');
+  const months=[...new Set(nippos.map(n=>(n.date||'').slice(0,7)).filter(Boolean))].sort().reverse();
+  const curM=mSel.value;
+  mSel.innerHTML=months.map(m=>{const p=m.split('-');return `<option value="${m}"${m===curM?' selected':''}>${p[0]}年${Number(p[1])}月</option>`;}).join('');
+  renderBillingTable();
+}
+
+function billingRate(genba,loc,name){
+  const key=genba+'|||'+loc+'|||'+name;
+  if(key in billingDirty)return billingDirty[key];
+  const hit=billingRates.find(r=>r.genba===genba&&r.loc===loc&&r.name===name);
+  return hit?hit.rate:'';
+}
+function siteBillingMethod(genba,loc){
+  const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
+  return j&&j.billingMethod?j.billingMethod:'応援';
+}
+
+function getBillingLines(){
+  const genba=document.getElementById('bill-genba').value;
+  const month=document.getElementById('bill-month').value;
+  if(!genba||!month)return[];
+  let nippos=filteredNippos().filter(n=>!n.isGhost&&n.genba===genba&&(n.date||'').startsWith(month)
+    &&n.yakin!=='休み'&&n.yakin!=='予定'&&n.yakin!=='倉庫'&&!n.yasumi&&!n.yotei&&!n.souko);
+  // 現場×職人 → 出面した日付の集合（重複日は1出面）
+  const map={};
+  nippos.forEach(n=>{
+    const loc=n.loc||'';
+    const key=loc+'|||'+n.name;
+    if(!map[key])map[key]={loc:loc,name:n.name,dates:new Set()};
+    map[key].dates.add(n.date);
+  });
+  return Object.values(map).map(x=>({
+    genba:genba,loc:x.loc,name:x.name,manDays:x.dates.size,
+    method:siteBillingMethod(genba,x.loc)
+  })).sort((a,b)=>a.loc.localeCompare(b.loc)||a.name.localeCompare(b.name));
+}
+
+function renderBillingTable(){
+  const genba=document.getElementById('bill-genba').value;
+  const lines=getBillingLines();
+  const wrap=document.getElementById('bill-table-wrap');
+  if(lines.length===0){wrap.style.display='none';return;}
+  wrap.style.display='block';
+  let prevLoc=null;
+  document.getElementById('bill-tbody').innerHTML=lines.map((ln,idx)=>{
+    const rate=billingRate(genba,ln.loc,ln.name);
+    const isOuen=ln.method==='応援';
+    const amount=(isOuen&&rate!==''&&rate!=null)?(ln.manDays*Number(rate)):'';
+    const firstOfSite=ln.loc!==prevLoc; prevLoc=ln.loc;
+    const expenseCell=(isOuen&&firstOfSite)
+      ? `<input type="number" class="bill-exp" data-loc="${esc(ln.loc)}" style="width:80px" oninput="updateBillingTotal()">`
+      : '';
+    const rateInput=`<input type="number" class="bill-rate" data-genba="${esc(genba)}" data-loc="${esc(ln.loc)}" data-name="${esc(ln.name)}" value="${rate===''?'':rate}" style="width:90px" ${isOuen?'':'disabled'} oninput="onBillingRateInput(this)">`;
+    const methodSel=`<select class="bill-method" data-genba="${esc(genba)}" data-loc="${esc(ln.loc)}" onchange="onBillingMethodChange(this)">
+      <option value="応援"${isOuen?' selected':''}>応援</option>
+      <option value="請負"${!isOuen?' selected':''}>請負</option></select>`;
+    return `<tr data-idx="${idx}">
+      <td>${esc(ln.loc)}</td><td>${esc(ln.name)}</td><td style="text-align:right">${ln.manDays}</td>
+      <td>${methodSel}</td><td>${rateInput}</td>
+      <td class="bill-amount" style="text-align:right">${amount===''?'-':amount.toLocaleString()}</td>
+      <td>${expenseCell}</td></tr>`;
+  }).join('');
+  updateBillingTotal();
+}
+
+function onBillingRateInput(el){
+  const key=el.dataset.genba+'|||'+el.dataset.loc+'|||'+el.dataset.name;
+  billingDirty[key]=el.value===''?'':Number(el.value);
+  renderBillingTable(); // 金額を即再計算（入力欄の値は billingDirty に保持されるので保たれる）
+}
+
+async function onBillingMethodChange(el){
+  const genba=el.dataset.genba, loc=el.dataset.loc, method=el.value;
+  // 同じ現場の全行に反映（現場マスタ更新）
+  try{
+    await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update_site_billing_method',genba,loc,method,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
+    if(j)j.billingMethod=method; else (allJobsites=allJobsites||[]).push({genba,loc,billingMethod:method});
+  }catch(e){console.error(e);}
+  renderBillingTable();
+}
+
+function updateBillingTotal(){
+  let amountSum=0, expSum=0;
+  document.querySelectorAll('#bill-tbody tr').forEach(tr=>{
+    const a=tr.querySelector('.bill-amount').textContent.replace(/[^0-9]/g,'');
+    if(a)amountSum+=Number(a);
+  });
+  document.querySelectorAll('.bill-exp').forEach(inp=>{if(inp.value)expSum+=Number(inp.value);});
+  document.getElementById('bill-total').textContent=
+    `金額合計 ${amountSum.toLocaleString()}円 ＋ 経費 ${expSum.toLocaleString()}円 ＝ 請求合計 ${(amountSum+expSum).toLocaleString()}円`;
+}
+
 // ===== 空き確認 =====
 let availWeekStart=null;
 function getMonday(d){const dt=new Date(d);const day=dt.getDay();return new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()-day+(day===0?-6:1));}
