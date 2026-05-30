@@ -604,6 +604,28 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 </div>
 
+<div id="screen-billing" class="screen">
+<div class="page-title">💰 請求計算（常用・日当）</div>
+<div class="card">
+  <label>元請名 / 月</label>
+  <div style="display:flex;gap:8px;margin-bottom:0">
+    <select id="bill-genba" onchange="renderBillingTable()" style="flex:2;margin-bottom:0"><option value="">元請を選択</option></select>
+    <select id="bill-month" onchange="renderBillingTable()" style="flex:1;margin-bottom:0"></select>
+  </div>
+</div>
+<div id="bill-table-wrap" style="display:none">
+  <div class="card" style="padding:12px 16px;overflow-x:auto">
+    <table class="tbl" id="bill-table">
+      <thead><tr><th>現場</th><th>職人</th><th>出面</th><th>方式</th><th>単価</th><th>金額</th><th>経費</th></tr></thead>
+      <tbody id="bill-tbody"></tbody>
+    </table>
+    <div id="bill-total" style="text-align:right;font-weight:600;margin-top:10px;font-size:15px"></div>
+  </div>
+  <button class="btn" id="bill-export-btn" onclick="exportBillingXlsx()" style="background:#1D9E75;margin-top:8px">Excelで出力（関数入り）</button>
+</div>
+<button class="btn btn-secondary" style="margin-top:8px" onclick="loadData()">更新</button>
+</div>
+
 <!-- タブバー -->
 <div class="tab-bar">
   <button class="tab" onclick="switchTab('list')"><span class="tab-icon">📅</span>カレンダー</button>
@@ -611,6 +633,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <button class="tab" onclick="switchTab('genba')"><span class="tab-icon">🏗️</span>現場管理</button>
   <button class="tab" onclick="switchTab('vehicle')"><span class="tab-icon">🚗</span>車確認</button>
   <button class="tab active" onclick="switchTab('jimu')"><span class="tab-icon">📊</span>事務</button>
+  <button class="tab" onclick="switchTab('billing')"><span class="tab-icon">💰</span>請求計算</button>
 </div>
 
 <!-- 操作者名変更モーダル -->
@@ -1389,7 +1412,7 @@ function filteredNippos(){
 
 // ===== タブ =====
 function switchTab(t){
-  const tabs=['list','avail','genba','vehicle','jimu'];
+  const tabs=['list','avail','genba','vehicle','jimu','billing'];
   document.querySelectorAll('.tab').forEach((el,i)=>el.classList.toggle('active',tabs[i]===t));
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   const target=document.getElementById('screen-'+t);
@@ -1399,6 +1422,7 @@ function switchTab(t){
   if(t==='input')initColorPicker('s',selectedColor.s);
   if(t==='vehicle'){if(!vehicleWeekStart)initVehicleWeek();renderVehicleWeek();renderVehicleList();}
   if(t==='avail')renderAvailList();
+  if(t==='billing')initBillingTab();
   hapticTap();
 }
 
