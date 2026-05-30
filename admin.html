@@ -2855,6 +2855,49 @@ function updateBillingTotal(){
     `金額合計 ${amountSum.toLocaleString()}円 ＋ 経費 ${expSum.toLocaleString()}円 ＝ 請求合計 ${(amountSum+expSum).toLocaleString()}円`;
 }
 
+async function exportBillingXlsx(){
+  const genba=document.getElementById('bill-genba').value;
+  const month=document.getElementById('bill-month').value;
+  if(!genba||!month){alert('元請と月を選んでください');return;}
+  const btn=document.getElementById('bill-export-btn');
+  btn.disabled=true;btn.textContent='出力中...';
+  try{
+    // 1) 編集された単価をマスタに保存
+    for(const key of Object.keys(billingDirty)){
+      const [g,l,n]=key.split('|||');
+      const rate=billingDirty[key];
+      if(rate==='')continue;
+      await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'save_billing_rate',genba:g,loc:l,name:n,rate:Number(rate),updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    }
+    // 2) 明細を組み立て（経費は現場の先頭行に紐づく）
+    const lines=getBillingLines();
+    const expMap={};
+    document.querySelectorAll('.bill-exp').forEach(inp=>{expMap[inp.dataset.loc]=Number(inp.value||0);});
+    const seen={};
+    const payload=lines.map(ln=>{
+      const rate=billingRate(genba,ln.loc,ln.name);
+      const exp=(!seen[ln.loc])?(expMap[ln.loc]||0):0; seen[ln.loc]=true;
+      return {loc:ln.loc,name:ln.name,manDays:ln.manDays,rate:(rate===''?0:Number(rate)),method:ln.method,expense:exp};
+    });
+    // 3) xlsx生成リクエスト
+    const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'generate_billing_calc_xlsx',genba,month,lines:payload}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status!=='ok'){alert('出力エラー：'+json.message);return;}
+    // 4) base64 を Blob 化してダウンロード
+    const bin=atob(json.base64);
+    const bytes=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+    const blob=new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);a.download=json.filename||'請求計算.xlsx';
+    document.body.appendChild(a);a.click();a.remove();
+    // 保存済みなので dirty をマスタ側へ反映
+    for(const key of Object.keys(billingDirty)){const[g,l,n]=key.split('|||');const hit=billingRates.find(r=>r.genba===g&&r.loc===l&&r.name===n);if(hit)hit.rate=Number(billingDirty[key]);else billingRates.push({genba:g,loc:l,name:n,rate:Number(billingDirty[key])});}
+    billingDirty={};
+  }catch(e){alert('出力エラー：'+e.message);}
+  finally{btn.disabled=false;btn.textContent='Excelで出力（関数入り）';}
+}
+
 // ===== 空き確認 =====
 let availWeekStart=null;
 function getMonday(d){const dt=new Date(d);const day=dt.getDay();return new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()-day+(day===0?-6:1));}
