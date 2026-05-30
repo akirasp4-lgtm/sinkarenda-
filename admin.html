@@ -609,8 +609,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <div class="card">
   <label>元請名 / 月</label>
   <div style="display:flex;gap:8px;margin-bottom:0">
-    <select id="bill-genba" onchange="renderBillingTable()" style="flex:2;margin-bottom:0"><option value="">元請を選択</option></select>
-    <select id="bill-month" onchange="renderBillingTable()" style="flex:1;margin-bottom:0"></select>
+    <select id="bill-genba" onchange="onBillingScopeChange()" style="flex:2;margin-bottom:0"><option value="">元請を選択</option></select>
+    <select id="bill-month" onchange="onBillingScopeChange()" style="flex:1;margin-bottom:0"></select>
   </div>
 </div>
 <div id="bill-table-wrap" style="display:none">
@@ -1856,10 +1856,10 @@ function populateLocationSelect(p){
   // 完了済みの現場を除外（編集中の現在値は残す）
   const completedLocs={};
   (allJobsites||[]).forEach(j=>{
-    if(j.completed && (!genba || j.genba===genba))completedLocs[j.loc]=true;
+    if(j.completed)completedLocs[j.genba+'|||'+j.loc]=true;
   });
   const currentVal0=(document.getElementById(p+'-location')||{}).value||'';
-  let locs=Object.keys(lastUsed).filter(l=>!completedLocs[l] || l===currentVal0);
+  let locs=Object.keys(lastUsed).filter(l=>!(genba&&completedLocs[genba+'|||'+l]) || l===currentVal0);
   const totalCount=locs.length;
   // 検索フィルタ
   const searchEl=document.getElementById(p+'-location-search');
@@ -1996,6 +1996,7 @@ async function submitNippo(){
   const yasumi=mode==='yasumi';const yakin=mode==='yakin';const souko=mode==='souko';const yotei=mode==='yotei';
   const effectiveKosu=yasumi?0:kosu;
   if(!dateStart){showAlert('開始日は必須です','err');return;}
+  if(dateEnd&&dateEnd<dateStart){showAlert('終了日が開始日より前です。日付を確認してください','err');return;}
   const _wtVal=(document.getElementById('s-work-type')||{}).value||'';
   if(!_wtVal){showAlert('作業区分を選択してください','err');return;}
   if(!yasumi && !souko && !genba){showAlert('元請名は必須です（休み・倉庫モード時は不要）','err');return;}
@@ -2480,7 +2481,9 @@ async function saveEdit(){
   }
   const members=[{name:leader,role:'代表'}];const shokunin=getShokunin();
   editSelectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
-  const company=currentCompany==='全社'?'':currentCompany;const color=selectedColor.e||CAL_COLORS[0];
+  // 全社ビューでの編集は元レコードの会社を保持（空にすると会社別ビューから予定が消える）
+  const _origRec=allNippos.find(n=>!n.isGhost&&(editIds||[]).includes(n.id));
+  const company=currentCompany==='全社'?(_origRec?String(_origRec.company||''):''):currentCompany;const color=selectedColor.e||CAL_COLORS[0];
   const workType=(document.getElementById('e-work-type')||{}).value||'現場作業';
   const vehicle=(document.getElementById('e-vehicle')||{}).value||'';
   // 一括編集時は元の日付配列を維持、単一編集時はフィールドから読み取る
@@ -2641,7 +2644,7 @@ function toggleGmSelectAll(){
 function openBulkEditModal(){
   const groups=getActiveGmGroups();const checked=[...document.querySelectorAll('.gm-day-check:checked')];if(checked.length===0)return;
   const targets=checked.map(c=>groups[Number(c.dataset.idx)]).filter(Boolean);if(targets.length===0)return;
-  bulkEditMode=true;editIds=[...new Set(targets.flatMap(g=>g.ids))];editDates=targets.map(g=>g.date);
+  bulkEditMode=true;editIds=[...new Set(targets.flatMap(g=>g.ids))];editDates=[...new Set(targets.map(g=>g.date))];
   window._editIds=editIds;window._editDates=editDates;
   // 一括編集時は作業日フィールドを非表示（複数日まとめて単一日付に変えるのは UI として複雑なので未対応）
   const dateWrap=document.getElementById('e-date-wrap');if(dateWrap)dateWrap.style.display='none';
@@ -2770,6 +2773,13 @@ function populateBillingSelectors(){
   renderBillingTable();
 }
 
+function onBillingScopeChange(){
+  // 元請・月を切り替えたら、その画面固有の入力（経費・請負額・未保存の単価）をクリアする。
+  // loc は元請×月の中では一意なので、切替時クリアで別元請/別月との金額取り違えを防ぐ。
+  billingExp={}; billingAmt={}; billingDirty={};
+  renderBillingTable();
+}
+
 function billingRate(genba,loc){
   const key=genba+'|||'+loc;
   if(key in billingDirty)return billingDirty[key];
@@ -2786,13 +2796,13 @@ function getBillingLines(){
   const month=document.getElementById('bill-month').value;
   if(!genba||!month)return[];
   let nippos=filteredNippos().filter(n=>!n.isGhost&&n.genba===genba&&(n.date||'').startsWith(month)
-    &&n.yakin!=='休み'&&n.yakin!=='予定'&&n.yakin!=='倉庫'&&!n.yasumi&&!n.yotei&&!n.souko);
-  // 現場(loc)ごとに集約。延べ出面＝同一(職人,日付)を1としたユニーク数
+    &&!n.yasumi&&!n.yotei&&!n.souko);
+  // 現場(loc)ごとに集約。延べ出面＝同一(職人,日付,昼/夜)を1としたユニーク数（同日の昼勤＋夜勤は2出面。GAS集計シートと整合）
   const map={};
   nippos.forEach(n=>{
     const loc=n.loc||'';
     if(!map[loc])map[loc]={loc:loc,days:new Set()};
-    map[loc].days.add(n.name+'|||'+n.date);
+    map[loc].days.add(n.name+'|||'+n.date+'|||'+(n.yakin?'N':'D'));
   });
   return Object.keys(map).map(loc=>({
     genba:genba,loc:loc,manDays:map[loc].days.size,
@@ -2861,23 +2871,27 @@ function onBillingAmtInput(el){
 
 async function onBillingMethodChange(el){
   const genba=el.dataset.genba, loc=el.dataset.loc, method=el.value;
-  // 同じ現場の全行に反映（現場マスタ更新）
+  // 現場マスタを更新（行が無い現場はGAS側でupsert）。保存成否を確認してから反映し、失敗時は元に戻す
   try{
-    await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update_site_billing_method',genba,loc,method,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update_site_billing_method',genba,loc,method,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status!=='ok'){alert('方式の保存に失敗：'+(json.message||''));renderBillingTable();return;}
     const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
     if(j)j.billingMethod=method; else (allJobsites=allJobsites||[]).push({genba,loc,billingMethod:method});
-  }catch(e){console.error(e);}
+  }catch(e){console.error(e);alert('方式の保存に失敗しました（通信エラー）');renderBillingTable();return;}
   renderBillingTable();
 }
 
 function updateBillingTotal(){
   let amountSum=0, expSum=0;
   document.querySelectorAll('#bill-tbody tr').forEach(tr=>{
-    const cell=tr.querySelector('.bill-amount');
-    if(!cell)return;
-    const amtInput=cell.querySelector('.bill-amt'); // 請負＝手入力
-    if(amtInput){ if(amtInput.value)amountSum+=Number(amtInput.value); }
-    else { const a=cell.textContent.replace(/[^0-9]/g,''); if(a)amountSum+=Number(a); } // 応援＝計算結果テキスト
+    const amtInput=tr.querySelector('.bill-amt'); // 請負＝手入力額
+    if(amtInput){ if(amtInput.value)amountSum+=Number(amtInput.value); return; }
+    const rateInput=tr.querySelector('.bill-rate'); // 応援＝出面×単価を数値で計算（表示テキストから逆算しない）
+    if(rateInput&&rateInput.value!==''){
+      const manDays=Number(tr.children[2].textContent)||0;
+      amountSum+=manDays*Number(rateInput.value);
+    }
   });
   document.querySelectorAll('.bill-exp').forEach(inp=>{if(inp.value)expSum+=Number(inp.value);});
   document.getElementById('bill-total').textContent=

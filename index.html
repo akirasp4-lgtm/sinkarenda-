@@ -1590,11 +1590,11 @@ function populateLocationSelect(p){
   // 完了済みの現場をマップに（{loc: true}）
   const completedLocs={};
   (allJobsites||[]).forEach(j=>{
-    if(j.completed && (!genba || j.genba===genba))completedLocs[j.loc]=true;
+    if(j.completed)completedLocs[j.genba+'|||'+j.loc]=true;
   });
-  // 現在の入力値は残す（編集中など）
+  // 現在の入力値は残す（編集中など）。完了除外は元請×現場で判定（loc単独だと別元請の同名現場まで巻き込む）
   const currentVal0=(document.getElementById(p+'-location')||{}).value||'';
-  let locs=Object.keys(lastUsed).filter(l=>!completedLocs[l] || l===currentVal0);
+  let locs=Object.keys(lastUsed).filter(l=>!(genba&&completedLocs[genba+'|||'+l]) || l===currentVal0);
   const totalCount=locs.length;
   // 検索フィルタ
   const searchEl=document.getElementById(p+'-location-search');
@@ -1789,6 +1789,7 @@ async function submitNippo(){
   const yotei=mode==='yotei';
   const effectiveKosu=yasumi?0:kosu;
   if(!dateStart){showAlert('開始日は必須です','err');return;}
+  if(dateEnd&&dateEnd<dateStart){showAlert('終了日が開始日より前です。日付を確認してください','err');return;}
   const _wtVal=(document.getElementById('s-work-type')||{}).value||'';
   if(!_wtVal){showAlert('作業区分を選択してください','err');return;}
   if(!yasumi && !souko && !genba){showAlert('元請名は必須です（休み・倉庫モード時は不要）','err');return;}
@@ -2526,7 +2527,9 @@ async function saveEdit(){
   const members=[{name:leader,role:'代表'}];
   const shokunin=getShokunin();
   editSelectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
-  const company=currentCompany==='全社'?'':currentCompany;
+  // 全社ビューでの編集は元レコードの会社を保持（空にすると会社別ビューから予定が消える）
+  const _origRec=allNippos.find(n=>!n.isGhost&&(editIds||[]).includes(n.id));
+  const company=currentCompany==='全社'?(_origRec?String(_origRec.company||''):''):currentCompany;
   const color=selectedColor.e||CAL_COLORS[0];
   const workType=(document.getElementById('e-work-type')||{}).value||'現場作業';
   const vehicle=(document.getElementById('e-vehicle')||{}).value||'';
@@ -2728,7 +2731,7 @@ function openBulkEditModal(){
   if(targets.length===0)return;
   bulkEditMode=true;
   editIds=[...new Set(targets.flatMap(g=>g.ids))];
-  editDates=targets.map(g=>g.date);
+  editDates=[...new Set(targets.map(g=>g.date))];
   window._editIds=editIds;window._editDates=editDates;
   // 一括編集時は作業日フィールドを非表示（複数日まとめて単一日付に変えるのは UI として複雑なので未対応）
   const dateWrap=document.getElementById('e-date-wrap');if(dateWrap)dateWrap.style.display='none';

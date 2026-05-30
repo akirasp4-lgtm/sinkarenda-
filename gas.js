@@ -552,7 +552,11 @@ function doPost(e) {
           return ok({updated: true});
         }
       }
-      return error('現場マスタに該当現場が見つかりません');
+      // 現場マスタに行が無い現場（非グローライズ等）は新規行を作って方式を保存（upsert）
+      if (!genba || !loc) return error('元請名・現場名は必須です');
+      jobSiteSheet.appendRow([genba, loc, '', '', '', '', '', '', '', method]);
+      logOperation_(ss, 'update_site_billing_method', genba + '/' + loc, '方式=' + method + '(新規行)', updatedBy);
+      return ok({added: true});
     }
 
     if (action === 'generate_billing_calc_xlsx') {
