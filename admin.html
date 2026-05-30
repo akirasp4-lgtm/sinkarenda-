@@ -616,7 +616,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <div id="bill-table-wrap" style="display:none">
   <div class="card" style="padding:12px 16px;overflow-x:auto">
     <table class="tbl" id="bill-table">
-      <thead><tr><th>現場</th><th>職人</th><th>出面</th><th>方式</th><th>単価</th><th>金額</th><th>経費</th></tr></thead>
+      <thead><tr><th>現場</th><th>方式</th><th>出面</th><th>単価</th><th>金額</th><th>経費</th></tr></thead>
       <tbody id="bill-tbody"></tbody>
     </table>
     <div id="bill-total" style="text-align:right;font-weight:600;margin-top:10px;font-size:15px"></div>
@@ -2744,6 +2744,8 @@ function getPinGroups() {
 // ===== 請求計算 =====
 let billingRates = [];   // [{genba,loc,name,rate}]
 let billingDirty = {};   // 画面で編集した単価 key->rate（保存用）
+let billingExp = {};     // 経費 loc->円（応援）
+let billingAmt = {};     // 請負の今回請求額 loc->円
 
 async function initBillingTab(){
   // 単価マスタを取得
@@ -2768,10 +2770,10 @@ function populateBillingSelectors(){
   renderBillingTable();
 }
 
-function billingRate(genba,loc,name){
-  const key=genba+'|||'+loc+'|||'+name;
+function billingRate(genba,loc){
+  const key=genba+'|||'+loc;
   if(key in billingDirty)return billingDirty[key];
-  const hit=billingRates.find(r=>r.genba===genba&&r.loc===loc&&r.name===name);
+  const hit=billingRates.find(r=>r.genba===genba&&r.loc===loc);
   return hit?hit.rate:'';
 }
 function siteBillingMethod(genba,loc){
@@ -2785,18 +2787,17 @@ function getBillingLines(){
   if(!genba||!month)return[];
   let nippos=filteredNippos().filter(n=>!n.isGhost&&n.genba===genba&&(n.date||'').startsWith(month)
     &&n.yakin!=='休み'&&n.yakin!=='予定'&&n.yakin!=='倉庫'&&!n.yasumi&&!n.yotei&&!n.souko);
-  // 現場×職人 → 出面した日付の集合（重複日は1出面）
+  // 現場(loc)ごとに集約。延べ出面＝同一(職人,日付)を1としたユニーク数
   const map={};
   nippos.forEach(n=>{
     const loc=n.loc||'';
-    const key=loc+'|||'+n.name;
-    if(!map[key])map[key]={loc:loc,name:n.name,dates:new Set()};
-    map[key].dates.add(n.date);
+    if(!map[loc])map[loc]={loc:loc,days:new Set()};
+    map[loc].days.add(n.name+'|||'+n.date);
   });
-  return Object.values(map).map(x=>({
-    genba:genba,loc:x.loc,name:x.name,manDays:x.dates.size,
-    method:siteBillingMethod(genba,x.loc)
-  })).sort((a,b)=>a.loc.localeCompare(b.loc)||a.name.localeCompare(b.name));
+  return Object.keys(map).map(loc=>({
+    genba:genba,loc:loc,manDays:map[loc].days.size,
+    method:siteBillingMethod(genba,loc)
+  })).sort((a,b)=>a.loc.localeCompare(b.loc));
 }
 
 function renderBillingTable(){
@@ -2805,30 +2806,39 @@ function renderBillingTable(){
   const wrap=document.getElementById('bill-table-wrap');
   if(lines.length===0){wrap.style.display='none';return;}
   wrap.style.display='block';
-  let prevLoc=null;
-  document.getElementById('bill-tbody').innerHTML=lines.map((ln,idx)=>{
-    const rate=billingRate(genba,ln.loc,ln.name);
+  document.getElementById('bill-tbody').innerHTML=lines.map(ln=>{
     const isOuen=ln.method==='応援';
-    const amount=(isOuen&&rate!==''&&rate!=null)?(ln.manDays*Number(rate)):'';
-    const firstOfSite=ln.loc!==prevLoc; prevLoc=ln.loc;
-    const expenseCell=(isOuen&&firstOfSite)
-      ? `<input type="number" class="bill-exp" data-loc="${esc(ln.loc)}" style="width:80px" oninput="updateBillingTotal()">`
-      : '';
-    const rateInput=`<input type="number" class="bill-rate" data-genba="${esc(genba)}" data-loc="${esc(ln.loc)}" data-name="${esc(ln.name)}" value="${rate===''?'':rate}" style="width:90px" ${isOuen?'':'disabled'} oninput="onBillingRateInput(this)">`;
     const methodSel=`<select class="bill-method" data-genba="${esc(genba)}" data-loc="${esc(ln.loc)}" onchange="onBillingMethodChange(this)">
       <option value="応援"${isOuen?' selected':''}>応援</option>
       <option value="請負"${!isOuen?' selected':''}>請負</option></select>`;
-    return `<tr data-idx="${idx}">
-      <td>${esc(ln.loc)}</td><td>${esc(ln.name)}</td><td style="text-align:right">${ln.manDays}</td>
-      <td>${methodSel}</td><td>${rateInput}</td>
-      <td class="bill-amount" style="text-align:right">${amount===''?'-':amount.toLocaleString()}</td>
-      <td>${expenseCell}</td></tr>`;
+    if(isOuen){
+      const rate=billingRate(genba,ln.loc);
+      const amount=(rate!==''&&rate!=null)?(ln.manDays*Number(rate)):'';
+      const rateInput=`<input type="number" class="bill-rate" data-genba="${esc(genba)}" data-loc="${esc(ln.loc)}" value="${rate===''?'':rate}" style="width:90px" oninput="onBillingRateInput(this)">`;
+      const expVal=(ln.loc in billingExp)?billingExp[ln.loc]:'';
+      const expInput=`<input type="number" class="bill-exp" data-loc="${esc(ln.loc)}" value="${expVal===''?'':expVal}" style="width:80px" oninput="onBillingExpInput(this)">`;
+      return `<tr data-loc="${esc(ln.loc)}">
+        <td>${esc(ln.loc)}</td><td>${methodSel}</td>
+        <td style="text-align:right">${ln.manDays}</td>
+        <td>${rateInput}</td>
+        <td class="bill-amount" style="text-align:right">${amount===''?'-':amount.toLocaleString()}</td>
+        <td>${expInput}</td></tr>`;
+    }else{
+      const amtVal=(ln.loc in billingAmt)?billingAmt[ln.loc]:'';
+      const amtInput=`<input type="number" class="bill-amt" data-loc="${esc(ln.loc)}" value="${amtVal===''?'':amtVal}" style="width:120px" placeholder="今回請求額" oninput="onBillingAmtInput(this)">`;
+      return `<tr data-loc="${esc(ln.loc)}">
+        <td>${esc(ln.loc)}</td><td>${methodSel}</td>
+        <td style="text-align:right;color:#bbb">—</td>
+        <td style="color:#bbb">—</td>
+        <td class="bill-amount" style="text-align:right">${amtInput}</td>
+        <td style="color:#bbb">—</td></tr>`;
+    }
   }).join('');
   updateBillingTotal();
 }
 
 function onBillingRateInput(el){
-  const key=el.dataset.genba+'|||'+el.dataset.loc+'|||'+el.dataset.name;
+  const key=el.dataset.genba+'|||'+el.dataset.loc;
   billingDirty[key]=el.value===''?'':Number(el.value);
   // その行の金額セルだけ更新（全体再描画しないので入力中もフォーカスが外れない）
   const tr=el.closest('tr');
@@ -2838,6 +2848,14 @@ function onBillingRateInput(el){
     const amount=(el.value!==''&&el.value!=null)?(manDays*Number(el.value)):'';
     if(amountCell)amountCell.textContent=(amount===''?'-':amount.toLocaleString());
   }
+  updateBillingTotal();
+}
+function onBillingExpInput(el){
+  billingExp[el.dataset.loc]=el.value===''?'':Number(el.value);
+  updateBillingTotal();
+}
+function onBillingAmtInput(el){
+  billingAmt[el.dataset.loc]=el.value===''?'':Number(el.value);
   updateBillingTotal();
 }
 
@@ -2855,8 +2873,11 @@ async function onBillingMethodChange(el){
 function updateBillingTotal(){
   let amountSum=0, expSum=0;
   document.querySelectorAll('#bill-tbody tr').forEach(tr=>{
-    const a=tr.querySelector('.bill-amount').textContent.replace(/[^0-9]/g,'');
-    if(a)amountSum+=Number(a);
+    const cell=tr.querySelector('.bill-amount');
+    if(!cell)return;
+    const amtInput=cell.querySelector('.bill-amt'); // 請負＝手入力
+    if(amtInput){ if(amtInput.value)amountSum+=Number(amtInput.value); }
+    else { const a=cell.textContent.replace(/[^0-9]/g,''); if(a)amountSum+=Number(a); } // 応援＝計算結果テキスト
   });
   document.querySelectorAll('.bill-exp').forEach(inp=>{if(inp.value)expSum+=Number(inp.value);});
   document.getElementById('bill-total').textContent=
@@ -2870,25 +2891,24 @@ async function exportBillingXlsx(){
   const btn=document.getElementById('bill-export-btn');
   btn.disabled=true;btn.textContent='出力中...';
   try{
-    // 1) 編集された単価をマスタに保存
+    // 1) 編集した単価をマスタ保存（元請×現場）
     for(const key of Object.keys(billingDirty)){
-      const [g,l,n]=key.split('|||');
+      const [g,l]=key.split('|||');
       const rate=billingDirty[key];
       if(rate==='')continue;
-      await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'save_billing_rate',genba:g,loc:l,name:n,rate:Number(rate),updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+      await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'save_billing_rate',genba:g,loc:l,rate:Number(rate),updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     }
-    // 2) 明細を組み立て（経費は現場の先頭行に紐づく）
-    const lines=getBillingLines();
-    const expMap={};
-    document.querySelectorAll('.bill-exp').forEach(inp=>{expMap[inp.dataset.loc]=Number(inp.value||0);});
-    const seen={};
-    const payload=lines.map(ln=>{
-      const rate=billingRate(genba,ln.loc,ln.name);
-      const exp=(!seen[ln.loc])?(expMap[ln.loc]||0):0; seen[ln.loc]=true;
-      return {loc:ln.loc,name:ln.name,manDays:ln.manDays,rate:(rate===''?0:Number(rate)),method:ln.method,expense:exp};
+    // 2) 明細を現場ごとに（応援＝出面×単価＋経費／請負＝今回請求額）
+    const lines=getBillingLines().map(ln=>{
+      if(ln.method==='応援'){
+        const rate=billingRate(genba,ln.loc);
+        return {loc:ln.loc,method:'応援',manDays:ln.manDays,rate:(rate===''?0:Number(rate)),expense:Number(billingExp[ln.loc]||0)};
+      }else{
+        return {loc:ln.loc,method:'請負',amount:Number(billingAmt[ln.loc]||0)};
+      }
     });
     // 3) xlsx生成リクエスト
-    const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'generate_billing_calc_xlsx',genba,month,lines:payload}),headers:{'Content-Type':'text/plain'}});
+    const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'generate_billing_calc_xlsx',genba,month,lines}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status!=='ok'){alert('出力エラー：'+json.message);return;}
     // 4) base64 を Blob 化してダウンロード
@@ -2899,8 +2919,8 @@ async function exportBillingXlsx(){
     const a=document.createElement('a');
     a.href=URL.createObjectURL(blob);a.download=json.filename||'請求計算.xlsx';
     document.body.appendChild(a);a.click();a.remove();
-    // 保存済みなので dirty をマスタ側へ反映
-    for(const key of Object.keys(billingDirty)){const[g,l,n]=key.split('|||');const hit=billingRates.find(r=>r.genba===g&&r.loc===l&&r.name===n);if(hit)hit.rate=Number(billingDirty[key]);else billingRates.push({genba:g,loc:l,name:n,rate:Number(billingDirty[key])});}
+    // 5) 保存済み単価をローカルにも反映（元請×現場）
+    for(const key of Object.keys(billingDirty)){const[g,l]=key.split('|||');const hit=billingRates.find(r=>r.genba===g&&r.loc===l);if(hit)hit.rate=Number(billingDirty[key]);else billingRates.push({genba:g,loc:l,rate:Number(billingDirty[key])});}
     billingDirty={};
   }catch(e){alert('出力エラー：'+e.message);}
   finally{btn.disabled=false;btn.textContent='Excelで出力（関数入り）';}
