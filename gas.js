@@ -515,8 +515,7 @@ function doPost(e) {
       const rates = data.length > 1 ? data.slice(1).map(r => ({
         genba: String(r[0] || ''),
         loc: String(r[1] || ''),
-        name: String(r[2] || ''),
-        rate: Number(r[3] || 0)
+        rate: Number(r[2] || 0)
       })).filter(x => x.genba) : [];
       return ok({rates: rates});
     }
@@ -525,19 +524,18 @@ function doPost(e) {
       const sheet = getOrCreateBillingRateSheet_(ss);
       const genba = String(body.genba || '').trim();
       const loc = String(body.loc || '').trim();
-      const name = String(body.name || '').trim();
       const rate = Number(body.rate || 0);
-      if (!genba || !name) return error('元請名・職人名は必須です');
+      if (!genba) return error('元請名は必須です');
       const now = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
       const data = sheet.getDataRange().getValues();
       for (let i = 1; i < data.length; i++) {
-        if (String(data[i][0]).trim() === genba && String(data[i][1]).trim() === loc && String(data[i][2]).trim() === name) {
-          sheet.getRange(i + 1, 4).setValue(rate);
-          sheet.getRange(i + 1, 5).setValue(now);
+        if (String(data[i][0]).trim() === genba && String(data[i][1]).trim() === loc) {
+          sheet.getRange(i + 1, 3).setValue(rate);
+          sheet.getRange(i + 1, 4).setValue(now);
           return ok({updated: true});
         }
       }
-      sheet.appendRow([genba, loc, name, rate, now]);
+      sheet.appendRow([genba, loc, rate, now]);
       return ok({added: true});
     }
 
@@ -564,27 +562,32 @@ function doPost(e) {
       let sheet = ss.getSheetByName(BILLING_CALC_SHEET);
       if (sheet) { sheet.clear(); } else { sheet = ss.insertSheet(BILLING_CALC_SHEET); }
       sheet.appendRow([genba + '　' + month + '　請求計算']);
-      sheet.appendRow(['現場名', '職人名', '出面数', '単価', '金額', '経費', '方式']);
+      sheet.appendRow(['現場名', '出面数', '単価', '金額', '経費', '方式']);
       const dataStart = 3; // 1=タイトル 2=ヘッダ 3=先頭データ
       lines.forEach(ln => {
         const r = sheet.getLastRow() + 1;
         const isOuen = String(ln.method || '応援') === '応援';
-        const amountFormula = isOuen ? '=C' + r + '*D' + r : ''; // 金額=出面×単価（応援のみ）
-        sheet.appendRow([
-          String(ln.loc || ''), String(ln.name || ''),
-          Number(ln.manDays || 0), Number(ln.rate || 0),
-          amountFormula, isOuen ? Number(ln.expense || 0) : 0,
-          String(ln.method || '応援')
-        ]);
+        if (isOuen) {
+          // 金額 = 出面(B) × 単価(C)
+          sheet.appendRow([
+            String(ln.loc || ''), Number(ln.manDays || 0), Number(ln.rate || 0),
+            '=B' + r + '*C' + r, Number(ln.expense || 0), '応援'
+          ]);
+        } else {
+          // 請負：今回請求額を金額(D)に直接。出面/単価/経費は空
+          sheet.appendRow([
+            String(ln.loc || ''), '', '', Number(ln.amount || 0), 0, '請負'
+          ]);
+        }
       });
       const dataEnd = sheet.getLastRow();
       if (dataEnd >= dataStart) {
         const totalRow = dataEnd + 1;
         sheet.getRange(totalRow, 1).setValue('合計');
+        sheet.getRange(totalRow, 4).setFormula('=SUM(D' + dataStart + ':D' + dataEnd + ')');
         sheet.getRange(totalRow, 5).setFormula('=SUM(E' + dataStart + ':E' + dataEnd + ')');
-        sheet.getRange(totalRow, 6).setFormula('=SUM(F' + dataStart + ':F' + dataEnd + ')');
-        sheet.getRange(totalRow + 1, 4).setValue('請求合計');
-        sheet.getRange(totalRow + 1, 5).setFormula('=E' + totalRow + '+F' + totalRow);
+        sheet.getRange(totalRow + 1, 3).setValue('請求合計');
+        sheet.getRange(totalRow + 1, 4).setFormula('=D' + totalRow + '+E' + totalRow);
       }
       SpreadsheetApp.flush();
       const result = exportSheetAsXlsxBase64_(ss, sheet);
@@ -1125,7 +1128,23 @@ function getOrCreateBillingRateSheet_(ss) {
   let sheet = ss.getSheetByName(BILLING_RATE_SHEET);
   if (!sheet) {
     sheet = ss.insertSheet(BILLING_RATE_SHEET);
-    sheet.appendRow(['元請名', '現場名', '職人名', '単価', '更新日時']);
+    sheet.appendRow(['元請名', '現場名', '単価', '更新日時']);
+    return sheet;
+  }
+  // 旧5列（元請/現場/職人/単価/更新日時）からの移行：職人列があれば元請×現場へ畳む
+  const headers = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
+  if (String(headers[2] || '').trim() === '職人名') {
+    const data = sheet.getDataRange().getValues();
+    const map = {};
+    for (let i = 1; i < data.length; i++) {
+      const g = String(data[i][0] || '').trim();
+      if (!g) continue;
+      const l = String(data[i][1] || '').trim();
+      map[g + '|||' + l] = { genba: g, loc: l, rate: Number(data[i][3] || 0), ts: String(data[i][4] || '') };
+    }
+    sheet.clear();
+    sheet.appendRow(['元請名', '現場名', '単価', '更新日時']);
+    Object.keys(map).forEach(k => { const x = map[k]; sheet.appendRow([x.genba, x.loc, x.rate, x.ts]); });
   }
   return sheet;
 }
