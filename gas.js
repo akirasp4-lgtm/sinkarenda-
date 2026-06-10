@@ -141,6 +141,16 @@ function doPost(e) {
     ensureHeaders_(sheet);
     const idCol = getIdCol_();
 
+    // 照合のON/OFF切替（正しい合言葉を知っている人だけが叩ける管理アクション）
+    // body: { action:'cal_set_enforce', k:<合言葉>, on:'1'(ON) | '0'(OFF) }
+    if (action === 'cal_set_enforce') {
+      var calProps = PropertiesService.getScriptProperties();
+      var calT = calProps.getProperty('CAL_TOKEN') || '';
+      if (!calT || String(body.k || '') !== calT) return authError_();
+      calProps.setProperty('CAL_REQUIRE_TOKEN', String(body.on) === '1' ? '1' : '0');
+      return ok({enforce: calProps.getProperty('CAL_REQUIRE_TOKEN') === '1'});
+    }
+
     if (action === 'add') {
       const jobNoCache = {};
       let leaderDivision = null;
