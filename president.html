@@ -298,6 +298,47 @@ button{font-family:inherit}
 // 設定
 // ============================================================
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3egJrKdWmXRK2AVnFrmBm4iO1QHCk-FZEH5LFFv7OloqcjQ/exec';
+
+// ── 合言葉(k)の自動付与（2026-06-10 セキュリティ強化）──────────────
+// URLの ?k=合言葉 を一度受け取ると端末(localStorage)に保存し、
+// 以後すべてのGAS通信（読み書き）へ自動で添える。
+// サーバー側の照合が有効になると、合言葉なしのアクセスは拒否される。
+let CAL_K='';
+try{
+  const _qk=new URLSearchParams(location.search).get('k');
+  if(_qk&&_qk.trim())localStorage.setItem('cal-k',_qk.trim());
+  CAL_K=localStorage.getItem('cal-k')||'';
+}catch(e){}
+const _calOrigFetch=window.fetch.bind(window);
+window.fetch=async function(url,opts){
+  const _url0=url,_opts0=opts;
+  let isGas=false;
+  try{
+    if(typeof url==='string'&&url.indexOf(GAS_URL)===0){
+      isGas=true;
+      if(opts&&typeof opts.body==='string'){
+        try{const b=JSON.parse(opts.body);if(b&&typeof b==='object'&&!b.k){b.k=CAL_K;opts=Object.assign({},opts,{body:JSON.stringify(b)});}}catch(e){}
+      }else{
+        url+=(url.indexOf('?')>=0?'&':'?')+'k='+encodeURIComponent(CAL_K);
+      }
+    }
+  }catch(e){}
+  const res=await _calOrigFetch(url,opts);
+  if(isGas){
+    try{
+      const peek=await res.clone().json();
+      if(peek&&peek.code==='auth'){
+        const nk=window.prompt('このアプリの合言葉を入力してください（不明な場合は事務所に確認）');
+        if(nk&&nk.trim()){
+          localStorage.setItem('cal-k',nk.trim());CAL_K=nk.trim();
+          return window.fetch(_url0,_opts0);
+        }
+      }
+    }catch(e){}
+  }
+  return res;
+};
+
 const PIN = '1203';
 const STORAGE_PIN_OK = 'pres-pin-ok-v1';
 

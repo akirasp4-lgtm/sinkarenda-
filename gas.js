@@ -35,6 +35,26 @@ const VEHICLE_RES_HEADERS = [
 const VEHICLE_RES_TOKEN = '車両予約用トークン1234';
 
 // ==============================================================
+// 全体認証（合言葉 k）— 2026-06-10 セキュリティ強化
+// 読み書きすべてに合言葉を要求する仕組み。スクリプトプロパティで制御:
+//   CAL_TOKEN         = 合言葉の値（コードには書かない＝このファイルは公開リポに上がるため）
+//   CAL_REQUIRE_TOKEN = '1' にすると照合が有効になる（未設定の間は従来どおり素通し＝移行期間）
+// ロールバック: CAL_REQUIRE_TOKEN プロパティを削除すれば即・従来動作に戻る。
+// ==============================================================
+function calAuthOk_(provided) {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('CAL_REQUIRE_TOKEN') !== '1') return true;  // 移行期間: 照合OFF
+  var t = props.getProperty('CAL_TOKEN') || '';
+  if (!t) return false;  // 照合ONなのに合言葉未設定 = 全拒否（fail-closed）
+  return String(provided || '') === t;
+}
+function authError_() {
+  return ContentService.createTextOutput(JSON.stringify({
+    status: 'error', code: 'auth', message: '認証に失敗しました。合言葉を確認してください。'
+  })).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ==============================================================
 // 読み(フリガナ)自動生成用 - Groq API
 // スクリプトプロパティ GROQ_API_KEY が設定されていれば有効
 // ==============================================================
@@ -114,6 +134,7 @@ function doPost(e) {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(SHEET_NAME);
     const body = JSON.parse(e.postData.contents);
+    if (!calAuthOk_(body.k)) return authError_();
     const action = body.action || 'add';
     const updatedBy = String(body.updatedBy || '');
 
@@ -1003,6 +1024,7 @@ function doPost(e) {
 
 function doGet(e) {
   try {
+    if (!calAuthOk_(e && e.parameter && e.parameter.k)) return authError_();
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(SHEET_NAME);
     const tz = Session.getScriptTimeZone();
