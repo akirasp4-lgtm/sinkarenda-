@@ -520,10 +520,13 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <select id="csv-sheet" style="margin-bottom:8px">
     <option value="日報データ">日報データ</option><option value="アーカイブ">アーカイブ</option>
     <option value="月別集計">月別集計</option><option value="会社別集計">会社別集計</option>
-    <option value="職人マスタ">職人マスタ</option><option value="元請マスタ">元請マスタ</option>
+    <option value="元請マスタ">元請マスタ</option>
     <option value="現場マスタ">現場マスタ</option>
     <option value="月別確認表">月別確認表</option>
-    <option value="元請別請求集計">元請別請求集計</option>
+    <!-- 🔒 職人マスタ（単価列＝給料情報入り）と元請別請求集計は現場画面から外した（2026-06-11）。
+         管理画面(admin.html・PIN付き)からは引き続きダウンロード可。復活させる前に必ず単価の扱いを確認すること。
+    <option value="職人マスタ">職人マスタ</option>
+    <option value="元請別請求集計">元請別請求集計</option> -->
   </select>
   <button class="btn btn-secondary" id="csv-btn" onclick="downloadSheetCSV()">ダウンロード</button>
 </div>
