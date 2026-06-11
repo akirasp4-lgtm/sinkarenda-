@@ -633,7 +633,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <button class="tab" onclick="switchTab('genba')"><span class="tab-icon">🏗️</span>現場管理</button>
   <button class="tab" onclick="switchTab('vehicle')"><span class="tab-icon">🚗</span>車確認</button>
   <button class="tab active" onclick="switchTab('jimu')"><span class="tab-icon">📊</span>事務</button>
-  <button class="tab" onclick="switchTab('billing')"><span class="tab-icon">💰</span>請求計算</button>
+  <!-- 💤 請求計算タブは寝かせ中（2026-06-11 お金はGR管理画面📊経営タブに一本化）。復活させる時は display:none を外すだけ。※ボタンを消すとswitchTabの並び順が壊れるので必ず「隠す」こと -->
+  <button class="tab" style="display:none" onclick="switchTab('billing')"><span class="tab-icon">💰</span>請求計算</button>
 </div>
 
 <!-- 操作者名変更モーダル -->
@@ -756,7 +757,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
       <li><b>元請を管理</b>: 元請リストの追加/削除</li>
       <li><b>集計を更新</b>: 全集計シートを一括再生成（毎朝6時も自動）</li>
       <li><b>データアーカイブ</b>: 3ヶ月以上前を退避（毎月1日3時も自動）</li>
-      <li><b>工番を修正する</b>: 事業部変更・売上入力</li>
+      <li><b>工番を修正する</b>: 事業部変更（金額の入力はGR管理画面📊経営タブへ）</li>
     </ol>
   </div>
 
@@ -785,8 +786,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <ul>
       <li>🔍 上部の検索ボックスで <b>元請名・現場名・工番・代表者</b> を横断検索できます</li>
       <li><b>事業部を変更</b> → 「工番更新」で新事業部×年度の次連番で<b>再発番</b>（旧工番は欠番）</li>
-      <li><b>売上を入力</b> → 「売上保存」で現場マスタの売上列に反映</li>
       <li>代表者の事業部が参考表示されるので、選び直しの判断に使える</li>
+      <li style="color:#92400E">💡 売上などの金額入力は <b>GR管理画面の📊経営タブ</b> に一本化しました（このモーダルの売上欄は非表示）</li>
     </ul>
   </div>
 
@@ -840,13 +841,9 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   </div>
 
   <div class="help-section">
-    <h3>💰 粗利管理の始め方</h3>
-    <ol>
-      <li><b>職人単価を設定</b>: 職人を管理 → 各職人の単価欄に日当を入力（自動保存）</li>
-      <li><b>現場売上を入力</b>: 工番を修正する → 各現場の売上欄を入力 → 売上保存</li>
-      <li><b>集計ボタン</b>: 事務タブの「集計を更新」</li>
-    </ol>
-    <p>→ スプレッドシートの「<b>事業部別按分</b>」シートで、工番×事業部の人工・原価・売上按分・粗利・粗利率が自動計算されます。</p>
+    <h3>💰 粗利・お金の管理について</h3>
+    <p style="color:#92400E;background:#FEF3C7;border-radius:6px;padding:8px 10px;margin:0 0 8px">お金（受注金額・原価・粗利・請求日・入金日）の管理は <b>GR管理画面の「📊経営」タブ</b> に一本化しました（2026-06-11）。このアプリでは入力しません。</p>
+    <p style="font-size:12px;color:#888">※スプレッドシートの「事業部別按分」シート（人工×単価の自動計算）は現在休止中。今入っている数字はテストの残骸なので参考にしないこと。職人マスタの単価は給料・人工管理用としてこのアプリに残ります。</p>
   </div>
 
   <div class="help-section">
@@ -1007,6 +1004,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <div class="modal" style="max-width:720px">
   <div class="modal-title">工番事業部の修正</div>
   <p style="margin:0 0 8px;font-size:12px;color:#666">各現場の事業部を選び直して「更新」で反映。新事業部×年度の次連番で新工番を発番し、現場マスタ＋日報データ＋アーカイブを一括更新します。旧工番は欠番として残ります。</p>
+  <p style="margin:0 0 8px;font-size:12px;color:#92400E;background:#FEF3C7;border-radius:6px;padding:6px 10px">💡 金額（受注金額・原価・請求日など）の入力は <b>GR管理画面の「📊経営」タブ</b> に一本化しました。ここでは入力しません。</p>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
     <input type="text" id="jnfix-search" placeholder="🔍 元請名・現場名・工番で検索" oninput="filterJobNoFix()" style="flex:1;margin:0;font-size:14px">
     <span id="jnfix-count" style="font-size:12px;color:#666;white-space:nowrap"></span>
@@ -3453,7 +3451,8 @@ async function openJobNoFix(){
           <select id="jnfix-div-${idx}" style="flex:1;margin-bottom:0">${divOpts}</select>
           <button class="btn btn-sm" style="flex-shrink:0;background:#1D9E75;color:#fff" onclick="saveJobNoFix(${idx},this.dataset.genba,this.dataset.loc)" data-genba="${esc(genba)}" data-loc="${esc(loc)}">工番更新</button>
         </div>
-        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+        <!-- 💤 売上入力は寝かせ中（2026-06-11 金額はGR管理画面📊経営タブに一本化）。復活時は display:none を外す -->
+        <div style="display:none;gap:6px;align-items:center;margin-bottom:6px">
           <label style="font-size:11px;color:#666;white-space:nowrap;margin:0">売上(円):</label>
           <input type="number" id="jnfix-rev-${idx}" value="${revenue||''}" placeholder="0" style="flex:1;margin:0">
           <button class="btn btn-sm" style="flex-shrink:0;background:#3B82F6;color:#fff" onclick="saveSiteRevenue(${idx},this.dataset.genba,this.dataset.loc)" data-genba="${esc(genba)}" data-loc="${esc(loc)}">売上保存</button>
