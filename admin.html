@@ -167,6 +167,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 .cal-cell.today .cal-day-num{background:#1D9E75;color:#fff;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 2px}
 .cal-cell.sun .cal-day-num{color:#E8384F}
 .cal-cell.sat .cal-day-num{color:#3B82F6}
+.cal-cell.holiday .cal-day-num{color:#E8384F}
+.cal-holiday-name{font-size:9px;color:#E8384F;text-align:center;line-height:1.1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cal-day-num{font-size:12px;font-weight:600;text-align:center;margin-bottom:2px}
 .cal-event{font-size:9px;font-weight:600;color:#fff;border-radius:3px;padding:1px 3px;margin-bottom:1px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;line-height:1.4}
 .cal-overflow{font-size:9px;color:#999;padding-left:3px;line-height:1.4}
@@ -2187,6 +2189,41 @@ function changeListMonth(delta){
   const p=listMonth.split('-');const d=new Date(Number(p[0]),Number(p[1])-1+delta,1);
   listMonth=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');renderList();
 }
+// ===== 祝日表示（自動取得＋端末記憶＋内蔵フォールバック）=====
+const JPH_FALLBACK = {
+  "2025-01-01":"元日","2025-01-13":"成人の日","2025-02-11":"建国記念の日","2025-02-23":"天皇誕生日","2025-02-24":"休日","2025-03-20":"春分の日","2025-04-29":"昭和の日","2025-05-03":"憲法記念日","2025-05-04":"みどりの日","2025-05-05":"こどもの日","2025-05-06":"休日","2025-07-21":"海の日","2025-08-11":"山の日","2025-09-15":"敬老の日","2025-09-23":"秋分の日","2025-10-13":"スポーツの日","2025-11-03":"文化の日","2025-11-23":"勤労感謝の日","2025-11-24":"休日",
+  "2026-01-01":"元日","2026-01-12":"成人の日","2026-02-11":"建国記念の日","2026-02-23":"天皇誕生日","2026-03-20":"春分の日","2026-04-29":"昭和の日","2026-05-03":"憲法記念日","2026-05-04":"みどりの日","2026-05-05":"こどもの日","2026-05-06":"休日","2026-07-20":"海の日","2026-08-11":"山の日","2026-09-21":"敬老の日","2026-09-22":"国民の休日","2026-09-23":"秋分の日","2026-10-12":"スポーツの日","2026-11-03":"文化の日","2026-11-23":"勤労感謝の日",
+  "2027-01-01":"元日","2027-01-11":"成人の日","2027-02-11":"建国記念の日","2027-02-23":"天皇誕生日","2027-03-21":"春分の日","2027-03-22":"休日","2027-04-29":"昭和の日","2027-05-03":"憲法記念日","2027-05-04":"みどりの日","2027-05-05":"こどもの日","2027-07-19":"海の日","2027-08-11":"山の日","2027-09-20":"敬老の日","2027-09-23":"秋分の日","2027-10-11":"スポーツの日","2027-11-03":"文化の日","2027-11-23":"勤労感謝の日"
+};
+let JPH = Object.assign({}, JPH_FALLBACK);
+const JPH_CACHE_KEY = 'jph_cache_v1';
+const JPH_URL = 'https://holidays-jp.github.io/api/v1/date.json';
+function jphApplyCache(){
+  try{
+    const raw = localStorage.getItem(JPH_CACHE_KEY);
+    if(!raw) return null;
+    const o = JSON.parse(raw);
+    if(o && o.data){ JPH = Object.assign({}, JPH_FALLBACK, o.data); return o; }
+  }catch(e){}
+  return null;
+}
+function jphFresh(o){
+  if(!o || !o.fetchedAt) return false;
+  return (Date.now() - o.fetchedAt) < 30*24*60*60*1000; // 30日以内なら再取得不要
+}
+function loadHolidays(){
+  const cached = jphApplyCache();                 // 手元キャッシュを反映（無ければフォールバックのまま）
+  if(jphFresh(cached)) return;                     // 新しければ取得しない
+  fetch(JPH_URL).then(r=>r.ok?r.json():Promise.reject()).then(data=>{
+    if(data && typeof data==='object'){
+      JPH = Object.assign({}, JPH_FALLBACK, data);
+      try{ localStorage.setItem(JPH_CACHE_KEY, JSON.stringify({fetchedAt:Date.now(), data})); }catch(e){}
+      try{ if(typeof renderCalendar==='function') renderCalendar(); }catch(e){}
+    }
+  }).catch(()=>{ /* 失敗時はキャッシュ/フォールバックのまま */ });
+}
+loadHolidays();
+
 function renderCalendar(){
   const lp=listMonth.split('-');const year=Number(lp[0]),month=Number(lp[1])-1;
   // 月曜始まりに変換
@@ -2201,7 +2238,8 @@ function renderCalendar(){
   for(let d=1;d<=daysInMonth;d++){
     const dateStr=year+'-'+String(month+1).padStart(2,'0')+'-'+String(d).padStart(2,'0');
     const dow=new Date(year,month,d).getDay();const dayGroups=byDate[dateStr]||[];const isToday=dateStr===todayStr;
-    let cls='cal-cell';if(dow===0)cls+=' sun';if(dow===6)cls+=' sat';if(isToday)cls+=' today';
+    const holiday=JPH[dateStr];
+    let cls='cal-cell';if(dow===0)cls+=' sun';if(dow===6)cls+=' sat';if(holiday)cls+=' holiday';if(isToday)cls+=' today';
     const shown=dayGroups.slice(0,5);const overflow=dayGroups.length-5;let eventsHtml='';
     shown.forEach(g=>{
       const type=g.yakin?'yakin':g.yasumi?'yasumi':g.souko?'souko':g.yotei?'yotei':'';
@@ -2222,7 +2260,7 @@ function renderCalendar(){
       eventsHtml+=`<div class="cal-event" style="background:${g.color||map[type]}">${esc(label)}</div>`;
     });
     if(overflow>0)eventsHtml+=`<div class="cal-overflow">+${overflow}</div>`;
-    html+=`<div class="${cls}" onclick="openCalDay('${dateStr}')"><div class="cal-day-num">${d}</div>${eventsHtml}</div>`;
+    html+=`<div class="${cls}" onclick="openCalDay('${dateStr}')"><div class="cal-day-num">${d}</div>${holiday?`<div class="cal-holiday-name">${esc(holiday)}</div>`:''}${eventsHtml}</div>`;
   }
   html+='</div>';document.getElementById('cal-grid').innerHTML=html;
 }
