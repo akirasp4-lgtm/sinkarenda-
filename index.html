@@ -20,6 +20,18 @@
     document.title = t;
     var m = document.getElementById('app-title-meta');
     if (m) m.setAttribute('content', t);
+    // 会社別ロゴ（アイコン）：該当会社はそのロゴ、その他は既定 icon.png のまま
+    var LOGOS = {'和信カインド':'washin/logo.png','ラーテル':'ratel/logo.png'};
+    if (LOGOS[c]) {
+      var ics = document.querySelectorAll('link[rel="icon"],link[rel="apple-touch-icon"]');
+      for (var i=0;i<ics.length;i++){ ics[i].setAttribute('href', LOGOS[c]); }
+    }
+    // Android等のホーム画面アイコンは manifest 側。会社別 manifest があれば差し替え
+    var MANIFESTS = {'和信カインド':'washin/manifest.json'};
+    if (MANIFESTS[c]) {
+      var mf = document.querySelector('link[rel="manifest"]');
+      if (mf) mf.setAttribute('href', MANIFESTS[c]);
+    }
   }
 })();
 </script>

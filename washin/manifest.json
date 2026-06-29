@@ -1,0 +1,24 @@
+{
+  "name": "和信カインド予定表",
+  "short_name": "和信予定表",
+  "description": "和信カインド 予定表",
+  "start_url": "../index.html?c=和信カインド",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#1D9E75",
+  "icons": [
+    {
+      "src": "logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
