@@ -1023,12 +1023,12 @@ function confirmSimilarLoc(genba,loc){
     const similar=findSimilarLocs(genba,loc);
     if(similar.length===0){resolve({action:'new'});return;}
     const list=document.getElementById('similar-loc-list');
-    list.innerHTML=similar.map(l=>`<button class="btn btn-secondary btn-sm" style="display:block;width:100%;margin-bottom:6px;text-align:left" onclick="pickSimilarLoc(this.dataset.loc)" data-loc="${esc(l)}">${esc(l)}</button>`).join('');
+    list.innerHTML=similar.map(l=>`<button class="btn btn-secondary btn-sm" style="display:block;width:100%;margin-bottom:6px;text-align:left" onclick="pickSimilarLocModal(this.dataset.loc)" data-loc="${esc(l)}">${esc(l)}</button>`).join('');
     _similarLocResolve=resolve;
     document.getElementById('similar-loc-modal').classList.add('active');
   });
 }
-function pickSimilarLoc(loc){
+function pickSimilarLocModal(loc){
   document.getElementById('similar-loc-modal').classList.remove('active');
   if(_similarLocResolve){_similarLocResolve({action:'existing',loc});_similarLocResolve=null;}
 }
