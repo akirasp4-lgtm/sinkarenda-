@@ -309,7 +309,9 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="カギ借用">🗝️ カギ借用</option>
     <option value="材料引取・検品">📦 材料引取・検品</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
-    <option value="前乗り">🚗 前乗り</option>
+    <option value="移動">🚗 移動</option>
+    <option value="置局">📡 置局</option>
+    <option value="事務所">🏢 事務所</option>
     <option value="倉庫作業">🏭 倉庫作業</option>
     <option value="休み">🏖️ 休み</option>
     <option value="その他">📋 その他</option>
@@ -601,7 +603,9 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="カギ借用">🗝️ カギ借用</option>
     <option value="材料引取・検品">📦 材料引取・検品</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
-    <option value="前乗り">🚗 前乗り</option>
+    <option value="移動">🚗 移動</option>
+    <option value="置局">📡 置局</option>
+    <option value="事務所">🏢 事務所</option>
     <option value="倉庫作業">🏭 倉庫作業</option>
     <option value="休み">🏖️ 休み</option>
     <option value="その他">📋 その他</option>
@@ -712,7 +716,9 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
       <li><b>カギ借用</b>: カギの貸借や立会のみ — 工番なし</li>
       <li><b>材料引取・検品</b>: 材料・道具の搬出入＋検品 — 工番なし</li>
       <li><b>撤去品返却</b>: 撤去物の返却作業 — 工番なし</li>
-      <li><b>前乗り</b>: 前日の移動・宿泊など実作業前の前乗り — 工番なし</li>
+      <li><b>移動</b>: 前日移動・宿泊など実作業前の移動 — 工番なし</li>
+      <li><b>置局</b>: 基地局・アンテナ等の設置作業 — 工番なし</li>
+      <li><b>事務所</b>: 事務所での作業・待機 — 工番なし</li>
       <li><b>🏭 倉庫作業</b>: 選ぶと自動的に倉庫モード ON、倉庫タスクが選べる — 工番なし</li>
       <li><b>🏖️ 休み</b>: 選ぶと自動的に休みモード ON、他項目は不要 — 工番なし</li>
       <li><b>その他</b>: 上記以外 — 工番なし</li>
@@ -1631,6 +1637,7 @@ function updateLocationSuggestions(){
 // - 最近使った順（lastUsed 日付の降順）で並べる
 // - 検索ボックス（p+'-location-search'）に入力があれば部分一致で絞り込み
 // - 現場マスタで「完了」フラグが立っている現場は除外（現在編集中の値は残す）
+const STALE_DAYS=60; // これ日数以上予定がない現場は「過去の現場」グループに落とす
 function populateLocationSelect(p){
   const sel=document.getElementById(p+'-location-select');
   if(!sel)return;
@@ -1664,12 +1671,21 @@ function populateLocationSelect(p){
   });
   const currentVal=(document.getElementById(p+'-location')||{}).value||'';
   const inList=locs.includes(currentVal);
+  // 60日以上予定が無い現場を「過去の現場」グループへ（cutoff以降に予定があれば active）
+  const _c=new Date();_c.setDate(_c.getDate()-STALE_DAYS);
+  const cutoff=_c.getFullYear()+'-'+String(_c.getMonth()+1).padStart(2,'0')+'-'+String(_c.getDate()).padStart(2,'0');
+  const active=locs.filter(l=>(lastUsed[l]||'')>=cutoff);
+  const stale=locs.filter(l=>(lastUsed[l]||'')<cutoff);
   // ラベルに件数を出す（絞り込み中はヒット件数/全件）
   const labelTxt=q?`既存から選択（${locs.length}/${totalCount}件）`:`既存から選択（${totalCount}件・最近順）`;
+  const optHtml=l=>`<option value="${esc(l)}"${l===currentVal?' selected':''}>${esc(l)}</option>`;
   let html=`<option value="">${esc(labelTxt)}</option>`;
-  locs.forEach(l=>{
-    html+=`<option value="${esc(l)}"${l===currentVal?' selected':''}>${esc(l)}</option>`;
-  });
+  active.forEach(l=>{html+=optHtml(l);});
+  if(stale.length){
+    html+='<optgroup label="── 過去の現場（60日以上予定なし）──">';
+    stale.forEach(l=>{html+=optHtml(l);});
+    html+='</optgroup>';
+  }
   html+='<option value="__new__" style="color:#1D9E75;font-weight:600">＋ 新規現場として追加</option>';
   sel.innerHTML=html;
   // 現在値がリストにない場合 → 新規入力モード扱い
@@ -2235,7 +2251,7 @@ function openCalDay(dateStr){
         }
       }
       const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
-      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','材料引取・検品':'📦','撤去品返却':'♻️','前乗り':'🚗','倉庫作業':'🏭','休み':'🏖️','その他':'📋'};
+      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','材料引取・検品':'📦','撤去品返却':'♻️','前乗り':'🚗','移動':'🚗','置局':'📡','事務所':'🏢','倉庫作業':'🏭','休み':'🏖️','その他':'📋'};
       const wt=g.workType||'現場作業';
       const wtEmoji=wtMap[wt]||'🏷️';
       const wtCls=wt==='現場作業'?'worktype-chip worktype-default':'worktype-chip';
@@ -2346,21 +2362,13 @@ function shiftDetailEvent(delta){
 // 現場の「完了」状態を表示＋切替UIを返す
 function renderSiteCompletionRow_(g){
   if(!g.genba||!g.loc)return ''; // 元請・現場名がそろっている時だけ
-  // この予定の代表者または管理者ならボタン表示
-  const leader=(g.members||[]).find(m=>m.role==='代表');
-  const me=getUsername();
-  const isLeader=leader&&me&&leader.name===me;
-  const canMark=isAdmin||isLeader;
+  // 完了ボタンは誰でも押せる（現場が終わったら誰でもマークできる運用）
   const j=(allJobsites||[]).find(x=>x.genba===g.genba&&x.loc===g.loc);
   const completed=!!(j&&j.completed);
   if(completed){
-    const btn=canMark?`<button class="btn btn-secondary btn-sm" onclick="toggleSiteCompletion_('${esc(g.genba)}','${esc(g.loc)}',false)" style="margin-left:8px;font-size:12px;padding:4px 10px">進行中に戻す</button>`:'';
-    return `<div class="detail-row"><div class="detail-row-icon">✅</div><div class="detail-row-content"><div class="detail-row-label">現場ステータス</div><span style="color:#1D9E75;font-weight:600">完了済み</span>${btn}</div></div>`;
+    return `<div class="detail-row"><div class="detail-row-icon">✅</div><div class="detail-row-content"><div class="detail-row-label">現場ステータス</div><span style="color:#1D9E75;font-weight:600">完了済み</span><button class="btn btn-secondary btn-sm" onclick="toggleSiteCompletion_('${esc(g.genba)}','${esc(g.loc)}',false)" style="margin-left:8px;font-size:12px;padding:4px 10px">進行中に戻す</button></div></div>`;
   }
-  if(canMark){
-    return `<div class="detail-row"><div class="detail-row-icon">🚧</div><div class="detail-row-content"><div class="detail-row-label">現場ステータス</div>進行中<button class="btn btn-secondary btn-sm" onclick="toggleSiteCompletion_('${esc(g.genba)}','${esc(g.loc)}',true)" style="margin-left:8px;font-size:12px;padding:4px 10px">この現場を完了にする</button></div></div>`;
-  }
-  return ''; // マーク権限ない一般ユーザーには非表示
+  return `<div class="detail-row"><div class="detail-row-icon">🚧</div><div class="detail-row-content"><div class="detail-row-label">現場ステータス</div>進行中<button class="btn btn-secondary btn-sm" onclick="toggleSiteCompletion_('${esc(g.genba)}','${esc(g.loc)}',true)" style="margin-left:8px;font-size:12px;padding:4px 10px">この現場を完了にする</button></div></div>`;
 }
 
 async function toggleSiteCompletion_(genba,loc,completed){

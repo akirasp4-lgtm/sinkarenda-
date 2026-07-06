@@ -319,7 +319,9 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="カギ借用">🗝️ カギ借用</option>
     <option value="材料引取・検品">📦 材料引取・検品</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
-    <option value="前乗り">🚗 前乗り</option>
+    <option value="移動">🚗 移動</option>
+    <option value="置局">📡 置局</option>
+    <option value="事務所">🏢 事務所</option>
     <option value="倉庫作業">🏭 倉庫作業</option>
     <option value="休み">🏖️ 休み</option>
     <option value="その他">📋 その他</option>
@@ -473,6 +475,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <button id="gm-mode-genba" class="btn btn-secondary active" onclick="setGmMode('genba')">🏗️ 現場で探す</button>
   <button id="gm-mode-person" class="btn btn-secondary" onclick="setGmMode('person')">👤 人で探す</button>
   <button id="gm-mode-pin" class="btn btn-secondary" onclick="setGmMode('pin')">📌 予定だけ</button>
+  <button id="gm-mode-done" class="btn btn-secondary" onclick="setGmMode('done')">🏁 完了管理</button>
 </div>
 <!-- 現場フィルタ（既存） -->
 <div id="gm-filter-genba" class="card">
@@ -498,6 +501,12 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <button id="gm-pin-month-btn" class="btn btn-secondary" style="flex:1;font-size:12px" onclick="setPinFilterMode('month')">月で絞る</button>
   </div>
   <select id="gm-pin-month" onchange="renderGmList()" style="display:none"><option value="">月を選択</option></select>
+</div>
+<!-- 完了管理（新規） -->
+<div id="gm-filter-done" class="card" style="display:none">
+  <label>現場名で検索</label>
+  <input id="gm-done-search" type="text" placeholder="現場名の一部を入力" oninput="renderDoneManager()" style="margin-bottom:8px">
+  <div id="gm-done-list"></div>
 </div>
 <div id="gm-list-wrap" style="display:none">
   <div class="card" style="padding:12px 16px">
@@ -664,7 +673,9 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="カギ借用">🗝️ カギ借用</option>
     <option value="材料引取・検品">📦 材料引取・検品</option>
     <option value="撤去品返却">♻️ 撤去品返却</option>
-    <option value="前乗り">🚗 前乗り</option>
+    <option value="移動">🚗 移動</option>
+    <option value="置局">📡 置局</option>
+    <option value="事務所">🏢 事務所</option>
     <option value="倉庫作業">🏭 倉庫作業</option>
     <option value="休み">🏖️ 休み</option>
     <option value="その他">📋 その他</option>
@@ -946,7 +957,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <h3>🏷 作業区分（必須・ゲート）</h3>
     <p>登録／編集モーダルでは <b>作業区分を最初に選択するまで他の項目が入力できません</b>（赤い警告バー表示）。表記揺れ防止と工番の正しい発番のためのガード。</p>
     <ul>
-      <li>区分: <b>現場作業 / 現調 / 着打ち / カギ借用 / 材料引取・検品 / 撤去品返却 / 前乗り / 倉庫作業 / 休み / その他</b></li>
+      <li>区分: <b>現場作業 / 現調 / 着打ち / カギ借用 / 材料引取・検品 / 撤去品返却 / 移動 / 置局 / 事務所 / 倉庫作業 / 休み / その他</b></li>
       <li><b>🏭 倉庫作業</b>を選ぶと自動で倉庫モードに切替、倉庫タスク選択UIが出現（工番なし）</li>
       <li><b>🏖️ 休み</b>を選ぶと自動で休みモードに切替（工番なし、人工0）</li>
       <li>グローライズの<b>工番は「現場作業」のみ発行</b>（他の区分・休み・倉庫・予定では工番なし）</li>
@@ -1881,6 +1892,7 @@ function updateLocationSuggestions(){
 }
 
 // 現場名プルダウンの populate（最近使った順 + 検索ボックス対応 + 完了現場除外）
+const STALE_DAYS=60; // これ日数以上予定がない現場は「過去の現場」グループに落とす
 function populateLocationSelect(p){
   const sel=document.getElementById(p+'-location-select');
   if(!sel)return;
@@ -1913,9 +1925,20 @@ function populateLocationSelect(p){
   });
   const currentVal=(document.getElementById(p+'-location')||{}).value||'';
   const inList=locs.includes(currentVal);
+  // 60日以上予定が無い現場を「過去の現場」グループへ（cutoff以降に予定があれば active）
+  const _c=new Date();_c.setDate(_c.getDate()-STALE_DAYS);
+  const cutoff=_c.getFullYear()+'-'+String(_c.getMonth()+1).padStart(2,'0')+'-'+String(_c.getDate()).padStart(2,'0');
+  const active=locs.filter(l=>(lastUsed[l]||'')>=cutoff);
+  const stale=locs.filter(l=>(lastUsed[l]||'')<cutoff);
   const labelTxt=q?`既存から選択（${locs.length}/${totalCount}件）`:`既存から選択（${totalCount}件・最近順）`;
+  const optHtml=l=>`<option value="${esc(l)}"${l===currentVal?' selected':''}>${esc(l)}</option>`;
   let html=`<option value="">${esc(labelTxt)}</option>`;
-  locs.forEach(l=>{html+=`<option value="${esc(l)}"${l===currentVal?' selected':''}>${esc(l)}</option>`;});
+  active.forEach(l=>{html+=optHtml(l);});
+  if(stale.length){
+    html+='<optgroup label="── 過去の現場（60日以上予定なし）──">';
+    stale.forEach(l=>{html+=optHtml(l);});
+    html+='</optgroup>';
+  }
   html+='<option value="__new__" style="color:#1D9E75;font-weight:600">＋ 新規現場として追加</option>';
   sel.innerHTML=html;
   const input=document.getElementById(p+'-location');
@@ -2293,7 +2316,7 @@ function openCalDay(dateStr){
         }
       }
       const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
-      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','材料引取・検品':'📦','撤去品返却':'♻️','前乗り':'🚗','倉庫作業':'🏭','休み':'🏖️','その他':'📋'};
+      const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','材料引取・検品':'📦','撤去品返却':'♻️','前乗り':'🚗','移動':'🚗','置局':'📡','事務所':'🏢','倉庫作業':'🏭','休み':'🏖️','その他':'📋'};
       const wt=g.workType||'現場作業';
       const wtEmoji=wtMap[wt]||'🏷️';
       const wtCls=wt==='現場作業'?'worktype-chip worktype-default':'worktype-chip';
@@ -2415,6 +2438,48 @@ async function toggleSiteCompletion_(genba,loc,completed){
       if(document.getElementById('cal-detail-modal')?.classList.contains('active')&&typeof renderEventDetail==='function')renderEventDetail();
     }else alert('エラー：'+(json.message||'不明'));
   }catch(e){alert('エラー：'+e.message);}
+}
+
+// 既存 toggleSiteCompletion_ の薄いラッパー（切替後に完了管理一覧を再描画）
+async function doneToggle(genba,loc,completed){await toggleSiteCompletion_(genba,loc,completed);renderDoneManager();}
+
+// 🏁 完了管理：全現場（元請×現場）の完了状態を一覧して切り替える
+function renderDoneManager(){
+  const wrap=document.getElementById('gm-done-list');
+  if(!wrap)return;
+  // allJobsites ∪ allNippos(isGhost除外) の (genba,loc) ペアを集める
+  const map={}; // key='genba|||loc' → {genba,loc,last,completed}
+  const key=(g,l)=>g+'|||'+l;
+  (allNippos||[]).forEach(n=>{
+    if(n.isGhost||!n.genba||!n.loc)return;
+    const k=key(n.genba,n.loc);
+    if(!map[k])map[k]={genba:n.genba,loc:n.loc,last:'',completed:false};
+    if((n.date||'')>map[k].last)map[k].last=n.date||'';
+  });
+  (allJobsites||[]).forEach(j=>{
+    if(!j.genba||!j.loc)return;
+    const k=key(j.genba,j.loc);
+    if(!map[k])map[k]={genba:j.genba,loc:j.loc,last:'',completed:false};
+    map[k].completed=!!j.completed;
+  });
+  let list=Object.values(map);
+  // 検索絞り込み（現場名の部分一致）
+  const q=(document.getElementById('gm-done-search')||{}).value||'';
+  const qq=q.trim().toLowerCase();
+  if(qq)list=list.filter(x=>(x.loc||'').toLowerCase().includes(qq));
+  // 進行中を上、その中で最終予定日の降順
+  list.sort((a,b)=>{
+    if(a.completed!==b.completed)return a.completed?1:-1;
+    return (b.last||'').localeCompare(a.last||'');
+  });
+  if(!list.length){wrap.innerHTML='<div style="color:#666;font-size:13px;padding:8px">該当する現場がありません</div>';return;}
+  wrap.innerHTML=list.map(x=>{
+    const badge=x.completed?'<span style="color:#1D9E75;font-weight:600">✅完了</span>':'<span style="color:#dc2626;font-weight:600">🚧進行中</span>';
+    const btn=x.completed
+      ?`<button class="btn btn-secondary btn-sm" onclick="doneToggle('${esc(x.genba)}','${esc(x.loc)}',false)" style="font-size:12px;padding:4px 10px">進行中に戻す</button>`
+      :`<button class="btn btn-secondary btn-sm" onclick="doneToggle('${esc(x.genba)}','${esc(x.loc)}',true)" style="font-size:12px;padding:4px 10px">完了にする</button>`;
+    return `<div class="detail-row" style="align-items:center"><div class="detail-row-content"><div style="font-size:12px;color:#666">${esc(x.genba)}</div><div style="font-weight:600">${esc(x.loc)}</div><div style="font-size:12px;color:#666">最終予定日: ${esc(x.last||'-')} ／ ${badge}</div></div><div style="margin-left:auto">${btn}</div></div>`;
+  }).join('');
 }
 
 function shiftDetailEvent(delta){
@@ -2627,11 +2692,12 @@ function refreshGmTab() {
   if (gmMode === 'genba') updateGmSelects();
   else if (gmMode === 'person') renderPersonFilter();
   else if (gmMode === 'pin') renderPinFilter();
+  else if (gmMode === 'done') renderDoneManager();
 }
 
 function setGmMode(mode) {
   gmMode = mode;
-  ['genba','person','pin'].forEach(m => {
+  ['genba','person','pin','done'].forEach(m => {
     const btn = document.getElementById('gm-mode-' + m);
     if (btn) btn.classList.toggle('active', m === mode);
   });
@@ -2639,6 +2705,7 @@ function setGmMode(mode) {
     genba: document.getElementById('gm-filter-genba'),
     person: document.getElementById('gm-filter-person'),
     pin: document.getElementById('gm-filter-pin'),
+    done: document.getElementById('gm-filter-done'),
   };
   Object.entries(cards).forEach(([k, el]) => {
     if (el) el.style.display = k === mode ? '' : 'none';
