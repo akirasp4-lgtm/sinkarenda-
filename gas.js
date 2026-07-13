@@ -1356,6 +1356,27 @@ function calcEffective_(records, name) {
   return {days, kosu, yakinCount, dates: Object.keys(byDate).sort()};
 }
 
+// 会社別/月別集計（6列）の書式を一括適用する。
+// 以前は formats を1行ずつ setBackground/setFontWeight していて通信が数百回に達し、集計を重くしていた。
+// 背景色・太字を行×列グリッドにまとめ、setBackgrounds/setFontWeights 各1回で流し込む（フォントサイズだけ対象が少ないので個別）。
+function applyGroupedSummaryFormats_(sheet, numRows, formats, accentType, accentBg) {
+  const bgs = [], fws = [];
+  for (let i = 0; i < numRows; i++) {
+    bgs.push(['#FFFFFF', '#FFFFFF', '#FFFFFF', '#FFFFFF', '#FFFFFF', '#FFFFFF']);
+    fws.push(['normal', 'normal', 'normal', 'normal', 'normal', 'normal']);
+  }
+  const fontSizes = [];
+  formats.forEach(f => {
+    const ri = f.row - 1;
+    if (f.type === 'title') { fws[ri][0] = 'bold'; fontSizes.push({ row: f.row, size: 14 }); }
+    else if (f.type === accentType) { for (let c = 0; c < 6; c++) bgs[ri][c] = accentBg; fws[ri][0] = 'bold'; fontSizes.push({ row: f.row, size: 12 }); }
+    else if (f.type === 'header') { for (let c = 0; c < 6; c++) { bgs[ri][c] = '#F5F5F5'; fws[ri][c] = 'bold'; } }
+    else if (f.type === 'total') { for (let c = 0; c < 6; c++) { bgs[ri][c] = '#FFF9C4'; fws[ri][c] = 'bold'; } }
+  });
+  sheet.getRange(1, 1, numRows, 6).setBackgrounds(bgs).setFontWeights(fws);
+  fontSizes.forEach(fs => sheet.getRange(fs.row, 1).setFontSize(fs.size));
+}
+
 function generateCompanySummary_(ss, records) {
   let sheet = ss.getSheetByName(SUMMARY_COMPANY);
   if (sheet) { sheet.clear(); sheet.clearFormats(); } else { sheet = ss.insertSheet(SUMMARY_COMPANY); }
@@ -1389,13 +1410,7 @@ function generateCompanySummary_(ss, records) {
   });
   if (allRows.length > 0) {
     sheet.getRange(1, 1, allRows.length, 6).setValues(allRows);
-    formats.forEach(f => {
-      const range = sheet.getRange(f.row, 1, 1, 6);
-      if (f.type === 'title') sheet.getRange(f.row, 1).setFontSize(14).setFontWeight('bold');
-      else if (f.type === 'company') { range.setBackground('#E8F5E9'); sheet.getRange(f.row, 1).setFontSize(12).setFontWeight('bold'); }
-      else if (f.type === 'header') range.setFontWeight('bold').setBackground('#F5F5F5');
-      else if (f.type === 'total') range.setFontWeight('bold').setBackground('#FFF9C4');
-    });
+    applyGroupedSummaryFormats_(sheet, allRows.length, formats, 'company', '#E8F5E9');
   }
   sheet.setColumnWidth(1, 120);
   for (let c = 2; c <= 6; c++) sheet.setColumnWidth(c, 110);
@@ -1434,13 +1449,7 @@ function generateMonthSummary_(ss, records) {
   });
   if (allRows.length > 0) {
     sheet.getRange(1, 1, allRows.length, 6).setValues(allRows);
-    formats.forEach(f => {
-      const range = sheet.getRange(f.row, 1, 1, 6);
-      if (f.type === 'title') sheet.getRange(f.row, 1).setFontSize(14).setFontWeight('bold');
-      else if (f.type === 'month') { range.setBackground('#E3F2FD'); sheet.getRange(f.row, 1).setFontSize(12).setFontWeight('bold'); }
-      else if (f.type === 'header') range.setFontWeight('bold').setBackground('#F5F5F5');
-      else if (f.type === 'total') range.setFontWeight('bold').setBackground('#FFF9C4');
-    });
+    applyGroupedSummaryFormats_(sheet, allRows.length, formats, 'month', '#E3F2FD');
   }
   sheet.setColumnWidth(1, 100); sheet.setColumnWidth(2, 120);
   for (let c = 3; c <= 5; c++) sheet.setColumnWidth(c, 100);
@@ -1718,7 +1727,7 @@ function generateKakuninTable_(ss, records) {
   const maxCols = 33;
   ensureColumns_(sheet, maxCols);
   sheet.setColumnWidth(1, 100);
-  for (let c = 2; c <= 32; c++) sheet.setColumnWidth(c, 28);
+  sheet.setColumnWidths(2, 31, 28);
   sheet.setColumnWidth(33, 50);
 
   const outputData = [];
@@ -1807,49 +1816,83 @@ function generateKakuninTable_(ss, records) {
   });
 
   if (outputData.length > 0) {
-    sheet.getRange(1, 1, outputData.length, maxCols).setValues(outputData);
+    const numRows = outputData.length;
+    sheet.getRange(1, 1, numRows, maxCols).setValues(outputData);
+
+    // === 書式は「表全体を一括設定」する ===
+    // 以前は1マスずつ setBackground/setFontColor 等を呼んでいたため、確認表（人×最大31日×4ヶ月）で
+    // Spreadsheetサービスへの通信が数千回に達し、集計が3分超→「サービスに接続できなくなりました」で失敗していた。
+    // 書式を行×列のグリッドに組み立て、列一括の setBackgrounds/setFontColors 等で流し込む（通信を数千回→数百回に削減）。
+    const bgs = [], fcs = [], has = [], fws = [];
+    for (let i = 0; i < numRows; i++) {
+      bgs.push(new Array(maxCols).fill('#FFFFFF'));
+      fcs.push(new Array(maxCols).fill('#000000'));
+      has.push(new Array(maxCols).fill('left'));
+      fws.push(new Array(maxCols).fill('normal'));
+    }
+    // 一括にできない書式（結合／罫線／数値書式／フォントサイズ）だけ後でまとめて掛ける
+    const merges = [];   // タイトル行
+    const borders = [];  // 月ブロックの外枠
+    const numFmts = [];  // 日付列の数値書式
 
     formatRules.forEach(rule => {
-      const r = rule.row + 1;
+      const ri = rule.row;      // 0-based（グリッド添字）
+      const r = ri + 1;         // 1-based（シート行）
       if (rule.type === 'title') {
-        sheet.getRange(r, 1, 1, rule.cols).merge().setHorizontalAlignment('center').setFontSize(13).setFontWeight('bold').setBackground('#F9E400');
+        for (let c = 0; c < rule.cols; c++) { bgs[ri][c] = '#F9E400'; has[ri][c] = 'center'; fws[ri][c] = 'bold'; }
+        merges.push({ row: r, cols: rule.cols });
       } else if (rule.type === 'header') {
-        const range = sheet.getRange(r, 1, 1, rule.cols);
-        range.setFontWeight('bold').setBackground('#CCCCCC').setHorizontalAlignment('center');
+        for (let c = 0; c < rule.cols; c++) { bgs[ri][c] = '#CCCCCC'; has[ri][c] = 'center'; fws[ri][c] = 'bold'; }
         // 日付の数字(1〜31)が日付シリアルとして解釈されないよう、整数書式を明示
-        sheet.getRange(r, 2, 1, rule.daysInMonth).setNumberFormat('0');
+        numFmts.push({ row: r, startCol: 2, numCols: rule.daysInMonth, fmt: '0' });
         for (let d = 1; d <= rule.daysInMonth; d++) {
           const dow = new Date(rule.year, rule.month, d).getDay();
-          const cell = sheet.getRange(r, d + 1);
-          if (dow === 0) cell.setFontColor('#CC0000');
-          else if (dow === 6) cell.setFontColor('#0000CC');
+          if (dow === 0) fcs[ri][d] = '#CC0000';
+          else if (dow === 6) fcs[ri][d] = '#0000CC';
         }
       } else if (rule.type === 'empty_data') {
-        sheet.getRange(r, 1).setFontColor('#999999');
+        fcs[ri][0] = '#999999';
       } else if (rule.type === 'data') {
-        const bg = rule.index % 2 === 0 ? '#FFFFFF' : '#F0FFF0';
-        sheet.getRange(r, 1, 1, rule.cols).setBackground(bg);
-        sheet.getRange(r, 1).setFontWeight('bold');
-        sheet.getRange(r, 2, 1, rule.cols - 1).setNumberFormat('0.##');
+        const base = rule.index % 2 === 0 ? '#FFFFFF' : '#F0FFF0';
+        for (let c = 0; c < rule.cols; c++) bgs[ri][c] = base;
+        fws[ri][0] = 'bold';
+        numFmts.push({ row: r, startCol: 2, numCols: rule.cols - 1, fmt: '0.##' });
         for (let d = 1; d <= rule.daysInMonth; d++) {
           const dow = new Date(rule.year, rule.month, d).getDay();
-          const cell = sheet.getRange(r, d + 1);
-          cell.setHorizontalAlignment('center');
-          const val = outputData[rule.row][d];
-          if (val === 0) cell.setFontColor('#CCCCCC');
-          if (dow === 0) cell.setBackground('#FFE6E6');
-          else if (dow === 6) cell.setBackground('#E6E6FF');
+          has[ri][d] = 'center';
+          const val = outputData[ri][d];
+          if (val === 0) fcs[ri][d] = '#CCCCCC';
+          if (dow === 0) bgs[ri][d] = '#FFE6E6';
+          else if (dow === 6) bgs[ri][d] = '#E6E6FF';
         }
-        sheet.getRange(r, rule.cols).setFontWeight('bold').setHorizontalAlignment('center');
+        has[ri][rule.cols - 1] = 'center';
+        fws[ri][rule.cols - 1] = 'bold';
       } else if (rule.type === 'total') {
-        sheet.getRange(r, 1, 1, rule.cols).setFontWeight('bold').setBackground('#FFF9C4');
-        sheet.getRange(r, 2, 1, rule.cols - 1).setNumberFormat('0.##');
-        for (let d = 1; d <= rule.daysInMonth; d++) sheet.getRange(r, d + 1).setHorizontalAlignment('center');
-        sheet.getRange(r, rule.cols).setHorizontalAlignment('center');
-        const startRow = r - rule.namesLength - 1;
-        sheet.getRange(startRow, 1, rule.namesLength + 2, rule.cols).setBorder(true, true, true, true, true, true);
+        for (let c = 0; c < rule.cols; c++) { bgs[ri][c] = '#FFF9C4'; fws[ri][c] = 'bold'; }
+        numFmts.push({ row: r, startCol: 2, numCols: rule.cols - 1, fmt: '0.##' });
+        for (let d = 1; d <= rule.daysInMonth; d++) has[ri][d] = 'center';
+        has[ri][rule.cols - 1] = 'center';
+        borders.push({ startRow: r - rule.namesLength - 1, numRows: rule.namesLength + 2, cols: rule.cols });
       }
     });
+
+    // 一括流し込み（それぞれ1回の通信で全行に適用）
+    const fullRange = sheet.getRange(1, 1, numRows, maxCols);
+    fullRange.setBackgrounds(bgs);
+    fullRange.setFontColors(fcs);
+    fullRange.setHorizontalAlignments(has);
+    fullRange.setFontWeights(fws);
+    // 数値書式: 連続行×同一書式はまとめて1回で適用（人数分の個別呼び出しを月ごと1回に圧縮）
+    numFmts.sort((a, b) => a.row - b.row || a.startCol - b.startCol);
+    let nfRun = null;
+    const flushNfRun_ = () => { if (nfRun) sheet.getRange(nfRun.row, nfRun.startCol, nfRun.rows, nfRun.numCols).setNumberFormat(nfRun.fmt); };
+    numFmts.forEach(n => {
+      if (nfRun && n.row === nfRun.row + nfRun.rows && n.startCol === nfRun.startCol && n.numCols === nfRun.numCols && n.fmt === nfRun.fmt) { nfRun.rows++; }
+      else { flushNfRun_(); nfRun = { row: n.row, startCol: n.startCol, rows: 1, numCols: n.numCols, fmt: n.fmt }; }
+    });
+    flushNfRun_();
+    merges.forEach(m => sheet.getRange(m.row, 1, 1, m.cols).merge().setFontSize(13));
+    borders.forEach(b => sheet.getRange(b.startRow, 1, b.numRows, b.cols).setBorder(true, true, true, true, true, true));
 
     // 合計セルを SUM 関数に置換（Excel で値を編集すると合計が自動更新される）
     // ※ data 行の最右列 + total 行の各日列 + total 行の最右列
@@ -1883,13 +1926,31 @@ function generateKakuninTable_(ss, records) {
 function generateBillingSummary_(ss, records) {
   let sheet = ss.getSheetByName(BILLING_SHEET);
   if (sheet) { sheet.clear(); sheet.clearFormats(); } else { sheet = ss.insertSheet(BILLING_SHEET); }
-  ensureColumns_(sheet, 35);
+  const W = 35; // 3列(会社/現場/名前) + 31日 + 合計
+  ensureColumns_(sheet, W);
   // 倉庫は元請に請求しない作業のため除外（旧データで元請名が入っているものも対象外にする）
   const workRecords = records.filter(r => r.yakin !== '休み' && r.yakin !== '予定' && r.yakin !== '倉庫');
   const months = [...new Set(workRecords.map(r => r.month).filter(Boolean))].sort().reverse();
   const genbas = [...new Set(workRecords.map(r => r.genba).filter(Boolean))].sort();
   const DOW = ['日','月','火','水','木','金','土'];
-  let currentRow = 1;
+
+  // 旧実装は1行ごとに setValues＋書式（約5〜8通信/行）で、行数に比例して遅くなり
+  // 接続エラーの残存リスクだった。値・書式を全てメモリ上で組み立て、最後に
+  // setValues＋一括書式（各1通信）で流し込む方式に統一（generateKakuninTable_ と同型）。
+  const rows = [], bgs = [], fcs = [], has = [], fws = [], wraps = [], vas = [];
+  const titleMerges = [];  // {row, cols} 月タイトル行の横結合
+  const blockMerges = [];  // {row, numRows} 会社名/現場名セルの縦結合
+  function addRow_(vals) {
+    rows.push(vals.concat(Array(W - vals.length).fill('')));
+    bgs.push(new Array(W).fill('#FFFFFF'));
+    fcs.push(new Array(W).fill('#000000'));
+    has.push(new Array(W).fill('left'));
+    fws.push(new Array(W).fill('normal'));
+    wraps.push(new Array(W).fill(false));
+    vas.push(new Array(W).fill('bottom'));
+    return rows.length - 1;
+  }
+
   months.forEach(month => {
     const parts = month.split('-');
     const year = Number(parts[0]);
@@ -1897,7 +1958,6 @@ function generateBillingSummary_(ss, records) {
     const monthLabel = year + '年' + mon + '月';
     const daysInMonth = new Date(year, mon, 0).getDate();
     const totalCols = 3 + daysInMonth + 1;
-    ensureColumns_(sheet, totalCols);
     const mr = workRecords.filter(r => r.month === month);
     // (氏名, 日付, 昼夜区分) → 行った現場のSet。1日に複数現場行ったら 1/N で按分する
     const sitesByPDN = {};
@@ -1907,14 +1967,24 @@ function generateBillingSummary_(ss, records) {
       if (!sitesByPDN[k]) sitesByPDN[k] = new Set();
       sitesByPDN[k].add(r.genba + '|||' + (r.loc || '（現場名なし）'));
     });
-    sheet.getRange(currentRow, 1, 1, totalCols).merge().setValue('▶ ' + monthLabel).setBackground('#1D9E75').setFontColor('#FFFFFF').setFontSize(12).setFontWeight('bold');
-    currentRow++;
+
+    // 月タイトル行
+    let ri = addRow_(['▶ ' + monthLabel]);
+    for (let c = 0; c < totalCols; c++) { bgs[ri][c] = '#1D9E75'; fcs[ri][c] = '#FFFFFF'; fws[ri][c] = 'bold'; }
+    titleMerges.push({ row: ri + 1, cols: totalCols });
+
+    // ヘッダー行（曜日つき日付ラベル・土日は文字色）
     const headerRow = ['会社名', '現場名', '名前'];
     for (let d = 1; d <= daysInMonth; d++) { const dow = new Date(year, mon - 1, d).getDay(); headerRow.push(d + ' ' + DOW[dow]); }
     headerRow.push('合計');
-    sheet.getRange(currentRow, 1, 1, headerRow.length).setValues([headerRow]).setFontWeight('bold').setBackground('#CCCCCC').setHorizontalAlignment('center').setWrap(true);
-    for (let d = 1; d <= daysInMonth; d++) { const dow = new Date(year, mon - 1, d).getDay(); const cell = sheet.getRange(currentRow, 3 + d); if (dow === 0) cell.setFontColor('#CC0000'); else if (dow === 6) cell.setFontColor('#0000CC'); }
-    currentRow++;
+    ri = addRow_(headerRow);
+    for (let c = 0; c < totalCols; c++) { bgs[ri][c] = '#CCCCCC'; fws[ri][c] = 'bold'; has[ri][c] = 'center'; wraps[ri][c] = true; }
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dow = new Date(year, mon - 1, d).getDay();
+      if (dow === 0) fcs[ri][2 + d] = '#CC0000';
+      else if (dow === 6) fcs[ri][2 + d] = '#0000CC';
+    }
+
     genbas.forEach(genba => {
       const gr = mr.filter(r => r.genba === genba);
       if (gr.length === 0) return;
@@ -1924,7 +1994,7 @@ function generateBillingSummary_(ss, records) {
         const namesInLoc = [...new Set(lr.map(r => r.name))].sort();
         const activeNames = namesInLoc.filter(name => calcEffective_(lr, name).kosu > 0);
         if (activeNames.length === 0) return;
-        const blockStartRow = currentRow;
+        const blockStartRi = rows.length;
         activeNames.forEach((name, ni) => {
           const row = [ni === 0 ? genba : '', ni === 0 ? loc : '', name];
           let rowTotal = 0;
@@ -1947,37 +2017,58 @@ function generateBillingSummary_(ss, records) {
             rowTotal += kosu;
           }
           row.push(rowTotal);
-          sheet.getRange(currentRow, 1, 1, row.length).setValues([row]);
+          ri = addRow_(row);
           const bg = ni % 2 === 0 ? '#FFFFFF' : '#F0FFF0';
-          sheet.getRange(currentRow, 1, 1, totalCols).setBackground(bg);
-          sheet.getRange(currentRow, 1).setFontWeight('bold');
-          sheet.getRange(currentRow, 4, 1, row.length - 3).setNumberFormat('0.##');
-          for (let d = 1; d <= daysInMonth; d++) { const dow = new Date(year, mon - 1, d).getDay(); const cell = sheet.getRange(currentRow, 3 + d); cell.setHorizontalAlignment('center'); const val = row[3 + d - 1]; if (val === 0) cell.setFontColor('#CCCCCC'); if (dow === 0) cell.setBackground('#FFE6E6'); else if (dow === 6) cell.setBackground('#E6E6FF'); }
-          sheet.getRange(currentRow, 3 + daysInMonth + 1).setFontWeight('bold').setHorizontalAlignment('center');
-          currentRow++;
+          for (let c = 0; c < totalCols; c++) bgs[ri][c] = bg;
+          fws[ri][0] = 'bold';
+          for (let d = 1; d <= daysInMonth; d++) {
+            const dow = new Date(year, mon - 1, d).getDay();
+            const gi = 2 + d; // 日付dのシート列は3+d → グリッド添字は2+d
+            has[ri][gi] = 'center';
+            if (row[2 + d] === 0) fcs[ri][gi] = '#CCCCCC';
+            if (dow === 0) bgs[ri][gi] = '#FFE6E6';
+            else if (dow === 6) bgs[ri][gi] = '#E6E6FF';
+          }
+          fws[ri][totalCols - 1] = 'bold';
+          has[ri][totalCols - 1] = 'center';
         });
         const totalRow = ['', '', '合計'];
         let grandTotal = 0;
         for (let d = 1; d <= daysInMonth; d++) { const dateStr = year + '-' + String(mon).padStart(2,'0') + '-' + String(d).padStart(2,'0'); let daySum = 0; activeNames.forEach(name => { const dayRecs = lr.filter(r => r.name === name && r.date === dateStr); const hasDay = dayRecs.some(r => r.yakin !== '夜勤'); const hasNight = dayRecs.some(r => r.yakin === '夜勤'); if (hasDay) { const sCnt = (sitesByPDN[name + '|' + dateStr + '|D'] || new Set()).size || 1; daySum += 1 / sCnt; } if (hasNight) { const sCnt = (sitesByPDN[name + '|' + dateStr + '|N'] || new Set()).size || 1; daySum += 1 / sCnt; } }); totalRow.push(daySum > 0 ? daySum : 0); grandTotal += daySum; }
         totalRow.push(grandTotal);
-        sheet.getRange(currentRow, 1, 1, totalRow.length).setValues([totalRow]).setFontWeight('bold').setBackground('#FFF9C4');
-        sheet.getRange(currentRow, 4, 1, totalRow.length - 3).setNumberFormat('0.##');
-        for (let d = 1; d <= daysInMonth; d++) sheet.getRange(currentRow, 3 + d).setHorizontalAlignment('center');
-        sheet.getRange(currentRow, 3 + daysInMonth + 1).setHorizontalAlignment('center');
-        if (activeNames.length > 1) { sheet.getRange(blockStartRow, 1, activeNames.length, 1).merge(); sheet.getRange(blockStartRow, 2, activeNames.length, 1).merge(); }
-        sheet.getRange(blockStartRow, 1).setFontWeight('bold').setVerticalAlignment('middle');
-        sheet.getRange(blockStartRow, 2).setFontWeight('bold').setVerticalAlignment('middle');
-        currentRow++;
-        currentRow++;
+        ri = addRow_(totalRow);
+        for (let c = 0; c < totalCols; c++) { bgs[ri][c] = '#FFF9C4'; fws[ri][c] = 'bold'; }
+        for (let d = 1; d <= daysInMonth; d++) has[ri][2 + d] = 'center';
+        has[ri][totalCols - 1] = 'center';
+        // ブロック先頭の会社名・現場名セル: 太字＋縦中央、複数人なら縦結合
+        if (activeNames.length > 1) blockMerges.push({ row: blockStartRi + 1, numRows: activeNames.length });
+        fws[blockStartRi][0] = 'bold'; vas[blockStartRi][0] = 'middle';
+        fws[blockStartRi][1] = 'bold'; vas[blockStartRi][1] = 'middle';
+        addRow_([]); // ブロック間の空行
       });
     });
-    currentRow++;
+    addRow_([]); // 月間の空行
   });
+
+  if (rows.length > 0) {
+    const n = rows.length;
+    const rng = sheet.getRange(1, 1, n, W);
+    rng.setValues(rows);
+    rng.setBackgrounds(bgs);
+    rng.setFontColors(fcs);
+    rng.setHorizontalAlignments(has);
+    rng.setFontWeights(fws);
+    rng.setWraps(wraps);
+    rng.setVerticalAlignments(vas);
+    // 日付＋合計列の数値書式（テキストのヘッダー/タイトル行に掛かっても表示は変わらない）
+    sheet.getRange(1, 4, n, W - 3).setNumberFormat('0.##');
+    titleMerges.forEach(m => sheet.getRange(m.row, 1, 1, m.cols).merge().setFontSize(12));
+    blockMerges.forEach(m => { sheet.getRange(m.row, 1, m.numRows, 1).merge(); sheet.getRange(m.row, 2, m.numRows, 1).merge(); });
+    sheet.getRange(1, 1, n, W).setBorder(true, true, true, true, true, true, '#DDDDDD', SpreadsheetApp.BorderStyle.SOLID);
+  }
   sheet.setColumnWidth(1, 140); sheet.setColumnWidth(2, 180); sheet.setColumnWidth(3, 80);
-  const maxCols = sheet.getMaxColumns();
-  for (let c = 4; c <= Math.min(maxCols, 35); c++) sheet.setColumnWidth(c, 26);
-  if (maxCols >= 36) sheet.setColumnWidth(Math.min(maxCols, 36), 50);
-  if (currentRow > 1) { const borderCols = Math.min(maxCols, 35); sheet.getRange(1, 1, currentRow - 1, borderCols).setBorder(true, true, true, true, true, true, '#DDDDDD', SpreadsheetApp.BorderStyle.SOLID); }
+  sheet.setColumnWidths(4, W - 3, 26);
+  if (sheet.getMaxColumns() >= 36) sheet.setColumnWidth(36, 50);
 }
 
 // 元請別請求集計の「フィルタ用」シート（フラット構造）
@@ -2107,9 +2198,16 @@ function generateBillingFilterSheet_(ss, records) {
   // 一括書き込み
   sheet.getRange(1, 1, rows.length, 36).setValues(rows);
 
-  // ヘッダー書式
-  sheet.getRange(1, 1, 1, 36)
-    .setFontWeight('bold').setBackground('#E8F4FD').setHorizontalAlignment('center');
+  // ヘッダー＋合計行の背景・太字は全行グリッドで一括適用（以前は合計行ごとに2通信だった）
+  {
+    const n = rows.length;
+    const bgsF = [], fwsF = [];
+    for (let i = 0; i < n; i++) { bgsF.push(new Array(36).fill('#FFFFFF')); fwsF.push(new Array(36).fill('normal')); }
+    for (let c = 0; c < 36; c++) { bgsF[0][c] = '#E8F4FD'; fwsF[0][c] = 'bold'; }
+    totalRowIndices.forEach(r => { for (let c = 0; c < 36; c++) { bgsF[r - 1][c] = '#FFF9C4'; fwsF[r - 1][c] = 'bold'; } });
+    sheet.getRange(1, 1, n, 36).setBackgrounds(bgsF).setFontWeights(fwsF);
+  }
+  sheet.getRange(1, 1, 1, 36).setHorizontalAlignment('center');
 
   // 月列をテキスト書式（Excel での日付シリアル化防止）
   sheet.getRange(2, 1, rows.length - 1, 1).setNumberFormat('@');
@@ -2117,17 +2215,12 @@ function generateBillingFilterSheet_(ss, records) {
   // 日付列・合計列の数値書式（0は非表示）
   sheet.getRange(2, 5, rows.length - 1, 32).setNumberFormat('0.0;-0.0;').setHorizontalAlignment('center');
 
-  // 合計行のハイライト
-  totalRowIndices.forEach(r => {
-    sheet.getRange(r, 1, 1, 36).setBackground('#FFF9C4').setFontWeight('bold');
-  });
-
   // 列幅
   sheet.setColumnWidth(1, 80);    // 月
   sheet.setColumnWidth(2, 150);   // 会社名
   sheet.setColumnWidth(3, 220);   // 現場名
   sheet.setColumnWidth(4, 70);    // 名前
-  for (let c = 5; c <= 35; c++) sheet.setColumnWidth(c, 32);  // 1〜31日
+  sheet.setColumnWidths(5, 31, 32);  // 1〜31日
   sheet.setColumnWidth(36, 60);   // 合計
 
   // フリーズ（1行＋4列）
@@ -2377,14 +2470,23 @@ function generateDivisionAllocation_(ss, records) {
   if (rows.length > 0) {
     ensureColumns_(sheet, numCols);
     sheet.getRange(1, 1, rows.length, numCols).setValues(rows);
-    formats.forEach(f => {
-      const range = sheet.getRange(f.row, 1, 1, numCols);
-      if (f.type === 'title') sheet.getRange(f.row, 1).setFontSize(14).setFontWeight('bold');
-      else if (f.type === 'section_total') { range.setBackground('#E8F5E9'); sheet.getRange(f.row, 1).setFontSize(12).setFontWeight('bold'); }
-      else if (f.type === 'section_month') { range.setBackground('#E3F2FD'); sheet.getRange(f.row, 1).setFontSize(12).setFontWeight('bold'); }
-      else if (f.type === 'header') range.setFontWeight('bold').setBackground('#F5F5F5').setHorizontalAlignment('center');
-      else if (f.type === 'total') range.setFontWeight('bold').setBackground('#FFF9C4');
-    });
+    // 書式は行×列グリッドで一括適用（以前は1行ずつ setBackground/setFontWeight を呼んでいた）
+    {
+      const n = rows.length;
+      const bgsA = [], fwsA = [], hasA = [];
+      for (let i = 0; i < n; i++) { bgsA.push(new Array(numCols).fill('#FFFFFF')); fwsA.push(new Array(numCols).fill('normal')); hasA.push(new Array(numCols).fill('left')); }
+      const fontSizes = [];
+      formats.forEach(f => {
+        const ri = f.row - 1;
+        if (f.type === 'title') { fwsA[ri][0] = 'bold'; fontSizes.push({ row: f.row, size: 14 }); }
+        else if (f.type === 'section_total') { for (let c = 0; c < numCols; c++) bgsA[ri][c] = '#E8F5E9'; fwsA[ri][0] = 'bold'; fontSizes.push({ row: f.row, size: 12 }); }
+        else if (f.type === 'section_month') { for (let c = 0; c < numCols; c++) bgsA[ri][c] = '#E3F2FD'; fwsA[ri][0] = 'bold'; fontSizes.push({ row: f.row, size: 12 }); }
+        else if (f.type === 'header') { for (let c = 0; c < numCols; c++) { bgsA[ri][c] = '#F5F5F5'; fwsA[ri][c] = 'bold'; hasA[ri][c] = 'center'; } }
+        else if (f.type === 'total') { for (let c = 0; c < numCols; c++) { bgsA[ri][c] = '#FFF9C4'; fwsA[ri][c] = 'bold'; } }
+      });
+      sheet.getRange(1, 1, n, numCols).setBackgrounds(bgsA).setFontWeights(fwsA).setHorizontalAlignments(hasA);
+      fontSizes.forEach(fs => sheet.getRange(fs.row, 1).setFontSize(fs.size));
+    }
     // 金額列に通貨書式
     const dataStartRow = 3;
     const dataEndRow = rows.length;
@@ -2410,10 +2512,10 @@ function generateDivisionAllocation_(ss, records) {
   sheet.setColumnWidth(2, 140);
   sheet.setColumnWidth(3, 160);
   sheet.setColumnWidth(4, 110);
-  for (let c = 5; c < 5 + divs.length; c++) sheet.setColumnWidth(c, 70);
+  sheet.setColumnWidths(5, divs.length, 70);
   sheet.setColumnWidth(5 + divs.length, 80);
-  for (let c = 6 + divs.length; c < 6 + divs.length * 2; c++) sheet.setColumnWidth(c, 60);
-  for (let c = 6 + divs.length * 2; c < 6 + divs.length * 3; c++) sheet.setColumnWidth(c, 90);
+  sheet.setColumnWidths(6 + divs.length, divs.length, 60);
+  sheet.setColumnWidths(6 + divs.length * 2, divs.length, 90);
   sheet.setColumnWidth(6 + divs.length * 3, 100);
   sheet.setColumnWidth(7 + divs.length * 3, 100);
   sheet.setColumnWidth(8 + divs.length * 3, 70);
