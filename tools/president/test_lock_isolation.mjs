@@ -289,6 +289,14 @@ test('pres_update appends a new snapshot and pres_list returns only the latest o
   const matches = listed.rows.filter(row => row.ID === 'P_EXISTING');
   assert.equal(matches.length, 1);
   assert.equal(matches[0].タイトル, 'テスト予定');
+  assert.equal(matches[0].登録日時, EXISTING_ROW[0]);
+});
+
+test('pres_add uses a UUID-based opaque ID', () => {
+  const app = loadGas();
+  const body = post(app, payloadFor('pres_add'));
+  assert.equal(body.status, 'ok');
+  assert.equal(body.id, 'P00000000000040008000000000000000');
 });
 
 test('a busy president write lock returns the existing retryable error', () => {

@@ -4,7 +4,7 @@
 
 **Goal:** 社長予定のWeb通信を日報・集計の長時間ロックから分離し、朝6時・夜21時のLINE通知契約を変えずに読み込み・保存失敗を解消する。
 
-**Architecture:** `doPost(e)` で認証とaction判定を先に行い、`pres_*` だけを専用ハンドラーへ早期分岐する。`pres_list` はロックなしの読み取り、3つの書き込みは同一Googleユーザー内で `getUserLock()` により直列化し、日報系は既存の `getScriptLock()` を維持する。異なるGoogleユーザー間の競合は追記履歴で扱い、更新は同じIDの最新スナップショット、削除は同じIDの削除印を追記する。一覧は最新内容へ集約し、削除印があるIDを除外する。
+**Architecture:** `doPost(e)` で認証とaction判定を先に行い、`pres_*` だけを専用ハンドラーへ早期分岐する。`pres_list` はロックなしの読み取り、3つの書き込みは同一Googleユーザー内で `getUserLock()` により直列化し、日報系は既存の `getScriptLock()` を維持する。異なるGoogleユーザー間の競合は追記履歴で扱い、更新は登録日時を維持した同じIDの最新スナップショット、削除は同じIDの削除印を追記する。一覧は最新内容へ集約し、削除印があるIDを除外する。新規IDはUUIDで生成する。
 
 **Tech Stack:** Google Apps Script JavaScript、Google Sheets、Node.js built-in `node:test` / `node:vm`、clasp。
 
@@ -176,7 +176,7 @@ try {
 
 - [ ] **Step 5: 更新・削除を追記履歴として競合安全にする**
 
-`pres_update` は同じIDの最新スナップショットを追記し、`pres_delete` は同じIDの削除印を追記する。`pres_list` はIDごとに最新1件へ集約し、削除印があるIDを除外する。削除前に読み取られた同じIDの更新が削除後に書かれても、削除印が優先されて予定が復活しないことを回帰テストで確認する。
+`pres_update` は元の登録日時を引き継いだ同じIDの最新スナップショットを追記し、`pres_delete` は同じIDの削除印を追記する。`pres_list` はIDごとに最新1件へ集約し、削除印があるIDを除外する。削除前に読み取られた同じIDの更新が削除後に書かれても、削除印が優先されて予定が復活しないことを回帰テストで確認する。`pres_add` はUUIDベースのIDを使い、同時追加のID衝突を防ぐ。
 
 - [ ] **Step 6: GREENを確認する**
 

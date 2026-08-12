@@ -194,7 +194,7 @@ function handlePresidentAction_(body, action, updatedBy) {
 
     if (action === 'pres_add') {
       const ev = body.event || {};
-      const id = 'P' + new Date().getTime() + '_' + Math.floor(Math.random() * 10000);
+      const id = 'P' + Utilities.getUuid().replace(/-/g, '');
       presSheet.appendRow([
         new Date(),
         String(ev.title || ''),
@@ -220,18 +220,20 @@ function handlePresidentAction_(body, action, updatedBy) {
       const idCol = PRES_HEADERS.indexOf('ID');
       const categoryCol = PRES_HEADERS.indexOf('カテゴリ');
       let found = false;
+      let registeredAt = null;
       for (let i = 1; i < data.length; i++) {
         if (String(data[i][idCol]) === id) {
           if (String(data[i][categoryCol] || '') === PRES_DELETE_MARKER) {
             return error('対象が見つかりませんでした');
           }
+          if (!found) registeredAt = data[i][0] || new Date();
           found = true;
         }
       }
       if (!found) return error('対象が見つかりませんでした');
       // 更新を追記履歴にすることで、異なるユーザーの同時更新でも別行を上書きしない。
       presSheet.appendRow([
-        new Date(),
+        registeredAt,
         String(ev.title || ''),
         String(ev.startDate || ''),
         String(ev.startTime || ''),
