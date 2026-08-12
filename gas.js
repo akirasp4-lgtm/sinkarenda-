@@ -136,7 +136,8 @@ function serializePresidentRows_(sheet) {
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) return [];
   const tz = Session.getScriptTimeZone();
-  return data.slice(1).map(r => {
+  const idCol = PRES_HEADERS.indexOf('ID');
+  return data.slice(1).filter(r => String(r[idCol] || '').trim()).map(r => {
     const obj = {};
     PRES_HEADERS.forEach((h, j) => {
       const v = r[j];
@@ -232,7 +233,9 @@ function handlePresidentAction_(body, action, updatedBy) {
       const idCol = PRES_HEADERS.indexOf('ID');
       for (let i = data.length - 1; i >= 1; i--) {
         if (String(data[i][idCol]) === id) {
-          presSheet.deleteRow(i + 1);
+          // 行を削除すると、別ユーザーの同時更新が保持している行番号がずれて
+          // 無関係な予定を上書きし得る。内容だけを消し、一覧では空ID行を除外する。
+          presSheet.getRange(i + 1, 1, 1, PRES_HEADERS.length).clearContent();
           return ok({deleted: id});
         }
       }

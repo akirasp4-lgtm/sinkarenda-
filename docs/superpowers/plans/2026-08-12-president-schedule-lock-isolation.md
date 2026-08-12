@@ -4,7 +4,7 @@
 
 **Goal:** 社長予定のWeb通信を日報・集計の長時間ロックから分離し、朝6時・夜21時のLINE通知契約を変えずに読み込み・保存失敗を解消する。
 
-**Architecture:** `doPost(e)` で認証とaction判定を先に行い、`pres_*` だけを専用ハンドラーへ早期分岐する。`pres_list` はロックなしの読み取り、3つの書き込みは `getUserLock()` で直列化し、日報系は既存の `getScriptLock()` を維持する。
+**Architecture:** `doPost(e)` で認証とaction判定を先に行い、`pres_*` だけを専用ハンドラーへ早期分岐する。`pres_list` はロックなしの読み取り、3つの書き込みは同一Googleユーザー内で `getUserLock()` により直列化し、日報系は既存の `getScriptLock()` を維持する。異なるGoogleユーザー間の競合でも行ずれを起こさないよう、削除は12列のクリアとして実装し、一覧ではIDが空の行を除外する。
 
 **Tech Stack:** Google Apps Script JavaScript、Google Sheets、Node.js built-in `node:test` / `node:vm`、clasp。
 
@@ -31,7 +31,7 @@
 
 - [ ] **Step 1: Node VM上にGAS実行環境を作る**
 
-`gas.js` 本体を `vm.runInContext` で実行し、外部サービスだけをインメモリ実装に差し替える。Fake Sheetは実際の12列と1件の社長予定を持ち、`appendRow` / `setValues` / `deleteRow` を実データへ反映する。
+`gas.js` 本体を `vm.runInContext` で実行し、外部サービスだけをインメモリ実装に差し替える。Fake Sheetは実際の12列と複数件の社長予定を持ち、`appendRow` / `setValues` / `clearContent` を実データへ反映する。
 
 ```js
 const context = vm.createContext({
@@ -174,13 +174,17 @@ try {
 
 同じ処理が二重に残らないよう、旧751〜846行相当を削除する。他のaction分岐は変更しない。
 
-- [ ] **Step 5: GREENを確認する**
+- [ ] **Step 5: 削除で行番号を動かさない**
+
+`pres_delete` は対象行を物理削除せず、12列を `clearContent()` する。`pres_list` はIDが空の行を除外する。削除と別予定の更新が異なるGoogleユーザーから同時に走っても、更新対象の行番号が別予定へずれないことを回帰テストで確認する。
+
+- [ ] **Step 6: GREENを確認する**
 
 Run: `node --test tools/president/test_lock_isolation.mjs`
 
 Expected: 全テストPASS。
 
-- [ ] **Step 6: 実装をコミットする**
+- [ ] **Step 7: 実装をコミットする**
 
 ```powershell
 git add -- gas.js
@@ -292,4 +296,3 @@ Expected: URL不変で新バージョン作成成功。
 Run: `git status --short --branch`
 
 Expected: 今回のコミット済みファイル以外は、作業開始前からの利用者変更だけが残る。
-

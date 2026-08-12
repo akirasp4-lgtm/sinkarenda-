@@ -17,6 +17,12 @@ const EXISTING_ROW = [
   'P_EXISTING', 'Ryo',
 ];
 
+const SECOND_ROW = [
+  '2026-08-12 12:00:00', '後続予定', '2026-08-13', '13:00',
+  '2026-08-13', '14:00', '応接室', '行ずれ確認用', '会議', '#36c',
+  'P_SECOND', 'Ryo',
+];
+
 function cloneRows(rows) {
   return rows.map(row => [...row]);
 }
@@ -53,6 +59,17 @@ class FakeRange {
       const target = this.sheet.rows[this.row - 1 + r];
       for (let c = 0; c < this.numColumns; c++) {
         target[this.column - 1 + c] = values[r][c];
+      }
+    }
+    return this;
+  }
+
+  clearContent() {
+    for (let r = 0; r < this.numRows; r++) {
+      while (this.sheet.rows.length < this.row + r) this.sheet.rows.push([]);
+      const target = this.sheet.rows[this.row - 1 + r];
+      for (let c = 0; c < this.numColumns; c++) {
+        target[this.column - 1 + c] = '';
       }
     }
     return this;
@@ -134,7 +151,7 @@ function loadGas({
   if (presidentSheetExists) {
     sheets.set('社長予定', new FakeSheet(
       '社長予定',
-      [PRES_HEADERS, EXISTING_ROW],
+      [PRES_HEADERS, EXISTING_ROW, SECOND_ROW],
       metrics,
     ));
   }
@@ -268,6 +285,20 @@ test('a busy president write lock returns the existing retryable error', () => {
   assert.match(body.message, /数秒待って/);
   assert.equal(app.metrics.scriptTry, 0);
   assert.equal(app.metrics.userTry, 1);
+});
+
+test('pres_delete leaves a tombstone so another president row cannot shift under a concurrent update', () => {
+  const app = loadGas();
+  const body = post(app, payloadFor('pres_delete'));
+  const sheet = app.sheets.get('社長予定');
+
+  assert.equal(body.status, 'ok');
+  assert.equal(sheet.rows.length, 3);
+  assert.deepEqual(sheet.rows[1].slice(0, PRES_HEADERS.length), Array(PRES_HEADERS.length).fill(''));
+  assert.equal(sheet.rows[2][PRES_HEADERS.indexOf('ID')], 'P_SECOND');
+
+  const listed = post(app, { action: 'pres_list', pin: '1203' });
+  assert.deepEqual(listed.rows.map(row => row.ID), ['P_SECOND']);
 });
 
 test('daily-report actions remain protected by the script lock', () => {
