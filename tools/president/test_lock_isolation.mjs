@@ -278,6 +278,19 @@ for (const action of ['pres_add', 'pres_update', 'pres_delete']) {
   });
 }
 
+test('pres_update appends a new snapshot and pres_list returns only the latest one', () => {
+  const app = loadGas();
+  const sheet = app.sheets.get('社長予定');
+
+  assert.equal(post(app, payloadFor('pres_update')).status, 'ok');
+  assert.equal(sheet.rows.length, 4);
+
+  const listed = post(app, { action: 'pres_list', pin: '1203' });
+  const matches = listed.rows.filter(row => row.ID === 'P_EXISTING');
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].タイトル, 'テスト予定');
+});
+
 test('a busy president write lock returns the existing retryable error', () => {
   const app = loadGas({ userLockAvailable: false });
   const body = post(app, payloadFor('pres_add'));
@@ -293,9 +306,25 @@ test('pres_delete leaves a tombstone so another president row cannot shift under
   const sheet = app.sheets.get('社長予定');
 
   assert.equal(body.status, 'ok');
-  assert.equal(sheet.rows.length, 3);
-  assert.deepEqual(sheet.rows[1].slice(0, PRES_HEADERS.length), Array(PRES_HEADERS.length).fill(''));
+  assert.equal(sheet.rows.length, 4);
+  assert.equal(sheet.rows[3][PRES_HEADERS.indexOf('ID')], 'P_EXISTING');
+  assert.equal(sheet.rows[3][PRES_HEADERS.indexOf('カテゴリ')], '__PRES_DELETED__');
   assert.equal(sheet.rows[2][PRES_HEADERS.indexOf('ID')], 'P_SECOND');
+
+  const listed = post(app, { action: 'pres_list', pin: '1203' });
+  assert.deepEqual(listed.rows.map(row => row.ID), ['P_SECOND']);
+  assert.equal(post(app, payloadFor('pres_update')).status, 'error');
+});
+
+test('a delete tombstone wins over a stale same-ID update that commits later', () => {
+  const app = loadGas();
+  const sheet = app.sheets.get('社長予定');
+  const staleUpdate = [...EXISTING_ROW];
+  staleUpdate[PRES_HEADERS.indexOf('タイトル')] = '削除と競合した古い更新';
+
+  assert.equal(post(app, payloadFor('pres_delete')).status, 'ok');
+  // 別ユーザーの更新が削除前に読み取った内容を、削除後に書く競合を再現する。
+  sheet.appendRow(staleUpdate);
 
   const listed = post(app, { action: 'pres_list', pin: '1203' });
   assert.deepEqual(listed.rows.map(row => row.ID), ['P_SECOND']);

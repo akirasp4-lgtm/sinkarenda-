@@ -22,6 +22,7 @@ const GROWISE = 'グローライズ';
 const PRES_SHEET = '社長予定';
 const PRES_HEADERS = ['登録日時','タイトル','開始日','開始時刻','終了日','終了時刻','場所','メモ','カテゴリ','色','ID','更新者'];
 const PRES_PIN = '1203';
+const PRES_DELETE_MARKER = '__PRES_DELETED__';
 
 // ==============================================================
 // 車両予約シート（LINEボット連携用 - GR社内秘書ボットから書き込み）
@@ -137,7 +138,20 @@ function serializePresidentRows_(sheet) {
   if (data.length <= 1) return [];
   const tz = Session.getScriptTimeZone();
   const idCol = PRES_HEADERS.indexOf('ID');
-  return data.slice(1).filter(r => String(r[idCol] || '').trim()).map(r => {
+  const categoryCol = PRES_HEADERS.indexOf('カテゴリ');
+  const rows = data.slice(1);
+  const deletedIds = new Set();
+  rows.forEach(r => {
+    const id = String(r[idCol] || '').trim();
+    if (id && String(r[categoryCol] || '') === PRES_DELETE_MARKER) deletedIds.add(id);
+  });
+  const latestById = new Map();
+  rows.forEach(r => {
+    const id = String(r[idCol] || '').trim();
+    if (!id || deletedIds.has(id)) return;
+    latestById.set(id, r);
+  });
+  return Array.from(latestById.values()).map(r => {
     const obj = {};
     PRES_HEADERS.forEach((h, j) => {
       const v = r[j];
@@ -169,7 +183,7 @@ function handlePresidentAction_(body, action, updatedBy) {
     }
   }
 
-  // 社長予定同士の同時更新だけを直列化し、日報・集計とは待ち合わせない。
+  // 同一Googleユーザーの書き込みを直列化し、日報・集計とは待ち合わせない。
   const lock = LockService.getUserLock();
   if (!lock.tryLock(10000)) {
     return error('現在他の人が更新中です。数秒待ってから再度お試しください。');
@@ -204,26 +218,33 @@ function handlePresidentAction_(body, action, updatedBy) {
       if (!id) return error('IDが指定されていません');
       const data = presSheet.getDataRange().getValues();
       const idCol = PRES_HEADERS.indexOf('ID');
+      const categoryCol = PRES_HEADERS.indexOf('カテゴリ');
+      let found = false;
       for (let i = 1; i < data.length; i++) {
         if (String(data[i][idCol]) === id) {
-          presSheet.getRange(i + 1, 1, 1, PRES_HEADERS.length).setValues([[
-            data[i][0] instanceof Date ? data[i][0] : new Date(),
-            String(ev.title || ''),
-            String(ev.startDate || ''),
-            String(ev.startTime || ''),
-            String(ev.endDate || ev.startDate || ''),
-            String(ev.endTime || ''),
-            String(ev.location || ''),
-            String(ev.memo || ''),
-            String(ev.category || ''),
-            String(ev.color || '#1D9E75'),
-            id,
-            updatedBy
-          ]]);
-          return ok({updated: id});
+          if (String(data[i][categoryCol] || '') === PRES_DELETE_MARKER) {
+            return error('対象が見つかりませんでした');
+          }
+          found = true;
         }
       }
-      return error('対象が見つかりませんでした');
+      if (!found) return error('対象が見つかりませんでした');
+      // 更新を追記履歴にすることで、異なるユーザーの同時更新でも別行を上書きしない。
+      presSheet.appendRow([
+        new Date(),
+        String(ev.title || ''),
+        String(ev.startDate || ''),
+        String(ev.startTime || ''),
+        String(ev.endDate || ev.startDate || ''),
+        String(ev.endTime || ''),
+        String(ev.location || ''),
+        String(ev.memo || ''),
+        String(ev.category || ''),
+        String(ev.color || '#1D9E75'),
+        id,
+        updatedBy
+      ]);
+      return ok({updated: id});
     }
 
     if (action === 'pres_delete') {
@@ -231,15 +252,22 @@ function handlePresidentAction_(body, action, updatedBy) {
       if (!id) return error('IDが指定されていません');
       const data = presSheet.getDataRange().getValues();
       const idCol = PRES_HEADERS.indexOf('ID');
-      for (let i = data.length - 1; i >= 1; i--) {
+      const categoryCol = PRES_HEADERS.indexOf('カテゴリ');
+      let found = false;
+      for (let i = 1; i < data.length; i++) {
         if (String(data[i][idCol]) === id) {
-          // 行を削除すると、別ユーザーの同時更新が保持している行番号がずれて
-          // 無関係な予定を上書きし得る。内容だけを消し、一覧では空ID行を除外する。
-          presSheet.getRange(i + 1, 1, 1, PRES_HEADERS.length).clearContent();
-          return ok({deleted: id});
+          if (String(data[i][categoryCol] || '') === PRES_DELETE_MARKER) {
+            return error('対象が見つかりませんでした');
+          }
+          found = true;
         }
       }
-      return error('対象が見つかりませんでした');
+      if (!found) return error('対象が見つかりませんでした');
+      // 削除印は同じIDへの遅延更新より常に優先し、削除済み予定の復活を防ぐ。
+      presSheet.appendRow([
+        new Date(), '', '', '', '', '', '', '', PRES_DELETE_MARKER, '', id, updatedBy
+      ]);
+      return ok({deleted: id});
     }
 
     return error('未対応のアクションです');
