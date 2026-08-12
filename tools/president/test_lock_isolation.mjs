@@ -192,6 +192,7 @@ function loadGas({
     LockService: {
       getScriptLock: () => scriptLock,
       getUserLock: () => userLock,
+      getDocumentLock: () => null,
     },
     SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet },
     PropertiesService: {
@@ -338,11 +339,10 @@ test('a delete tombstone wins over a stale same-ID update that commits later', (
   assert.deepEqual(listed.rows.map(row => row.ID), ['P_SECOND']);
 });
 
-test('daily-report actions remain protected by the script lock', () => {
-  const app = loadGas({ scriptLockAvailable: false });
-  const body = post(app, { action: 'add', rows: [] });
-  assert.equal(body.status, 'error');
-  assert.match(body.message, /数秒待って/);
+test('employee schedule mutations bypass a busy admin-operation user lock', () => {
+  const app = loadGas({ userLockAvailable: false });
+  const body = post(app, { action: 'delete', ids: [] });
+  assert.equal(body.status, 'ok');
   assert.equal(app.metrics.scriptTry, 1);
   assert.equal(app.metrics.userTry, 0);
 });

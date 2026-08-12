@@ -1247,6 +1247,8 @@ function lockScreen(){
 
 // ===== アプリ変数 =====
 let currentCompany='全社';
+let dataLoadSeq=0;
+let dataLoadOk=false;
 let allNippos=[];
 let allMembers=[];
 let allGenbaMaster=[];
@@ -1444,10 +1446,12 @@ function initCompanyBar(){
 
 function switchCompany(c){
   currentCompany=c;
+  dataLoadOk=false;
   selectedMembers=[];editSelectedMembers=[];
   initCompanyBar();initMemberUI();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();updateNoticeBar();
   refreshVehicleSelect('s');
   if(typeof renderVehicleWeek==='function'){renderVehicleWeek();renderVehicleList();}
+  loadData();
 }
 
 function updateNoticeBar(){
@@ -1859,10 +1863,15 @@ function generateGhosts(nippos){
 }
 
 async function loadData(){
-  setLoading(true);
+  const requestSeq=++dataLoadSeq;
+  const requestCompany=currentCompany;
+  setLoading(true);dataLoadOk=false;
   try{
-    const res=await fetch(GAS_URL+'?t='+Date.now());
+    const companyParam=requestCompany&&requestCompany!=='全社'?requestCompany:'';
+    const res=await fetch(GAS_URL+'?t='+Date.now()+'&company='+encodeURIComponent(companyParam));
     const json=await res.json();
+    if(requestSeq!==dataLoadSeq||requestCompany!==currentCompany)return;
+    if(json.status!=='ok')throw new Error(json.message||'予定データの取得に失敗しました');
     allNippos=parseRows(json.rows,'');
     allNippos=allNippos.concat(generateGhosts(allNippos));
     if(json.members)allMembers=json.members;
@@ -1872,8 +1881,16 @@ async function loadData(){
     }
     if(json.jobsites)allJobsites=json.jobsites;
     initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();updateLocationSuggestions();refreshVehicleSelect('s');
-  }catch(e){console.error(e);}
-  setLoading(false);
+    dataLoadOk=true;
+  }catch(e){
+    if(requestSeq!==dataLoadSeq||requestCompany!==currentCompany)return;
+    console.error(e);dataLoadOk=false;
+    allNippos=[];allMembers=[];allGenbaMaster=[];allJobsites=[];
+    initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();
+    showAlert('読込エラー：'+e.message+'（再度「更新」を押してください）','err');
+  }finally{
+    if(requestSeq===dataLoadSeq)setLoading(false);
+  }
 }
 
 // ===== 現場名サジェスト =====
@@ -2050,6 +2067,7 @@ function getDateRange(startStr,endStr){
 }
 async function submitNippo(){
   if(isSubmitting)return;
+  if(!dataLoadOk){showAlert('最新データを読み込めていないため登録できません。「更新」を押してください','err');return;}
   if(currentCompany==='全社'){showAlert('会社を選択してから登録してください','err');return;}
   const operator=document.getElementById('s-operator').value;if(!operator){showAlert('操作者を選択してください','err');return;}
   const dateStart=document.getElementById('s-date').value;const dateEnd=document.getElementById('s-date-end').value;
@@ -2598,6 +2616,7 @@ function closeEditModal(){document.getElementById('edit-modal').classList.remove
 function getDisplayedGroups(){return groupNippos(filteredNippos()).filter(g=>g.date.startsWith(listMonth));}
 async function saveEdit(){
   const btn=document.getElementById('save-edit-btn');if(btn.disabled)return;
+  if(!dataLoadOk){showAlert('最新データを読み込めていないため保存できません。「更新」を押してください','err');return;}
   const genba=getGenbaValue('e');const loc=document.getElementById('e-location').value.trim();
   const start=document.getElementById('e-start').value;const end=document.getElementById('e-end').value;
   const kosu=1.0;const memo=document.getElementById('e-memo').value;

@@ -280,6 +280,129 @@ function handlePresidentAction_(body, action, updatedBy) {
   }
 }
 
+function getDailyDataLock_() {
+  // Webアプリでは DocumentLock は null、UserLock は利用者ごとになる。
+  // ScriptLock だけが実行ユーザーをまたいで共有されるため、日報データの
+  // 短い読書き専用に使う。長時間の集計・帳票処理はこのロックを保持しない。
+  return LockService.getScriptLock();
+}
+
+function isEmployeeScheduleMutation_(action) {
+  return action === 'add' || action === 'update' || action === 'delete';
+}
+
+function isAdminDailyMutation_(action) {
+  return action === 'archive'
+      || action === 'cleanup_orphan_jobnos'
+      || action === 'merge_genba'
+      || action === 'merge_loc'
+      || action === 'reassign_jobno';
+}
+
+// 読み取り専用。集計・帳票の管理ロックを待たず、予定更新とだけ直列化する。
+function handleGetSheet_(body) {
+  const dataLock = getDailyDataLock_();
+  if (!dataLock.tryLock(10000)) {
+    return error('現在予定を更新中です。数秒待ってから再度お試しください。');
+  }
+  try {
+  const sheetName = body.sheet || '';
+  const allowed = [SHEET_NAME, ARCHIVE_SHEET, MEMBER_SHEET, GENBA_MASTER_SHEET, JOBSITE_SHEET, SUMMARY_COMPANY, SUMMARY_MONTH, KAKUNIN_SHEET, BILLING_SHEET, BILLING_FILTER_SHEET, ALLOCATION_SHEET, OPLOG_SHEET];
+  if (!allowed.includes(sheetName)) return error('無効なシート名です');
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const targetSheet = ss.getSheetByName(sheetName);
+  if (!targetSheet) return error('シートが見つかりません: ' + sheetName);
+  const data = targetSheet.getDataRange().getValues();
+  const tz = Session.getScriptTimeZone();
+  // 期間フィルタ（任意）: 日報データ・アーカイブのみ作業日列で絞り込む
+  // dateFrom/dateTo は 'YYYY-MM-DD' 形式の文字列、両端含む
+  const dateFrom = String(body.dateFrom || '').trim();
+  const dateTo = String(body.dateTo || '').trim();
+  let filtered = data;
+  if ((dateFrom || dateTo) && (sheetName === SHEET_NAME || sheetName === ARCHIVE_SHEET) && data.length > 1) {
+    const headers = data[0];
+    const dateColIdx = headers.indexOf('作業日');
+    if (dateColIdx >= 0) {
+      const head = [data[0]];
+      const bodyRows = data.slice(1).filter(row => {
+        const v = row[dateColIdx];
+        const d = v instanceof Date
+          ? Utilities.formatDate(v, tz, 'yyyy-MM-dd')
+          : String(v || '').slice(0, 10);
+        if (dateFrom && d < dateFrom) return false;
+        if (dateTo && d > dateTo) return false;
+        return true;
+      });
+      filtered = head.concat(bodyRows);
+    }
+  }
+  const formatted = filtered.map(row => row.map(v => {
+    if (v instanceof Date) return Utilities.formatDate(v, tz, 'yyyy-MM-dd HH:mm:ss');
+    return v;
+  }));
+    return ok({sheetName, data: formatted});
+  } catch (err) {
+    return error(err.toString());
+  } finally {
+    dataLock.releaseLock();
+  }
+}
+
+function requireDailyRows_(body) {
+  if (!body || !Array.isArray(body.rows) || body.rows.length === 0) {
+    throw new Error('登録する予定データがありません');
+  }
+  return body.rows;
+}
+
+function buildDailyValues_(ss, rows, updatedBy) {
+  const jobNoCache = {};
+  let leaderDivision = null;
+  const leaderRow = rows.find(r => r.role === '代表');
+  const leaderName = leaderRow ? leaderRow.name : '';
+  return rows.map(row => {
+    let division = '';
+    let jobNo = '';
+    // 工番発行は「グローライズ × 倉庫/休み/予定 のいずれでもない」場合のみ
+    if (row.company === GROWISE && !row.souko && !row.yotei && !row.yasumi && row.workType === '現場作業') {
+      const explicitDiv = String(row.jobNoDivision || '').trim();
+      if (explicitDiv) {
+        division = explicitDiv;
+      } else {
+        if (leaderDivision === null) leaderDivision = getMemberDivision_(ss, leaderName);
+        division = leaderDivision;
+      }
+      if (row.genba && row.loc) {
+        const cacheKey = row.genba + '|||' + row.loc;
+        if (!jobNoCache[cacheKey]) {
+          jobNoCache[cacheKey] = getOrGenerateJobNo_(ss, row.genba, row.loc, division);
+        }
+        jobNo = jobNoCache[cacheKey];
+      }
+    }
+    return [
+      new Date().toLocaleString('ja-JP'),
+      row.date, row.genba, row.loc, row.name, row.role,
+      String(row.start || ''), String(row.end || ''),
+      Number(row.kosu), row.memo,
+      row.souko ? '倉庫' : row.yotei ? '予定' : row.yasumi ? '休み' : row.yakin ? '夜勤' : '',
+      row.company || '',
+      row.id || '',
+      row.updatedBy || updatedBy || '',
+      row.color || '',
+      division,
+      jobNo,
+      row.workType || '',
+      row.vehicle || ''
+    ];
+  });
+}
+
+function appendDailyValues_(sheet, values) {
+  if (!values.length) return;
+  sheet.getRange(sheet.getLastRow() + 1, 1, values.length, HEADERS.length).setValues(values);
+}
+
 function doPost(e) {
   let body;
   let action;
@@ -292,15 +415,31 @@ function doPost(e) {
     if (isPresidentAction_(action)) {
       return handlePresidentAction_(body, action, updatedBy);
     }
+    if (action === 'get_sheet') {
+      return handleGetSheet_(body);
+    }
   } catch (err) {
     return error(err.toString());
   }
 
-  const lock = LockService.getScriptLock();
+  const employeeMutation = isEmployeeScheduleMutation_(action);
+  // 社員の保存は全利用者共通の日報ロックだけを使う。管理処理は別の
+  // UserLock で直列化し、集計・帳票の長時間処理から社員保存を分離する。
+  const lock = employeeMutation ? getDailyDataLock_() : LockService.getUserLock();
   if (!lock.tryLock(10000)) {
-    return error('現在他の人が更新中です。数秒待ってから再度お試しください。');
+    return error(employeeMutation
+      ? '現在予定を更新中です。数秒待ってから再度お試しください。'
+      : '現在他の人が更新中です。数秒待ってから再度お試しください。');
   }
+  let dailyDataLock = null;
   try {
+    // アーカイブ・マージ等は管理ロックに加え、LINE読取と社員保存も止める。
+    if (!employeeMutation && isAdminDailyMutation_(action)) {
+      dailyDataLock = getDailyDataLock_();
+      if (!dailyDataLock.tryLock(10000)) {
+        return error('現在予定を更新中です。数秒待ってから再度お試しください。');
+      }
+    }
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(SHEET_NAME);
 
@@ -318,50 +457,11 @@ function doPost(e) {
     }
 
     if (action === 'add') {
-      const jobNoCache = {};
-      let leaderDivision = null;
-      const leaderRow = body.rows.find(r => r.role === '代表');
-      const leaderName = leaderRow ? leaderRow.name : '';
-      body.rows.forEach(row => {
-        let division = '';
-        let jobNo = '';
-        // 工番発行は「グローライズ × 倉庫/休み/予定 のいずれでもない」場合のみ（夜勤は通常の工番発行対象）
-        if (row.company === GROWISE && !row.souko && !row.yotei && !row.yasumi && row.workType === '現場作業') {
-          const explicitDiv = String(row.jobNoDivision || '').trim();
-          if (explicitDiv) {
-            division = explicitDiv;
-          } else {
-            if (leaderDivision === null) {
-              leaderDivision = getMemberDivision_(ss, leaderName);
-            }
-            division = leaderDivision;
-          }
-          if (row.genba && row.loc) {
-            const cacheKey = row.genba + '|||' + row.loc;
-            if (!jobNoCache[cacheKey]) {
-              jobNoCache[cacheKey] = getOrGenerateJobNo_(ss, row.genba, row.loc, division);
-            }
-            jobNo = jobNoCache[cacheKey];
-          }
-        }
-        sheet.appendRow([
-          new Date().toLocaleString('ja-JP'),
-          row.date, row.genba, row.loc, row.name, row.role,
-          String(row.start || ''), String(row.end || ''),
-          Number(row.kosu), row.memo,
-          row.souko ? '倉庫' : row.yotei ? '予定' : row.yasumi ? '休み' : row.yakin ? '夜勤' : '',
-          row.company || '',
-          row.id || '',
-          row.updatedBy || updatedBy || '',
-          row.color || '',
-          division,
-          jobNo,
-          row.workType || '',
-          row.vehicle || ''
-        ]);
-      });
-      logOperation_(ss, 'add', body.rows[0] && body.rows[0].genba + '/' + (body.rows[0].loc || ''), '行数=' + body.rows.length, updatedBy);
-      return ok({count: body.rows.length});
+      const rows = requireDailyRows_(body);
+      const values = buildDailyValues_(ss, rows, updatedBy);
+      appendDailyValues_(sheet, values);
+      logOperation_(ss, 'add', rows[0].genba + '/' + (rows[0].loc || ''), '行数=' + rows.length, updatedBy);
+      return ok({count: rows.length});
     }
 
     if (action === 'delete') {
@@ -379,60 +479,22 @@ function doPost(e) {
     }
 
     if (action === 'update') {
+      const rows = requireDailyRows_(body);
       const ids = body.ids || [];
+      const rowsToDelete = [];
       if (ids.length > 0) {
         const data = sheet.getDataRange().getValues();
-        const rowsToDelete = [];
         for (let i = data.length - 1; i >= 1; i--) {
           const rowId = String(data[i][idCol] || '').trim();
           if (rowId && ids.includes(rowId)) rowsToDelete.push(i + 1);
         }
-        rowsToDelete.forEach(rowNum => sheet.deleteRow(rowNum));
       }
-      const jobNoCache = {};
-      let leaderDivision = null;
-      const leaderRow = body.rows.find(r => r.role === '代表');
-      const leaderName = leaderRow ? leaderRow.name : '';
-      body.rows.forEach(row => {
-        let division = '';
-        let jobNo = '';
-        // 工番発行は「グローライズ × 倉庫/休み/予定 のいずれでもない」場合のみ（夜勤は通常の工番発行対象）
-        if (row.company === GROWISE && !row.souko && !row.yotei && !row.yasumi && row.workType === '現場作業') {
-          const explicitDiv = String(row.jobNoDivision || '').trim();
-          if (explicitDiv) {
-            division = explicitDiv;
-          } else {
-            if (leaderDivision === null) {
-              leaderDivision = getMemberDivision_(ss, leaderName);
-            }
-            division = leaderDivision;
-          }
-          if (row.genba && row.loc) {
-            const cacheKey = row.genba + '|||' + row.loc;
-            if (!jobNoCache[cacheKey]) {
-              jobNoCache[cacheKey] = getOrGenerateJobNo_(ss, row.genba, row.loc, division);
-            }
-            jobNo = jobNoCache[cacheKey];
-          }
-        }
-        sheet.appendRow([
-          new Date().toLocaleString('ja-JP'),
-          row.date, row.genba, row.loc, row.name, row.role,
-          String(row.start || ''), String(row.end || ''),
-          Number(row.kosu), row.memo,
-          row.souko ? '倉庫' : row.yotei ? '予定' : row.yasumi ? '休み' : row.yakin ? '夜勤' : '',
-          row.company || '',
-          row.id || '',
-          row.updatedBy || updatedBy || '',
-          row.color || '',
-          division,
-          jobNo,
-          row.workType || '',
-          row.vehicle || ''
-        ]);
-      });
-      logOperation_(ss, 'update', body.rows[0] && body.rows[0].genba + '/' + (body.rows[0].loc || ''), '行数=' + body.rows.length + ', 旧ID=' + (body.ids || []).length, updatedBy);
-      return ok({updated: body.rows.length});
+      const values = buildDailyValues_(ss, rows, updatedBy);
+      // 新しい予定を先に一括保存する。保存に失敗しても元予定は残る。
+      appendDailyValues_(sheet, values);
+      rowsToDelete.forEach(rowNum => sheet.deleteRow(rowNum));
+      logOperation_(ss, 'update', rows[0].genba + '/' + (rows[0].loc || ''), '行数=' + rows.length + ', 旧ID=' + ids.length, updatedBy);
+      return ok({updated: rows.length});
     }
 
     if (action === 'archive') {
@@ -526,43 +588,6 @@ function doPost(e) {
     if (action === 'summarize') {
       generateSummary_();
       return ok({message: '集計を更新しました'});
-    }
-
-    if (action === 'get_sheet') {
-      const sheetName = body.sheet || '';
-      const allowed = [SHEET_NAME, ARCHIVE_SHEET, MEMBER_SHEET, GENBA_MASTER_SHEET, JOBSITE_SHEET, SUMMARY_COMPANY, SUMMARY_MONTH, KAKUNIN_SHEET, BILLING_SHEET, BILLING_FILTER_SHEET, ALLOCATION_SHEET, OPLOG_SHEET];
-      if (!allowed.includes(sheetName)) return error('無効なシート名です');
-      const targetSheet = ss.getSheetByName(sheetName);
-      if (!targetSheet) return error('シートが見つかりません: ' + sheetName);
-      const data = targetSheet.getDataRange().getValues();
-      const tz = Session.getScriptTimeZone();
-      // 期間フィルタ（任意）: 日報データ・アーカイブのみ作業日列で絞り込む
-      // dateFrom/dateTo は 'YYYY-MM-DD' 形式の文字列、両端含む
-      const dateFrom = String(body.dateFrom || '').trim();
-      const dateTo = String(body.dateTo || '').trim();
-      let filtered = data;
-      if ((dateFrom || dateTo) && (sheetName === SHEET_NAME || sheetName === ARCHIVE_SHEET) && data.length > 1) {
-        const headers = data[0];
-        const dateColIdx = headers.indexOf('作業日');
-        if (dateColIdx >= 0) {
-          const head = [data[0]];
-          const body_ = data.slice(1).filter(row => {
-            const v = row[dateColIdx];
-            const d = v instanceof Date
-              ? Utilities.formatDate(v, tz, 'yyyy-MM-dd')
-              : String(v || '').slice(0, 10);
-            if (dateFrom && d < dateFrom) return false;
-            if (dateTo && d > dateTo) return false;
-            return true;
-          });
-          filtered = head.concat(body_);
-        }
-      }
-      const formatted = filtered.map(row => row.map(v => {
-        if (v instanceof Date) return Utilities.formatDate(v, tz, 'yyyy-MM-dd HH:mm:ss');
-        return v;
-      }));
-      return ok({sheetName, data: formatted});
     }
 
     // Phase 2: 期間指定の月別確認表風データを返す（シートには書かず、直接 CSV 用 2D 配列を返す）
@@ -1093,10 +1118,11 @@ function doPost(e) {
       return ok({removed: null});
     }
 
-    return ok({});
+    return error('無効な操作です: ' + action);
   } catch(err) {
     return error(err.toString());
   } finally {
+    if (dailyDataLock) dailyDataLock.releaseLock();
     lock.releaseLock();
   }
 }
@@ -1104,11 +1130,23 @@ function doPost(e) {
 function doGet(e) {
   try {
     if (!calAuthOk_(e && e.parameter && e.parameter.k)) return authError_();
+    const requestedCompany = String(e && e.parameter && e.parameter.company || '').trim();
+    const filterByCompany = requestedCompany && requestedCompany !== '全社';
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(SHEET_NAME);
     const tz = Session.getScriptTimeZone();
-    ensureHeaders_(sheet);
-    const data = sheet.getDataRange().getValues();
+    let data;
+    const snapshotLock = getDailyDataLock_();
+    if (!snapshotLock.tryLock(10000)) {
+      return error('現在予定を更新中です。数秒待ってから再度お試しください。');
+    }
+    try {
+      ensureHeaders_(sheet);
+      data = sheet.getDataRange().getValues();
+    } finally {
+      // 会社絞込みやマスタ読取の前に解放し、社員保存の待ち時間を最小化する。
+      snapshotLock.releaseLock();
+    }
     let rows = [];
     if (data.length > 1) {
       const headers = data[0];
@@ -1121,7 +1159,7 @@ function doGet(e) {
           else obj[h] = (v === undefined || v === null) ? '' : v;
         });
         return obj;
-      });
+      }).filter(obj => !filterByCompany || String(obj['会社'] || '').trim() === requestedCompany);
     }
     const memberSheet = getOrCreateMemberSheet_(ss);
     const mData = memberSheet.getDataRange().getValues();
@@ -1130,11 +1168,12 @@ function doGet(e) {
       company: String(r[1]||''),
       division: String(r[2]||''),
       rate: Number(r[3]||0)
-    })) : [];
+    })).filter(m => !filterByCompany || m.company === requestedCompany) : [];
 
     const genbaSheet = getOrCreateGenbaSheet_(ss);
     const gData = genbaSheet.getDataRange().getValues();
-    const genbaMaster = gData.length > 1 ? gData.slice(1).map(r => ({name: String(r[0]||''), company: String(r[1]||'')})).filter(g => g.name) : [];
+    const genbaMaster = gData.length > 1 ? gData.slice(1).map(r => ({name: String(r[0]||''), company: String(r[1]||'')})).filter(g => g.name && (!filterByCompany || !g.company || g.company === requestedCompany)) : [];
+    const allowedGenba = new Set(genbaMaster.map(g => g.name));
 
     // 現場マスタも返す（完了フラグでプルダウンを絞り込むため）
     const jobSiteSheet = getOrCreateJobSiteSheet_(ss);
@@ -1145,7 +1184,7 @@ function doGet(e) {
       jobNo: String(r[2] || ''),
       completed: String(r[8] || '').trim() !== '',
       billingMethod: String(r[9] || '').trim() || '応援'
-    })).filter(j => j.genba) : [];
+    })).filter(j => j.genba && (!filterByCompany || allowedGenba.has(j.genba))) : [];
 
     return ok({rows, members, genbaMaster, jobsites});
   } catch(err) {
@@ -1385,8 +1424,19 @@ function generateSummary_() {
     }).filter(r => r.date && r.name);
   }
 
-  const mainRecords = sheetToRecords(ss.getSheetByName(SHEET_NAME));
-  const archiveRecords = sheetToRecords(ss.getSheetByName(ARCHIVE_SHEET));
+  let mainRecords;
+  let archiveRecords;
+  const snapshotLock = getDailyDataLock_();
+  if (!snapshotLock.tryLock(10000)) {
+    throw new Error('現在予定を更新中です。集計は数秒後に再実行してください。');
+  }
+  try {
+    mainRecords = sheetToRecords(ss.getSheetByName(SHEET_NAME));
+    archiveRecords = sheetToRecords(ss.getSheetByName(ARCHIVE_SHEET));
+  } finally {
+    // 長い集計シート書込みの前に解放し、社員の保存を待たせない。
+    snapshotLock.releaseLock();
+  }
 
   generateCompanySummary_(ss, mainRecords);
   generateMonthSummary_(ss, mainRecords);
@@ -1397,11 +1447,7 @@ function generateSummary_() {
   generateKakuninTable_(ss, allRecords);
   generateDivisionAllocation_(ss, allRecords);
 
-  // 現場マスタの孤立行を掃除（日報データに1件も存在しない＆売上未入力のもの）
-  try {
-    const orphanCount = cleanupOrphanSites_(ss);
-    if (orphanCount > 0) logOperation_(ss, 'cleanup_orphan_sites', '現場マスタ', '削除=' + orphanCount, 'auto');
-  } catch (e) {}
+  // 孤立現場の削除は保存処理と競合するため、管理画面の手動操作だけで行う。
 }
 
 function calcEffective_(records, name) {
@@ -2753,7 +2799,8 @@ function cleanupOrphanJobNos_(ss) {
 // 実行前に「スクリプトプロパティ」に GROQ_API_KEY を設定してください。
 function backfillAllYomi() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const lock = LockService.getScriptLock();
+  // Groq通信を含む長時間処理なので、日報用ScriptLockを占有しない。
+  const lock = LockService.getUserLock();
   if (!lock.tryLock(60000)) { Logger.log('ロック取得失敗'); return; }
   try {
     const key = PropertiesService.getScriptProperties().getProperty('GROQ_API_KEY');
@@ -2816,7 +2863,7 @@ function _backfillYomiInSheet_(sheet, textColIdx, yomiColIdx, label) {
 // ========== 工番バックフィル（既存の工番未設定データに一括付与） ==========
 function backfillJobNos() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const lock = LockService.getScriptLock();
+  const lock = getDailyDataLock_();
   if (!lock.tryLock(60000)) { Logger.log('ロック取得失敗'); return; }
   try {
     const main = backfillJobNosForSheet_(ss, SHEET_NAME);
@@ -2951,7 +2998,7 @@ function archiveOldData_(ss, months) {
 }
 
 function autoArchive() {
-  const lock = LockService.getScriptLock();
+  const lock = getDailyDataLock_();
   if (!lock.tryLock(30000)) return;
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
