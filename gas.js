@@ -125,7 +125,144 @@ function ensureColumns_(sheet, needed) {
   }
 }
 
+function isPresidentAction_(action) {
+  return action === 'pres_list'
+      || action === 'pres_add'
+      || action === 'pres_update'
+      || action === 'pres_delete';
+}
+
+function serializePresidentRows_(sheet) {
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  const tz = Session.getScriptTimeZone();
+  return data.slice(1).map(r => {
+    const obj = {};
+    PRES_HEADERS.forEach((h, j) => {
+      const v = r[j];
+      if (h === '開始日' || h === '終了日') {
+        obj[h] = (v instanceof Date) ? Utilities.formatDate(v, tz, 'yyyy-MM-dd') : String(v || '');
+      } else if (h === '開始時刻' || h === '終了時刻') {
+        obj[h] = (v instanceof Date) ? Utilities.formatDate(v, tz, 'HH:mm') : String(v || '');
+      } else {
+        obj[h] = (v === undefined || v === null) ? '' : v;
+      }
+    });
+    return obj;
+  });
+}
+
+function handlePresidentAction_(body, action, updatedBy) {
+  if (String(body.pin || '') !== PRES_PIN) {
+    return error('認証に失敗しました');
+  }
+
+  // 一覧取得は読み取り専用。日報処理の長時間ロックとは独立させる。
+  if (action === 'pres_list') {
+    try {
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const presSheet = ss.getSheetByName(PRES_SHEET);
+      return ok({rows: presSheet ? serializePresidentRows_(presSheet) : []});
+    } catch (err) {
+      return error(err.toString());
+    }
+  }
+
+  // 社長予定同士の同時更新だけを直列化し、日報・集計とは待ち合わせない。
+  const lock = LockService.getUserLock();
+  if (!lock.tryLock(10000)) {
+    return error('現在他の人が更新中です。数秒待ってから再度お試しください。');
+  }
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const presSheet = getOrCreatePresSheet_(ss);
+
+    if (action === 'pres_add') {
+      const ev = body.event || {};
+      const id = 'P' + new Date().getTime() + '_' + Math.floor(Math.random() * 10000);
+      presSheet.appendRow([
+        new Date(),
+        String(ev.title || ''),
+        String(ev.startDate || ''),
+        String(ev.startTime || ''),
+        String(ev.endDate || ev.startDate || ''),
+        String(ev.endTime || ''),
+        String(ev.location || ''),
+        String(ev.memo || ''),
+        String(ev.category || ''),
+        String(ev.color || '#1D9E75'),
+        id,
+        updatedBy
+      ]);
+      return ok({id});
+    }
+
+    if (action === 'pres_update') {
+      const ev = body.event || {};
+      const id = String(ev.id || '');
+      if (!id) return error('IDが指定されていません');
+      const data = presSheet.getDataRange().getValues();
+      const idCol = PRES_HEADERS.indexOf('ID');
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][idCol]) === id) {
+          presSheet.getRange(i + 1, 1, 1, PRES_HEADERS.length).setValues([[
+            data[i][0] instanceof Date ? data[i][0] : new Date(),
+            String(ev.title || ''),
+            String(ev.startDate || ''),
+            String(ev.startTime || ''),
+            String(ev.endDate || ev.startDate || ''),
+            String(ev.endTime || ''),
+            String(ev.location || ''),
+            String(ev.memo || ''),
+            String(ev.category || ''),
+            String(ev.color || '#1D9E75'),
+            id,
+            updatedBy
+          ]]);
+          return ok({updated: id});
+        }
+      }
+      return error('対象が見つかりませんでした');
+    }
+
+    if (action === 'pres_delete') {
+      const id = String(body.id || '');
+      if (!id) return error('IDが指定されていません');
+      const data = presSheet.getDataRange().getValues();
+      const idCol = PRES_HEADERS.indexOf('ID');
+      for (let i = data.length - 1; i >= 1; i--) {
+        if (String(data[i][idCol]) === id) {
+          presSheet.deleteRow(i + 1);
+          return ok({deleted: id});
+        }
+      }
+      return error('対象が見つかりませんでした');
+    }
+
+    return error('未対応のアクションです');
+  } catch (err) {
+    return error(err.toString());
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function doPost(e) {
+  let body;
+  let action;
+  let updatedBy;
+  try {
+    body = JSON.parse(e.postData.contents);
+    if (!calAuthOk_(body.k)) return authError_();
+    action = body.action || 'add';
+    updatedBy = String(body.updatedBy || '');
+    if (isPresidentAction_(action)) {
+      return handlePresidentAction_(body, action, updatedBy);
+    }
+  } catch (err) {
+    return error(err.toString());
+  }
+
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) {
     return error('現在他の人が更新中です。数秒待ってから再度お試しください。');
@@ -133,10 +270,6 @@ function doPost(e) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(SHEET_NAME);
-    const body = JSON.parse(e.postData.contents);
-    if (!calAuthOk_(body.k)) return authError_();
-    const action = body.action || 'add';
-    const updatedBy = String(body.updatedBy || '');
 
     ensureHeaders_(sheet);
     const idCol = getIdCol_();
@@ -746,103 +879,6 @@ function doPost(e) {
 
       logOperation_(ss, 'reassign_jobno', genba + '/' + loc, currentJobNo + '→' + newJobNo + '（日報' + updatedRows + '行・アーカイブ' + archivedUpdated + '行）', updatedBy);
       return ok({ oldJobNo: currentJobNo, newJobNo, updatedRows, archivedUpdated });
-    }
-
-    // ============================================================
-    // 社長専用カレンダー（極秘）
-    // すべてのアクションで PIN チェックを行う。
-    // ============================================================
-    if (action === 'pres_list' || action === 'pres_add' || action === 'pres_update' || action === 'pres_delete') {
-      if (String(body.pin || '') !== PRES_PIN) {
-        return error('認証に失敗しました');
-      }
-      const presSheet = getOrCreatePresSheet_(ss);
-      const tz = Session.getScriptTimeZone();
-
-      if (action === 'pres_list') {
-        const data = presSheet.getDataRange().getValues();
-        let rows = [];
-        if (data.length > 1) {
-          const headers = data[0];
-          rows = data.slice(1).map(r => {
-            const obj = {};
-            headers.forEach((h, j) => {
-              const v = r[j];
-              if (h === '開始日' || h === '終了日') {
-                obj[h] = (v instanceof Date) ? Utilities.formatDate(v, tz, 'yyyy-MM-dd') : String(v || '');
-              } else if (h === '開始時刻' || h === '終了時刻') {
-                obj[h] = (v instanceof Date) ? Utilities.formatDate(v, tz, 'HH:mm') : String(v || '');
-              } else {
-                obj[h] = (v === undefined || v === null) ? '' : v;
-              }
-            });
-            return obj;
-          });
-        }
-        return ok({rows});
-      }
-
-      if (action === 'pres_add') {
-        const ev = body.event || {};
-        const id = 'P' + new Date().getTime() + '_' + Math.floor(Math.random() * 10000);
-        presSheet.appendRow([
-          new Date(),
-          String(ev.title || ''),
-          String(ev.startDate || ''),
-          String(ev.startTime || ''),
-          String(ev.endDate || ev.startDate || ''),
-          String(ev.endTime || ''),
-          String(ev.location || ''),
-          String(ev.memo || ''),
-          String(ev.category || ''),
-          String(ev.color || '#1D9E75'),
-          id,
-          updatedBy
-        ]);
-        return ok({id});
-      }
-
-      if (action === 'pres_update') {
-        const ev = body.event || {};
-        const id = String(ev.id || '');
-        if (!id) return error('IDが指定されていません');
-        const data = presSheet.getDataRange().getValues();
-        const idCol = PRES_HEADERS.indexOf('ID');
-        for (let i = 1; i < data.length; i++) {
-          if (String(data[i][idCol]) === id) {
-            presSheet.getRange(i + 1, 1, 1, PRES_HEADERS.length).setValues([[
-              data[i][0] instanceof Date ? data[i][0] : new Date(),
-              String(ev.title || ''),
-              String(ev.startDate || ''),
-              String(ev.startTime || ''),
-              String(ev.endDate || ev.startDate || ''),
-              String(ev.endTime || ''),
-              String(ev.location || ''),
-              String(ev.memo || ''),
-              String(ev.category || ''),
-              String(ev.color || '#1D9E75'),
-              id,
-              updatedBy
-            ]]);
-            return ok({updated: id});
-          }
-        }
-        return error('対象が見つかりませんでした');
-      }
-
-      if (action === 'pres_delete') {
-        const id = String(body.id || '');
-        if (!id) return error('IDが指定されていません');
-        const data = presSheet.getDataRange().getValues();
-        const idCol = PRES_HEADERS.indexOf('ID');
-        for (let i = data.length - 1; i >= 1; i--) {
-          if (String(data[i][idCol]) === id) {
-            presSheet.deleteRow(i + 1);
-            return ok({deleted: id});
-          }
-        }
-        return error('対象が見つかりませんでした');
-      }
     }
 
     // ============================================================
