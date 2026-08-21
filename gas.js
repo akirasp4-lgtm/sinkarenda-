@@ -56,6 +56,40 @@ function authError_() {
 }
 
 // ==============================================================
+// 日付整形の高速版（2026-08-21 レスポンス改善）
+// Utilities.formatDate は1回あたりが重く、日報2,600行×3箇所＝約8,000回
+// 呼ぶと数秒単位で効いてくる。スクリプトのタイムゾーンとJSのローカル時刻が
+// 一致している場合だけ自前整形に切り替え、ズレていれば従来どおりに戻す。
+// ==============================================================
+var _TZ_FAST_OK_ = null;
+function tzFastOk_() {
+  if (_TZ_FAST_OK_ !== null) return _TZ_FAST_OK_;
+  try {
+    var probe = new Date(2026, 0, 2, 3, 4, 5);
+    _TZ_FAST_OK_ = (Utilities.formatDate(probe, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss') === '2026-01-02 03:04:05');
+  } catch (err) {
+    _TZ_FAST_OK_ = false;
+  }
+  return _TZ_FAST_OK_;
+}
+function _p2_(n) { return (n < 10 ? '0' : '') + n; }
+function fmtDate_(v, tz) {
+  if (!(v instanceof Date)) return String(v || '');
+  if (!tzFastOk_()) return Utilities.formatDate(v, tz || Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  return v.getFullYear() + '-' + _p2_(v.getMonth() + 1) + '-' + _p2_(v.getDate());
+}
+function fmtTime_(v, tz) {
+  if (!(v instanceof Date)) return String(v || '');
+  if (!tzFastOk_()) return Utilities.formatDate(v, tz || Session.getScriptTimeZone(), 'HH:mm');
+  return _p2_(v.getHours()) + ':' + _p2_(v.getMinutes());
+}
+function fmtDateTime_(v, tz) {
+  if (!(v instanceof Date)) return String(v || '');
+  if (!tzFastOk_()) return Utilities.formatDate(v, tz || Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  return fmtDate_(v, tz) + ' ' + _p2_(v.getHours()) + ':' + _p2_(v.getMinutes()) + ':' + _p2_(v.getSeconds());
+}
+
+// ==============================================================
 // 読み(フリガナ)自動生成用 - Groq API
 // スクリプトプロパティ GROQ_API_KEY が設定されていれば有効
 // ==============================================================
@@ -1147,19 +1181,34 @@ function doGet(e) {
       // 会社絞込みやマスタ読取の前に解放し、社員保存の待ち時間を最小化する。
       snapshotLock.releaseLock();
     }
+    // 2026-08-21 レスポンス改善: 従来は全行をオブジェクト化してから会社で
+    // 絞っていたため、捨てる行の整形コストまで毎回払っていた。先に絞る。
+    // dateFrom / dateTo（'YYYY-MM-DD'・両端含む）を付ければ期間も絞れる。
+    // 省略時は従来どおり全件返すので、古い画面もそのまま動く。
+    const reqFrom = String(e && e.parameter && e.parameter.dateFrom || '').trim();
+    const reqTo = String(e && e.parameter && e.parameter.dateTo || '').trim();
     let rows = [];
     if (data.length > 1) {
       const headers = data[0];
-      rows = data.slice(1).map(row => {
+      const dateIdx = headers.indexOf('作業日');
+      const companyIdx = headers.indexOf('会社');
+      const hLen = headers.length;
+      for (let i = 1; i < data.length; i++) {
+        const row = data[i];
+        if (filterByCompany && companyIdx >= 0 && String(row[companyIdx] || '').trim() !== requestedCompany) continue;
+        const dStr = dateIdx >= 0 ? fmtDate_(row[dateIdx], tz) : '';
+        if (reqFrom && dStr && dStr < reqFrom) continue;
+        if (reqTo && dStr && dStr > reqTo) continue;
         const obj = {};
-        headers.forEach((h, j) => {
+        for (let j = 0; j < hLen; j++) {
+          const h = headers[j];
           const v = row[j];
-          if (h === '作業日') obj[h] = (v instanceof Date) ? Utilities.formatDate(v, tz, 'yyyy-MM-dd') : String(v || '');
-          else if (h === '出勤' || h === '退勤') obj[h] = (v instanceof Date) ? Utilities.formatDate(v, tz, 'HH:mm') : String(v || '');
+          if (h === '作業日') obj[h] = dStr;
+          else if (h === '出勤' || h === '退勤') obj[h] = fmtTime_(v, tz);
           else obj[h] = (v === undefined || v === null) ? '' : v;
-        });
-        return obj;
-      }).filter(obj => !filterByCompany || String(obj['会社'] || '').trim() === requestedCompany);
+        }
+        rows.push(obj);
+      }
     }
     const memberSheet = getOrCreateMemberSheet_(ss);
     const mData = memberSheet.getDataRange().getValues();
@@ -2982,9 +3031,9 @@ function archiveOldData_(ss, months) {
     if (!isNaN(rowDate) && rowDate < cutoff) {
       const formatted = data[i].map((v, j) => {
         if (v instanceof Date) {
-          if (j === 1) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
-          if (j === 6 || j === 7) return Utilities.formatDate(v, tz, 'HH:mm');
-          return Utilities.formatDate(v, tz, 'yyyy-MM-dd HH:mm:ss');
+          if (j === 1) return fmtDate_(v, tz);
+          if (j === 6 || j === 7) return fmtTime_(v, tz);
+          return fmtDateTime_(v, tz);
         }
         return v;
       });
@@ -2992,9 +3041,41 @@ function archiveOldData_(ss, months) {
       rowNumsToDelete.push(i + 1);
     }
   }
-  rowsToArchive.reverse().forEach(row => archiveSheet.appendRow(row));
-  rowNumsToDelete.forEach(rowNum => sheet.deleteRow(rowNum));
-  return rowsToArchive.length;
+  if (!rowsToArchive.length) return 0;
+
+  // 2026-08-21 高速化: appendRow / deleteRow の1行ずつ繰り返しは、数百行に
+  // なると6分の実行上限に届いて途中で止まる（＝いつまでも減らない）。
+  // 追記は setValues 1回、削除は連続ブロックの deleteRows にまとめる。
+  const width = HEADERS.length;
+  const toWrite = rowsToArchive.reverse().map(row => {
+    const out = row.slice(0, width);
+    while (out.length < width) out.push('');
+    return out;
+  });
+  if (archiveSheet.getMaxColumns() < width) {
+    archiveSheet.insertColumnsAfter(archiveSheet.getMaxColumns(), width - archiveSheet.getMaxColumns());
+  }
+  const startRow = archiveSheet.getLastRow() + 1;
+  const needRows = startRow + toWrite.length - 1;
+  if (archiveSheet.getMaxRows() < needRows) {
+    archiveSheet.insertRowsAfter(archiveSheet.getMaxRows(), needRows - archiveSheet.getMaxRows());
+  }
+  archiveSheet.getRange(startRow, 1, toWrite.length, width).setValues(toWrite);
+  SpreadsheetApp.flush();
+
+  // 削除は必ず「下から」。連番はまとめて1回の deleteRows にする。
+  rowNumsToDelete.sort((a, b) => b - a);
+  let blockEnd = rowNumsToDelete[0];
+  let blockStart = blockEnd;
+  for (let k = 1; k < rowNumsToDelete.length; k++) {
+    const n = rowNumsToDelete[k];
+    if (n === blockStart - 1) { blockStart = n; continue; }
+    sheet.deleteRows(blockStart, blockEnd - blockStart + 1);
+    blockEnd = n;
+    blockStart = n;
+  }
+  sheet.deleteRows(blockStart, blockEnd - blockStart + 1);
+  return toWrite.length;
 }
 
 function autoArchive() {
@@ -3020,7 +3101,25 @@ function setupArchiveTrigger() {
   ScriptApp.getProjectTriggers().forEach(t => {
     if (t.getHandlerFunction() === 'autoArchive') ScriptApp.deleteTrigger(t);
   });
-  ScriptApp.newTrigger('autoArchive').timeBased().onMonthDay(1).atHour(3).create();
+  // 2026-08-21 変更: 月1回(1日3時)だと、その1回が失敗・未設置だと丸1ヶ月
+  // 気づけず日報が溜まり続ける。毎週日曜3時にして取りこぼしを回収する。
+  ScriptApp.newTrigger('autoArchive').timeBased().onWeekDay(ScriptApp.WeekDay.SUNDAY).atHour(3).create();
+}
+
+// 現在どのトリガーが仕掛かっているかを確認する（実行ログに出す）。
+// アーカイブが動いていない疑いが出たら、まずこれを実行する。
+function checkTriggers() {
+  const list = ScriptApp.getProjectTriggers().map(t => t.getHandlerFunction() + ' / ' + t.getEventType());
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const nippo = ss.getSheetByName(SHEET_NAME);
+  const arc = ss.getSheetByName(ARCHIVE_SHEET);
+  const msg = [
+    '仕掛かっているトリガー: ' + (list.length ? list.join(' , ') : '（ゼロ件＝自動処理が一切動いていません）'),
+    '日報データ 行数: ' + (nippo ? nippo.getLastRow() - 1 : '(シート無し)'),
+    'アーカイブ 行数: ' + (arc ? Math.max(arc.getLastRow() - 1, 0) : '(シート無し)')
+  ].join(String.fromCharCode(10));
+  Logger.log(msg);
+  return msg;
 }
 
 function setupAllTriggers() {

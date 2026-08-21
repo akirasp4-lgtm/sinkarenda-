@@ -1976,7 +1976,7 @@ async function submitNippo(){
       document.getElementById('s-jobno-div-wrap').style.display='none';
       const _jnSel=document.getElementById('s-jobno-division');if(_jnSel){delete _jnSel.dataset.userSet;_jnSel.value='ICT';}
       applyMode('s','');selectedMembers=[];renderMemberChips('member-selector',selectedMembers,toggleMember);
-      await loadData();
+      addLocalRows(rows);refreshInBackground();
     }else showAlert('エラー：'+json.message,'err');
   }catch(err){showAlert('送信エラー：'+err.message,'err');}
   isSubmitting=false;btn.textContent='登録する';btn.disabled=(currentCompany==='全社');
@@ -2046,6 +2046,36 @@ function generateGhosts(nippos){
     }));
   });
   return ghosts;
+}
+
+// ── 保存直後にサーバ全件の読み直しを待たない（2026-08-21 体感速度改善）──
+// 従来は登録/編集/削除のたびに await loadData() で全データを取り直しており、
+// 1操作あたり「書き込み + 全件読込（実測9〜15秒）」を待たされていた。
+// 画面は手元の情報で先に更新し、サーバとの照合は裏で走らせる。
+// 工番など「サーバが決める値」は裏の再読込が返ってきた時点で正になる。
+function rerenderAll(){
+  try{initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();updateLocationSuggestions();}catch(e){console.error(e);}
+}
+function removeLocalByIds(ids){
+  const set=new Set((ids||[]).map(String));
+  allNippos=allNippos.filter(n=>!set.has(String(n.id))&&!(n.isGhost&&set.has(String(n.originalId))));
+  rerenderAll();
+}
+function addLocalRows(rows){
+  const added=(rows||[]).map(r=>({
+    id:String(r.id||''),timestamp:'',
+    date:r.date,genba:r.genba||'',loc:r.loc||'',name:r.name||'',role:r.role||'',
+    start:formatTime(r.start),end:formatTime(r.end),
+    kosu:Number(r.kosu)||0,memo:r.memo||'',
+    yakin:!!r.yakin,yasumi:!!r.yasumi,yotei:!!r.yotei,souko:!!r.souko,
+    company:r.company||currentCompany,updatedBy:r.updatedBy||'',color:r.color||'',
+    division:String(r.jobNoDivision||''),jobNo:'',workType:r.workType||'',vehicle:r.vehicle||''
+  }));
+  allNippos=allNippos.concat(added).concat(generateGhosts(added));
+  rerenderAll();
+}
+function refreshInBackground(after){
+  loadData().then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
 }
 
 async function loadData(){
@@ -2452,7 +2482,7 @@ async function deleteFromDetail(){
     if(json.status==='ok'){
       closeEventDetail();
       document.getElementById('cal-day-modal').classList.remove('active');
-      await loadData();
+      removeLocalByIds([...new Set(g.ids)]);refreshInBackground();
     }else alert('削除エラー：'+json.message);
   }catch(e){alert('削除エラー：'+e.message);}
   setLoading(false);
@@ -2523,9 +2553,9 @@ async function calDeleteGroup(idx){
     if(json.status==='ok'){
       if(json.deleted===0)alert('削除対象が見つかりませんでした。');
       document.getElementById('cal-day-modal').classList.remove('active');
-      await loadData();
-    }else{alert('削除エラー：'+json.message);await loadData();}
-  }catch(e){alert('削除エラー：'+e.message);await loadData();}
+      removeLocalByIds(ids);refreshInBackground();
+    }else{alert('削除エラー：'+json.message);refreshInBackground();}
+  }catch(e){alert('削除エラー：'+e.message);refreshInBackground();}
   setLoading(false);
 }
 
@@ -2547,9 +2577,9 @@ async function deleteGroup(idx){
     const json=await res.json();
     if(json.status==='ok'){
       if(json.deleted===0)alert('削除対象が見つかりませんでした。');
-      await loadData();
-    }else{alert('削除エラー：'+json.message);await loadData();}
-  }catch(e){alert('削除エラー：'+e.message);await loadData();}
+      removeLocalByIds(ids);refreshInBackground();
+    }else{alert('削除エラー：'+json.message);refreshInBackground();}
+  }catch(e){alert('削除エラー：'+e.message);refreshInBackground();}
   setLoading(false);
 }
 
@@ -2713,7 +2743,7 @@ async function saveEdit(){
   try{
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update',ids:editIds,rows}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status==='ok'){closeEditModal();bulkEditMode=false;await loadData();renderGmList();}
+    if(json.status==='ok'){closeEditModal();bulkEditMode=false;removeLocalByIds(editIds);addLocalRows(rows);renderGmList();refreshInBackground(renderGmList);}
     else alert('保存エラー：'+json.message);
   }catch(e){alert('保存エラー：'+e.message);}
   btn.textContent='保存する';btn.disabled=false;
@@ -2894,7 +2924,7 @@ async function deleteGmChecked(){
   try{
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'delete',ids,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status==='ok'){await loadData();renderGmList();}
+    if(json.status==='ok'){removeLocalByIds(ids);renderGmList();refreshInBackground(renderGmList);}
     else alert('削除エラー：'+json.message);
   }catch(e){alert('削除エラー：'+e.message);}
   setLoading(false);
