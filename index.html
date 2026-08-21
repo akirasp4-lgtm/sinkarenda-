@@ -2007,6 +2007,50 @@ function parseWorkDate(v){
 // 2026-08-21 転送量削減: compact=1 で受け取った「値だけの配列」を、
 // 従来どおりのキー付きオブジェクトへ戻す。サーバが古いまま（compactを
 // 知らない）でも json.compact が立たないので、この関数は素通りになる。
+// ── 開いた瞬間に前回の内容を出す（2026-08-21）────────────────
+// 端末に前回の読み込み結果を残しておき、起動時にまず描く。
+// ★安全装置は外さない: キャッシュ表示中も dataLoadOk は false のまま。
+//   ＝「見るだけ」。古い情報のまま登録して予定がダブるのを防ぐ。
+//   本物のデータが届いた時点で初めて登録・保存できるようになる。
+// ★単価(rate)は端末に残さない（給料情報のため意図的に捨てている）。
+const CAL_CACHE_KEY='cal-cache-v1';
+function saveSnapshot(company,json){
+  try{
+    localStorage.setItem(CAL_CACHE_KEY,JSON.stringify({
+      v:1,company:String(company||''),
+      compact:json.compact?1:0,headers:json.headers||[],rows:json.rows||[],
+      members:(json.members||[]).map(m=>({name:m.name,company:m.company,division:m.division})),
+      genbaMaster:json.genbaMaster||[],jobsites:json.jobsites||[]
+    }));
+  }catch(e){/* 容量超過等は無視。キャッシュは無くても動く */}
+}
+function hydrateFromSnapshot(company){
+  try{
+    const raw=localStorage.getItem(CAL_CACHE_KEY);if(!raw)return false;
+    const s=JSON.parse(raw);
+    if(!s||s.v!==1||String(s.company||'')!==String(company||''))return false;
+    const base=parseRows(s.compact?expandCompactRows(s.headers,s.rows):s.rows,'');
+    if(!base.length)return false;
+    allNippos=base.concat(generateGhosts(base));
+    allMembers=s.members||[];allGenbaMaster=s.genbaMaster||[];allJobsites=s.jobsites||[];
+    rerenderAll();
+    return true;
+  }catch(e){console.error(e);return false;}
+}
+function setStaleBadge(on){
+  try{
+    let el=document.getElementById('cal-stale-badge');
+    if(!el){
+      el=document.createElement('div');el.id='cal-stale-badge';
+      el.style.cssText='position:fixed;left:0;right:0;top:0;z-index:9999;background:#F59E0B;color:#fff;'
+        +'font-size:12px;line-height:1.4;padding:6px 10px;text-align:center;font-weight:700;box-shadow:0 1px 4px rgba(0,0,0,.2)';
+      el.textContent='🔄 前回の内容を表示中です。最新に更新しています…（更新が終わるまで登録・保存はできません）';
+      document.body.appendChild(el);
+    }
+    el.style.display=on?'block':'none';
+  }catch(e){}
+}
+
 function expandCompactRows(headers,rows){
   if(!headers||!headers.length)return rows||[];
   return (rows||[]).map(r=>{const o={};for(let i=0;i<headers.length;i++)o[headers[i]]=r[i];return o;});
@@ -2109,10 +2153,11 @@ async function loadData(){
     updateLocationSuggestions();
     refreshVehicleSelect('s');
     checkUsername();
+    saveSnapshot(requestCompany,json);setStaleBadge(false);
     dataLoadOk=true;
   }catch(e){
     if(requestSeq!==dataLoadSeq||requestCompany!==currentCompany)return;
-    console.error(e);dataLoadOk=false;
+    console.error(e);dataLoadOk=false;setStaleBadge(false);
     // 古い予定を最新データに見せない。競合確認なしの保存も禁止する。
     allNippos=[];allMembers=[];allGenbaMaster=[];allJobsites=[];
     initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();
@@ -3628,7 +3673,7 @@ function shareFromDetail(){
 initCompanyBar();initSelects();initAvailWeek();initVehicleWeek();initUsername();initColorPicker('s');renderList();initCalSwipe();initPullToRefresh();applyWorkTypeLock('s');
 // 会社が未設定の場合は会社選択ピッカーを表示し、データロードはスキップ
 if(needsCompanyPicker)showCompanyPicker();
-else loadData();
+else{if(hydrateFromSnapshot(currentCompany))setStaleBadge(true);loadData();}
 
 // 管理者モード以外では事務タブを非表示
 if(!isAdminMode){
