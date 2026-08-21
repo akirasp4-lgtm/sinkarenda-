@@ -1187,9 +1187,17 @@ function doGet(e) {
     // 省略時は従来どおり全件返すので、古い画面もそのまま動く。
     const reqFrom = String(e && e.parameter && e.parameter.dateFrom || '').trim();
     const reqTo = String(e && e.parameter && e.parameter.dateTo || '').trim();
+    // 2026-08-21 転送量削減: compact=1 を付けると、1行を19個のキー付き
+    // オブジェクトではなく「値だけの配列」で返し、項目名は headers として
+    // 先頭に1回だけ送る。2,600行なら約5万回分のキー文字列が消える。
+    // ★互換性: compact を付けない従来の呼び出しは今までどおりの形で返す。
+    //   そのため古い画面と新しい画面が混在しても壊れない（デプロイ順不同）。
+    const wantCompact = String(e && e.parameter && e.parameter.compact || '') === '1';
     let rows = [];
+    let outHeaders = [];
     if (data.length > 1) {
       const headers = data[0];
+      outHeaders = headers;
       const dateIdx = headers.indexOf('作業日');
       const companyIdx = headers.indexOf('会社');
       const hLen = headers.length;
@@ -1199,15 +1207,27 @@ function doGet(e) {
         const dStr = dateIdx >= 0 ? fmtDate_(row[dateIdx], tz) : '';
         if (reqFrom && dStr && dStr < reqFrom) continue;
         if (reqTo && dStr && dStr > reqTo) continue;
-        const obj = {};
-        for (let j = 0; j < hLen; j++) {
-          const h = headers[j];
-          const v = row[j];
-          if (h === '作業日') obj[h] = dStr;
-          else if (h === '出勤' || h === '退勤') obj[h] = fmtTime_(v, tz);
-          else obj[h] = (v === undefined || v === null) ? '' : v;
+        if (wantCompact) {
+          const arr = new Array(hLen);
+          for (let j = 0; j < hLen; j++) {
+            const h = headers[j];
+            const v = row[j];
+            if (h === '作業日') arr[j] = dStr;
+            else if (h === '出勤' || h === '退勤') arr[j] = fmtTime_(v, tz);
+            else arr[j] = (v === undefined || v === null) ? '' : v;
+          }
+          rows.push(arr);
+        } else {
+          const obj = {};
+          for (let j = 0; j < hLen; j++) {
+            const h = headers[j];
+            const v = row[j];
+            if (h === '作業日') obj[h] = dStr;
+            else if (h === '出勤' || h === '退勤') obj[h] = fmtTime_(v, tz);
+            else obj[h] = (v === undefined || v === null) ? '' : v;
+          }
+          rows.push(obj);
         }
-        rows.push(obj);
       }
     }
     const memberSheet = getOrCreateMemberSheet_(ss);
@@ -1235,6 +1255,7 @@ function doGet(e) {
       billingMethod: String(r[9] || '').trim() || '応援'
     })).filter(j => j.genba && (!filterByCompany || allowedGenba.has(j.genba))) : [];
 
+    if (wantCompact) return ok({compact: 1, headers: outHeaders, rows, members, genbaMaster, jobsites});
     return ok({rows, members, genbaMaster, jobsites});
   } catch(err) {
     return error(err.toString());

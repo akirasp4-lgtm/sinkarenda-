@@ -2004,6 +2004,13 @@ function parseWorkDate(v){
   return s;
 }
 
+// 2026-08-21 転送量削減: compact=1 で受け取った「値だけの配列」を、
+// 従来どおりのキー付きオブジェクトへ戻す。サーバが古いまま（compactを
+// 知らない）でも json.compact が立たないので、この関数は素通りになる。
+function expandCompactRows(headers,rows){
+  if(!headers||!headers.length)return rows||[];
+  return (rows||[]).map(r=>{const o={};for(let i=0;i<headers.length;i++)o[headers[i]]=r[i];return o;});
+}
 function parseRows(rows,company){
   return(rows||[]).map(r=>({
     id:String(r['ID']||''),timestamp:String(r['登録日時']||''),
@@ -2084,12 +2091,12 @@ async function loadData(){
   setLoading(true);dataLoadOk=false;
   try{
     const companyParam=requestCompany&&requestCompany!=='全社'?requestCompany:'';
-    const res=await fetch(GAS_URL+'?t='+Date.now()+'&company='+encodeURIComponent(companyParam));
+    const res=await fetch(GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam));
     const json=await res.json();
     // 会社切替後に古い通信が遅れて返っても、現在の画面を上書きしない。
     if(requestSeq!==dataLoadSeq||requestCompany!==currentCompany)return;
     if(json.status!=='ok')throw new Error(json.message||'予定データの取得に失敗しました');
-    allNippos=parseRows(json.rows,'');
+    allNippos=parseRows(json.compact?expandCompactRows(json.headers,json.rows):json.rows,'');
     // 日付跨ぎ予定の翌日表示用ゴーストを追加
     allNippos=allNippos.concat(generateGhosts(allNippos));
     if(json.members)allMembers=json.members;
