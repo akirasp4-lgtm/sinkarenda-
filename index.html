@@ -2037,7 +2037,7 @@ function hydrateFromSnapshot(company){
     return true;
   }catch(e){console.error(e);return false;}
 }
-function setStaleBadge(on){
+function setStaleBadge(on,failed){
   try{
     let el=document.getElementById('cal-stale-badge');
     if(!el){
@@ -2047,6 +2047,10 @@ function setStaleBadge(on){
       el.textContent='🔄 前回の内容を表示中です。最新に更新しています…（更新が終わるまで登録・保存はできません）';
       document.body.appendChild(el);
     }
+    el.style.background=failed?'#E8384F':'#F59E0B';
+    el.textContent=failed
+      ?'⚠️ 最新データを取得できませんでした。これは前回の内容です（登録・保存はできません。「更新」を押してください）'
+      :'🔄 前回の内容を表示中です。最新に更新しています…（更新が終わるまで登録・保存はできません）';
     el.style.display=on?'block':'none';
   }catch(e){}
 }
@@ -2135,11 +2139,21 @@ async function loadData(){
   setLoading(true);dataLoadOk=false;
   try{
     const companyParam=requestCompany&&requestCompany!=='全社'?requestCompany:'';
-    const res=await fetch(GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam));
-    const json=await res.json();
+    // 2026-08-21: GASのWebアプリは混むと HTTP404 やロック時間切れを返す
+    // （実測で5回に1回程度）。1回きりだと利用者に即エラーが出るため、黙って
+    // 1度だけ取り直す。それでも駄目なら下の catch へ。
+    let json=null,lastErr=null;
+    for(let attempt=0;attempt<2;attempt++){
+      try{
+        const res=await fetch(GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam));
+        const j=await res.json();
+        if(j.status!=='ok')throw new Error(j.message||'予定データの取得に失敗しました');
+        json=j;lastErr=null;break;
+      }catch(err){lastErr=err;}
+    }
     // 会社切替後に古い通信が遅れて返っても、現在の画面を上書きしない。
     if(requestSeq!==dataLoadSeq||requestCompany!==currentCompany)return;
-    if(json.status!=='ok')throw new Error(json.message||'予定データの取得に失敗しました');
+    if(lastErr)throw lastErr;
     allNippos=parseRows(json.compact?expandCompactRows(json.headers,json.rows):json.rows,'');
     // 日付跨ぎ予定の翌日表示用ゴーストを追加
     allNippos=allNippos.concat(generateGhosts(allNippos));
@@ -2157,11 +2171,19 @@ async function loadData(){
     dataLoadOk=true;
   }catch(e){
     if(requestSeq!==dataLoadSeq||requestCompany!==currentCompany)return;
-    console.error(e);dataLoadOk=false;setStaleBadge(false);
-    // 古い予定を最新データに見せない。競合確認なしの保存も禁止する。
-    allNippos=[];allMembers=[];allGenbaMaster=[];allJobsites=[];
-    initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();
-    showAlert('読込エラー：'+e.message+'（再度「更新」を押してください）','err');
+    console.error(e);dataLoadOk=false;
+    // 従来はここで全部消していたため、通信が失敗すると画面が真っ白になっていた。
+    // 前回の内容が残っていれば、赤い警告を出したうえで表示を維持する。
+    // dataLoadOk は false のままなので登録・保存は引き続き不可＝安全は変わらない。
+    if(hydrateFromSnapshot(requestCompany)){
+      setStaleBadge(true,true);
+      showAlert('最新データを取得できませんでした。表示は前回の内容です（登録・保存はできません）','err');
+    }else{
+      setStaleBadge(false);
+      allNippos=[];allMembers=[];allGenbaMaster=[];allJobsites=[];
+      initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();
+      showAlert('読込エラー：'+e.message+'（再度「更新」を押してください）','err');
+    }
   }finally{
     if(requestSeq===dataLoadSeq)setLoading(false);
   }
