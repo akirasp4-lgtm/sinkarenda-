@@ -3296,7 +3296,13 @@ function calcEffectiveKosu(nippos){
 // Excelを落とさなくても、生成済みの集計シートをそのままの並びで画面に出す。
 // ※再集計はしない。表示するだけ（「集計を更新して見る」を押した時だけ再集計）。
 let viewSheetBusy=false;
-function escViewCell(v){return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function escViewCell(v){
+  let s=String(v==null?'':v);
+  // シートの日付は 'YYYY-MM-DD HH:MM:SS' で届く。生のまま出すと読みにくいので整える。
+  const m=s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):\d{2}$/);
+  if(m)s=(m[4]==='00'&&m[5]==='00')?(m[1]+'/'+(+m[2])+'/'+(+m[3])):(m[1]+'/'+(+m[2])+'/'+(+m[3])+' '+m[4]+':'+m[5]);
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 async function viewSheetOnScreen(){
   if(viewSheetBusy)return;
   const sel=document.getElementById('view-sheet');if(!sel)return;
