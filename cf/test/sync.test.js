@@ -67,7 +67,7 @@ describe('fetchWithRetry', () => {
 
 // D1のprepare/bind/run/batchを模した簡易モック。
 // bind()は新しいbindされた文（sql+args）を返し、batch配列にそのまま渡せる形にする。
-function makeMockDB({ failOnBatchCall } = {}) {
+function makeMockDB({ failOnBatchCall, failSyncLogWrite } = {}) {
   const batchCalls = [];      // batch()に渡された文の配列を、呼び出しごとに記録
   const syncLogRuns = [];     // sync_logへのINSERTで渡された引数を記録
 
@@ -81,6 +81,7 @@ function makeMockDB({ failOnBatchCall } = {}) {
       async run() {
         if (/INSERT OR REPLACE INTO sync_log/.test(sql)) {
           syncLogRuns.push(args);
+          if (failSyncLogWrite) throw new Error('mock sync_log write failure');
         }
         return { success: true };
       },
@@ -139,7 +140,7 @@ describe('syncAll（500文ずつの分割投入）', () => {
     }
   });
 
-  it('途中のbatchが失敗したとき、sync_logにok=0が記録され、かつ例外が投げられること', async () => {
+  it('途中のbatchが失敗したとき、例外を投げずにok:falseを返し、sync_logにok=0が記録されること', async () => {
     const rows = Array.from({ length: 600 }, (_, i) => makeRow(i));
     global.fetch = vi.fn(async () => ({
       ok: true, status: 200,
@@ -153,12 +154,41 @@ describe('syncAll（500文ずつの分割投入）', () => {
     const { db, syncLogRuns } = makeMockDB({ failOnBatchCall: 2 });
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
 
-    await expect(syncAll(env)).rejects.toThrow(/mock batch failure/);
+    // syncAllは契約上、例外を投げない。戻り値のokで失敗を表す。
+    const out = await syncAll(env);
+    expect(out.ok).toBe(false);
+    expect(out.rows).toBe(0);
+    expect(out.message).toMatch(/mock batch failure/);
 
     expect(syncLogRuns).toHaveLength(1);
     const [at, loggedRows, ok, message] = syncLogRuns[0];
     expect(ok).toBe(0);
     expect(message).toMatch(/mock batch failure/);
     expect(typeof at).toBe('string');
+  });
+
+  it('sync_logへの書き込み自体が失敗しても、返すmessageには元の失敗原因が残ること', async () => {
+    const rows = Array.from({ length: 600 }, (_, i) => makeRow(i));
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({
+        status: 'ok', compact: 1, headers: HEADERS, rows,
+        members: [], genbaMaster: [], jobsites: [],
+      }),
+    }));
+
+    // batchが2回目で失敗し、かつsync_logへの書き込み自体も失敗する状況。
+    // それでもsyncAllが返すmessageは「元のbatch失敗」のままであること
+    // （ログ書き込み失敗の理由にすり替わらないこと）を確認する。
+    const { db, syncLogRuns } = makeMockDB({ failOnBatchCall: 2, failSyncLogWrite: true });
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(false);
+    expect(out.message).toMatch(/mock batch failure/);
+    expect(out.message).not.toMatch(/mock sync_log write failure/);
+    // 書き込みは試みられた（そして失敗した）ことは記録から分かる
+    expect(syncLogRuns).toHaveLength(1);
   });
 });

@@ -67,13 +67,40 @@ async function writeSyncLog(env, { rows, ok, message }) {
     .bind(at, rows, ok, message).run();
 }
 
+// writeSyncLog自体が失敗しても、それを理由に本来の失敗原因(message)を
+// すり替えたり握りつぶしたりしない。ここで止め、呼び出し元へは常に
+// 元のmessageを返す（修正2）。
+async function safeWriteSyncLog(env, entry) {
+  try {
+    await writeSyncLog(env, entry);
+  } catch (_e) {
+    // ログ書き込み自体の失敗は無視する。本来の失敗原因はentry.messageのまま
+    // 呼び出し元(syncAll)が返すので、ここで追加の対応は不要。
+  }
+}
+
+/**
+ * GASから取得してD1へ全件入れ替えする。
+ *
+ * ★契約：この関数は例外を投げない。失敗は必ず戻り値の `ok === false` で表す
+ * （fetch失敗・投入失敗のどちらも同じ形で返る）。呼び出し側は try/catch を
+ * 書かず `result.ok` だけを見ればよい。
+ *
+ * 中途半端なデータを「正しいデータ」として画面に返さないための安全装置は
+ * sync_log テーブルの ok 列のほうであり、こちらが本体。読み取り側（Task 3の
+ * 読み取りAPI）は最新の sync_log の ok を見て、ok=0 なら「古いが一貫した
+ * 状態」（前回成功時点のD1、またはGASへの自動フォールバック）を返すこと。
+ * syncAll の戻り値の ok は、呼び出し元（cronハンドラ等）への直接の結果通知用。
+ */
 export async function syncAll(env) {
   const url = env.GAS_URL + '?compact=1&company=&t=' + Date.now();
   let parsed;
   try {
     parsed = parseGasPayload(await fetchWithRetry(url, 3));
   } catch (e) {
-    return { ok: false, rows: 0, message: String(e.message || e) };
+    const message = String((e && e.message) || e);
+    await safeWriteSyncLog(env, { rows: 0, ok: 0, message });
+    return { ok: false, rows: 0, message };
   }
 
   const stmts = [];
@@ -101,8 +128,8 @@ export async function syncAll(env) {
   // 分割するとチャンク単位でしか原子性が無いため、途中で失敗すると
   // 「DELETEは済んだが一部しか入っていない」中途半端な状態が起こりうる。
   // それを正しいデータとして読み手に返すのが最悪の事故なので、
-  // 失敗したら必ず sync_log に ok=0 を記録してから例外を投げ、
-  // 呼び出し元（読み取り側）が異常だと分かるようにする。
+  // 失敗したら必ず sync_log に ok=0 を記録し、例外は投げずに
+  // {ok:false, ...} を返す（呼び出し元は戻り値のokだけを見ればよい契約）。
   try {
     for (let i = 0; i < stmts.length; i += BATCH_CHUNK_SIZE) {
       const chunk = stmts.slice(i, i + BATCH_CHUNK_SIZE);
@@ -110,10 +137,10 @@ export async function syncAll(env) {
     }
   } catch (e) {
     const message = String((e && e.message) || e);
-    await writeSyncLog(env, { rows: 0, ok: 0, message });
-    throw e;
+    await safeWriteSyncLog(env, { rows: 0, ok: 0, message });
+    return { ok: false, rows: 0, message };
   }
 
-  await writeSyncLog(env, { rows: parsed.nippo.length, ok: 1, message: '' });
+  await safeWriteSyncLog(env, { rows: parsed.nippo.length, ok: 1, message: '' });
   return { ok: true, rows: parsed.nippo.length, message: '' };
 }
