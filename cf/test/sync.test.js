@@ -30,6 +30,30 @@ describe('parseGasPayload', () => {
     expect(JSON.stringify(out.members)).not.toContain('18000');
   });
 
+  it('会社名セルの前後の空白は格納前に落とす（D1のWHERE kaisha=?は完全一致のため）', () => {
+    const row = [...new Array(19).fill('')];
+    row[1] = '2026-05-02';        // 作業日
+    row[4] = '川端（達）';          // 氏名
+    row[8] = 1;                   // 人工
+    row[11] = '  グローライズ　'; // 会社（前後に半角・全角空白が紛れ込んだ想定）
+    row[12] = 'abc-1';            // ID
+    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
+                   members:[], genbaMaster:[], jobsites:[] };
+    const out = parseGasPayload(json);
+    expect(out.nippo).toHaveLength(1);
+    expect(out.nippo[0].kaisha).toBe('グローライズ');
+  });
+
+  it('会社名セルが空・未定義でも落ちない（trim対象がnull/undefinedでも例外にならない）', () => {
+    const row = new Array(19).fill('');
+    row[1] = '2026-05-02'; row[4] = '森'; row[12] = 'abc-2';
+    row[11] = undefined; // 会社が未定義
+    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
+                   members:[], genbaMaster:[], jobsites:[] };
+    const out = parseGasPayload(json);
+    expect(out.nippo[0].kaisha).toBe('');
+  });
+
   it('compactでない応答は受け付けない（形が変わると壊れるため明示的に落とす）', () => {
     expect(() => parseGasPayload({status:'ok', rows:[{'ID':'x'}]}))
       .toThrow(/compact/);

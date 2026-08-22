@@ -27,6 +27,12 @@ export function parseGasPayload(json) {
     if (!rec.id) continue;                       // 主キーにできない行は捨てる
     if (!rec.sagyoubi || !rec.shimei) continue;  // 同上
     rec.kosu = Number(rec.kosu) || 0;
+    // ★D1側の絞り込み（WHERE kaisha = ?）は完全一致のため、会社名セルに
+    // 紛れ込んだ前後の空白をここ（格納時）で落としておく。GASのdoGetは
+    // 読み取りのたびに .trim() して比較しているが、D1は毎回trimしないので、
+    // ここで揃えないと「スプレッドシートでは表示されるのにCF経由だけ
+    // その人の行が静かに消える」事故になる（レビュー指摘）。
+    rec.kaisha = String(rec.kaisha == null ? '' : rec.kaisha).trim();
     for (const k of COL) if (rec[k] == null) rec[k] = '';
     nippo.push(rec);
   }

@@ -22,7 +22,11 @@ export default {
         // readScheduleは失敗を投げず {status:'error', message} を返すこともある
         // （sync_logが未取り込み/失敗のとき。計画からの変更1）。
         // どちらの形もそのままjson化して返せばよい。
-        return json(await readSchedule(env, url.searchParams.get('company') || ''));
+        // ★companyパラメータは.trim()してから渡す。D1側は完全一致（WHERE kaisha = ?）
+        // で絞り込むため、URLにたまたま前後の空白が付いても一致しない事故を防ぐ
+        // （gas.jsのdoGetもrequestedCompanyを.trim()してから比較している。レビュー指摘）。
+        const company = (url.searchParams.get('company') || '').trim();
+        return json(await readSchedule(env, company));
       } catch (e) {
         // 画面側は status!=='ok' を見てGASへ落ちる
         return json({ status: 'error', message: String(e.message || e) }, 500);
