@@ -93,54 +93,52 @@ async function safeWriteSyncLog(env, entry) {
  * syncAll の戻り値の ok は、呼び出し元（cronハンドラ等）への直接の結果通知用。
  */
 export async function syncAll(env) {
-  const url = env.GAS_URL + '?compact=1&company=&t=' + Date.now();
-  let parsed;
+  // ★関数全体をひとつのtryで包む。fetch/parseだけでなく、文の組み立て
+  // （env.DB.prepare()/bind()）もGASの想定外応答（配列やオブジェクトが
+  // 混ざる等）で例外を投げうるため、「どのtryにも入っていない行」を
+  // 作らない。捕まえた例外は種類を問わず同じ形（sync_logにok=0を記録し
+  // てから{ok:false, rows:0, message}を返す）に正規化する。
   try {
-    parsed = parseGasPayload(await fetchWithRetry(url, 3));
-  } catch (e) {
-    const message = String((e && e.message) || e);
-    await safeWriteSyncLog(env, { rows: 0, ok: 0, message });
-    return { ok: false, rows: 0, message };
-  }
+    const url = env.GAS_URL + '?compact=1&company=&t=' + Date.now();
+    const parsed = parseGasPayload(await fetchWithRetry(url, 3));
 
-  const stmts = [];
-  // 全件入れ替え。日報は削除も起きるため差分ではなく総入れ替えにする。
-  stmts.push(env.DB.prepare('DELETE FROM nippo'));
-  const ins = env.DB.prepare(
-    `INSERT OR REPLACE INTO nippo (${COL.join(',')}) VALUES (${COL.map(() => '?').join(',')})`
-  );
-  for (const r of parsed.nippo) stmts.push(ins.bind(...COL.map(c => r[c])));
+    const stmts = [];
+    // 全件入れ替え。日報は削除も起きるため差分ではなく総入れ替えにする。
+    stmts.push(env.DB.prepare('DELETE FROM nippo'));
+    const ins = env.DB.prepare(
+      `INSERT OR REPLACE INTO nippo (${COL.join(',')}) VALUES (${COL.map(() => '?').join(',')})`
+    );
+    for (const r of parsed.nippo) stmts.push(ins.bind(...COL.map(c => r[c])));
 
-  stmts.push(env.DB.prepare('DELETE FROM members'));
-  const im = env.DB.prepare('INSERT OR REPLACE INTO members (name,company,division) VALUES (?,?,?)');
-  for (const m of parsed.members) stmts.push(im.bind(m.name, m.company, m.division));
+    stmts.push(env.DB.prepare('DELETE FROM members'));
+    const im = env.DB.prepare('INSERT OR REPLACE INTO members (name,company,division) VALUES (?,?,?)');
+    for (const m of parsed.members) stmts.push(im.bind(m.name, m.company, m.division));
 
-  stmts.push(env.DB.prepare('DELETE FROM genba'));
-  const ig = env.DB.prepare('INSERT OR REPLACE INTO genba (name,company) VALUES (?,?)');
-  for (const g of parsed.genba) stmts.push(ig.bind(g.name, g.company));
+    stmts.push(env.DB.prepare('DELETE FROM genba'));
+    const ig = env.DB.prepare('INSERT OR REPLACE INTO genba (name,company) VALUES (?,?)');
+    for (const g of parsed.genba) stmts.push(ig.bind(g.name, g.company));
 
-  stmts.push(env.DB.prepare('DELETE FROM jobsites'));
-  const ij = env.DB.prepare(
-    'INSERT OR REPLACE INTO jobsites (genba,loc,jobNo,completed,billingMethod) VALUES (?,?,?,?,?)');
-  for (const j of parsed.jobsites) stmts.push(ij.bind(j.genba, j.loc, j.jobNo, j.completed, j.billingMethod));
+    stmts.push(env.DB.prepare('DELETE FROM jobsites'));
+    const ij = env.DB.prepare(
+      'INSERT OR REPLACE INTO jobsites (genba,loc,jobNo,completed,billingMethod) VALUES (?,?,?,?,?)');
+    for (const j of parsed.jobsites) stmts.push(ij.bind(j.genba, j.loc, j.jobNo, j.completed, j.billingMethod));
 
-  // ★500文ずつに分割して投げる（D1のbatch上限対策）。
-  // 分割するとチャンク単位でしか原子性が無いため、途中で失敗すると
-  // 「DELETEは済んだが一部しか入っていない」中途半端な状態が起こりうる。
-  // それを正しいデータとして読み手に返すのが最悪の事故なので、
-  // 失敗したら必ず sync_log に ok=0 を記録し、例外は投げずに
-  // {ok:false, ...} を返す（呼び出し元は戻り値のokだけを見ればよい契約）。
-  try {
+    // ★500文ずつに分割して投げる（D1のbatch上限対策）。
+    // 分割するとチャンク単位でしか原子性が無いため、途中で失敗すると
+    // 「DELETEは済んだが一部しか入っていない」中途半端な状態が起こりうる。
+    // それを正しいデータとして読み手に返すのが最悪の事故なので、
+    // 失敗したら（このtry全体のどこで起きても）必ず sync_log に ok=0 を
+    // 記録し、例外は投げずに {ok:false, ...} を返す。
     for (let i = 0; i < stmts.length; i += BATCH_CHUNK_SIZE) {
       const chunk = stmts.slice(i, i + BATCH_CHUNK_SIZE);
       await env.DB.batch(chunk);
     }
+
+    await safeWriteSyncLog(env, { rows: parsed.nippo.length, ok: 1, message: '' });
+    return { ok: true, rows: parsed.nippo.length, message: '' };
   } catch (e) {
     const message = String((e && e.message) || e);
     await safeWriteSyncLog(env, { rows: 0, ok: 0, message });
     return { ok: false, rows: 0, message };
   }
-
-  await safeWriteSyncLog(env, { rows: parsed.nippo.length, ok: 1, message: '' });
-  return { ok: true, rows: parsed.nippo.length, message: '' };
 }

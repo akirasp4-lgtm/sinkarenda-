@@ -67,9 +67,10 @@ describe('fetchWithRetry', () => {
 
 // D1のprepare/bind/run/batchを模した簡易モック。
 // bind()は新しいbindされた文（sql+args）を返し、batch配列にそのまま渡せる形にする。
-function makeMockDB({ failOnBatchCall, failSyncLogWrite } = {}) {
+function makeMockDB({ failOnBatchCall, failSyncLogWrite, failOnPrepareCall } = {}) {
   const batchCalls = [];      // batch()に渡された文の配列を、呼び出しごとに記録
   const syncLogRuns = [];     // sync_logへのINSERTで渡された引数を記録
+  let prepareCallCount = 0;
 
   function makeStmt(sql, args = []) {
     return {
@@ -90,6 +91,12 @@ function makeMockDB({ failOnBatchCall, failSyncLogWrite } = {}) {
 
   const db = {
     prepare(sql) {
+      prepareCallCount++;
+      // GASが想定外の形を返し、文の組み立て中（bindより前のprepare自体）
+      // で例外が出るケースを模す。
+      if (failOnPrepareCall && prepareCallCount === failOnPrepareCall) {
+        throw new Error('mock prepare failure on call ' + prepareCallCount);
+      }
       return makeStmt(sql, []);
     },
     async batch(stmts) {
@@ -190,5 +197,35 @@ describe('syncAll（500文ずつの分割投入）', () => {
     expect(out.message).not.toMatch(/mock sync_log write failure/);
     // 書き込みは試みられた（そして失敗した）ことは記録から分かる
     expect(syncLogRuns).toHaveLength(1);
+  });
+
+  it('env.DB.prepareが例外を投げても、syncAllは例外を投げずにok:falseを返し、sync_logにok=0が記録されること', async () => {
+    // 文の組み立て中（batch投入より前）に例外が出るケース。
+    // parseGasPayloadはnippoの値を素通しするため、GASが想定外の形
+    // （配列やオブジェクト等）を返すとprepare/bindが例外を投げうる。
+    // この区間が保護されていないと、syncAllの外へ例外がそのまま漏れる。
+    const rows = [makeRow(1)];
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({
+        status: 'ok', compact: 1, headers: HEADERS, rows,
+        members: [], genbaMaster: [], jobsites: [],
+      }),
+    }));
+
+    // 文の組み立てで最初に呼ばれるprepare（DELETE FROM nippo）で失敗させる。
+    const { db, syncLogRuns } = makeMockDB({ failOnPrepareCall: 1 });
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(false);
+    expect(out.rows).toBe(0);
+    expect(out.message).toMatch(/mock prepare failure/);
+
+    expect(syncLogRuns).toHaveLength(1);
+    const [, , ok, message] = syncLogRuns[0];
+    expect(ok).toBe(0);
+    expect(message).toMatch(/mock prepare failure/);
   });
 });
