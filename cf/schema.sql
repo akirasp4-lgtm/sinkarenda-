@@ -28,9 +28,10 @@ CREATE INDEX IF NOT EXISTS idx_nippo_kaisha   ON nippo(kaisha);
 
 -- 職人マスタ。★給料情報は意図的に持たない（D1へ持ち込まない）。
 CREATE TABLE IF NOT EXISTS members (
-  name     TEXT PRIMARY KEY,
-  company  TEXT,
-  division TEXT
+  name     TEXT NOT NULL,
+  company  TEXT NOT NULL,
+  division TEXT,
+  PRIMARY KEY (name, company)
 );
 
 CREATE TABLE IF NOT EXISTS genba (
