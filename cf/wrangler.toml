@@ -1,0 +1,15 @@
+name = "yotei-api"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "yotei"
+database_id = "PLACEHOLDER_実際のIDはwrangler d1 createの出力で置き換える"
+
+# 5分ごとにスプレッドシートから取り込む
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+GAS_URL = "https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3egJrKdWmXRK2AVnFrmBm4iO1QHCk-FZEH5LFFv7OloqcjQ/exec"
