@@ -546,6 +546,22 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 <button class="btn btn-secondary" style="margin-bottom:8px" onclick="loadData()">更新</button>
 <div class="card" style="margin-top:8px">
+  <div style="font-size:13px;color:#666;margin-bottom:8px;font-weight:500">👀 集計をこの画面で見る — スプレッドシートを開かずに確認できます</div>
+  <select id="view-sheet" style="margin-bottom:8px">
+    <option value="月別確認表">月別確認表（職人×日付の人工）</option>
+    <option value="会社別集計">会社別集計</option>
+    <option value="月別集計">月別集計</option>
+    <option value="元請別請求集計">元請別請求集計（金額あり）</option>
+  </select>
+  <div style="display:flex;gap:6px">
+    <button class="btn btn-secondary" id="view-sheet-btn" style="flex:1" onclick="viewSheetOnScreen()">画面で見る</button>
+    <button class="btn btn-secondary" id="view-summarize-btn" style="flex:1" onclick="summarizeThenView()">集計を更新して見る</button>
+  </div>
+  <div style="font-size:11px;color:#999;margin-top:6px">※記録として残す場合は下のダウンロードを使ってください。この表示は閲覧専用です。</div>
+  <div id="view-sheet-meta" style="font-size:11px;color:#999;margin-top:4px"></div>
+  <div id="view-sheet-wrap" style="margin-top:8px;overflow:auto;max-height:70vh;border:1px solid #eee;border-radius:6px;display:none"></div>
+</div>
+<div class="card" style="margin-top:8px">
   <div style="font-size:13px;color:#666;margin-bottom:10px;font-weight:500">📥 Excel（.xlsx）ダウンロード — 色・罫線・合計関数そのまま</div>
   <select id="csv-sheet" style="margin-bottom:8px">
     <option value="日報データ">日報データ</option><option value="アーカイブ">アーカイブ</option>
@@ -3383,6 +3399,61 @@ function updateGenbaFilter(){
   const gf=document.getElementById('j-genba-filter');const cur=gf.value;
   gf.innerHTML='<option value="">全元請</option>'+gs.map(g=>`<option${g===cur?' selected':''}>${esc(g)}</option>`).join('');
 }
+// ── 集計をこの画面で見る（2026-08-22）──────────────────────
+// スプレッドシートを直接覗きに行っていた人が数名いたため追加。
+// Excelを落とさなくても、生成済みの集計シートをそのままの並びで画面に出す。
+// ※再集計はしない。表示するだけ（「集計を更新して見る」を押した時だけ再集計）。
+let viewSheetBusy=false;
+function escViewCell(v){return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+async function viewSheetOnScreen(){
+  if(viewSheetBusy)return;
+  const sel=document.getElementById('view-sheet');if(!sel)return;
+  const name=sel.value;
+  const wrap=document.getElementById('view-sheet-wrap');
+  const meta=document.getElementById('view-sheet-meta');
+  const btn=document.getElementById('view-sheet-btn');
+  viewSheetBusy=true;btn.disabled=true;btn.textContent='読み込み中…';meta.textContent='';
+  try{
+    const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'get_sheet',sheet:name}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status!=='ok')throw new Error(json.message||'取得できませんでした');
+    const d=json.data||[];
+    if(d.length<=1){
+      wrap.innerHTML='<div style="padding:12px;color:#999">まだ中身がありません。「集計を更新して見る」を押してください。</div>';
+      wrap.style.display='block';return;
+    }
+    const h=['<table style="border-collapse:collapse;font-size:12px;white-space:nowrap">'];
+    for(let i=0;i<d.length;i++){
+      const row=d[i]||[];const first=String(row[0]||'');
+      const style=first.indexOf('▶')===0?'background:#1D9E75;color:#fff;font-weight:700'
+                 :(first==='合計'?'background:#F1F5F9;font-weight:700':'');
+      h.push('<tr style="'+style+'">');
+      for(let j=0;j<row.length;j++)h.push('<td style="border:1px solid #e5e7eb;padding:3px 6px">'+escViewCell(row[j])+'</td>');
+      h.push('</tr>');
+    }
+    h.push('</table>');
+    wrap.innerHTML=h.join('');wrap.style.display='block';
+    meta.textContent=name+'：'+d.length+'行 × '+((d[0]||[]).length)+'列を表示中（集計済みの内容をそのまま出しています）';
+  }catch(e){
+    wrap.innerHTML='<div style="padding:12px;color:#E8384F">読み込みエラー：'+escViewCell(e.message)+'</div>';
+    wrap.style.display='block';
+  }finally{viewSheetBusy=false;btn.disabled=false;btn.textContent='画面で見る';}
+}
+async function summarizeThenView(){
+  const btn=document.getElementById('view-summarize-btn');
+  btn.disabled=true;btn.textContent='集計中…（30秒ほどかかります）';
+  try{
+    const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'summarize'}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status!=='ok')throw new Error(json.message||'集計に失敗しました');
+  }catch(e){
+    alert('集計エラー：'+e.message);
+    btn.disabled=false;btn.textContent='集計を更新して見る';return;
+  }
+  btn.disabled=false;btn.textContent='集計を更新して見る';
+  viewSheetOnScreen();
+}
+
 function updateJimu(){
   const month=document.getElementById('j-month').value;const genbaF=document.getElementById('j-genba-filter').value;
   const nippos=filteredNippos().filter(n=>n.date.startsWith(month)&&(!genbaF||n.genba===genbaF));
