@@ -573,6 +573,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="会社別集計">会社別集計</option>
     <option value="月別集計">月別集計</option>
     <option value="元請別請求集計">元請別請求集計（金額あり）</option>
+    <option value="元請別請求集計_フィルタ用">元請別請求集計_フィルタ用（金額あり）</option>
+    <option value="事業部別按分">事業部別按分（金額あり・要確認）</option>
   </select>
   <div style="display:flex;gap:6px">
     <button class="btn btn-secondary" id="view-sheet-btn" style="flex:1" onclick="viewSheetOnScreen()">画面で見る</button>
@@ -3546,7 +3548,11 @@ async function viewSheetOnScreen(){
     }
     h.push('</table>');
     wrap.innerHTML=h.join('');wrap.style.display='block';
-    meta.textContent=name+'：'+d.length+'行 × '+((d[0]||[]).length)+'列を表示中（集計済みの内容をそのまま出しています）';
+    let note='';
+    // 引き継ぎ書の記録: 事業部別按分の数字はテストの残骸で本番データではない（2026-06-11 利用者確認）。
+    // 計算エンジン自体は完成品なので、中身を入れ替えれば使える。それまでは鵜呑みにしないよう明示する。
+    if(name==='事業部別按分')note=' ／ ⚠️ この表の数字はテスト時の残骸の可能性があります（2026-06-11時点の記録）。判断に使う前に中身を確認してください';
+    meta.textContent=name+'：'+d.length+'行 × '+((d[0]||[]).length)+'列を表示中（集計済みの内容をそのまま出しています）'+note;
   }catch(e){
     wrap.innerHTML='<div style="padding:12px;color:#E8384F">読み込みエラー：'+escViewCell(e.message)+'</div>';
     wrap.style.display='block';
