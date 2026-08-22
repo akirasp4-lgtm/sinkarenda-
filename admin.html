@@ -546,6 +546,27 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 <button class="btn btn-secondary" style="margin-bottom:8px" onclick="loadData()">更新</button>
 <div class="card" style="margin-top:8px">
+  <div style="font-size:13px;color:#666;margin-bottom:8px;font-weight:500">📋 期間の出面をパッと見る（10日締め用・Excel不要）</div>
+  <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">
+    <button class="btn btn-secondary" onclick="pkQuick(&#39;1&#39;)" style="padding:5px 9px;font-size:12px">1〜10日</button>
+    <button class="btn btn-secondary" onclick="pkQuick(&#39;2&#39;)" style="padding:5px 9px;font-size:12px">11〜20日</button>
+    <button class="btn btn-secondary" onclick="pkQuick(&#39;3&#39;)" style="padding:5px 9px;font-size:12px">21日〜末</button>
+    <button class="btn btn-secondary" onclick="pkQuick(&#39;m&#39;)" style="padding:5px 9px;font-size:12px">今月</button>
+    <button class="btn btn-secondary" onclick="pkQuick(&#39;pm&#39;)" style="padding:5px 9px;font-size:12px">先月</button>
+  </div>
+  <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;font-size:13px">
+    <input type="date" id="pk-from" style="flex:1;padding:6px;font-size:13px">
+    <span style="color:#999">〜</span>
+    <input type="date" id="pk-to" style="flex:1;padding:6px;font-size:13px">
+  </div>
+  <div style="display:flex;gap:6px">
+    <button class="btn btn-secondary" style="flex:1" onclick="renderPeriodKakunin()">画面に出す</button>
+    <button class="btn btn-secondary" style="flex:1" onclick="pkExportXlsx()">この期間でExcel（証拠用）</button>
+  </div>
+  <div id="pk-meta" style="font-size:11px;color:#999;margin-top:6px"></div>
+  <div id="pk-wrap" style="margin-top:8px;overflow:auto;max-height:70vh;border:1px solid #eee;border-radius:6px;display:none"></div>
+</div>
+<div class="card" style="margin-top:8px">
   <div style="font-size:13px;color:#666;margin-bottom:8px;font-weight:500">👀 集計をこの画面で見る — スプレッドシートを開かずに確認できます</div>
   <select id="view-sheet" style="margin-bottom:8px">
     <option value="月別確認表">月別確認表（職人×日付の人工）</option>
@@ -3403,6 +3424,92 @@ function updateGenbaFilter(){
 // スプレッドシートを直接覗きに行っていた人が数名いたため追加。
 // Excelを落とさなくても、生成済みの集計シートをそのままの並びで画面に出す。
 // ※再集計はしない。表示するだけ（「集計を更新して見る」を押した時だけ再集計）。
+// ── 期間の出面をパッと見る（2026-08-22）────────────────────
+// 10日締めで「あなたは何日出ました」を事務員がLINEで送るため、毎回Excelを
+// 出力してスクショしていた。手元のデータから同じ表をその場で作って画面に出す。
+// サーバに問い合わせないので押した瞬間に出る（Excel出力は証拠として残す用に別途あり）。
+// ★ 数字は GAS の generatePeriodKakuninData_ と同じ規則で計算する（Excelと一致させる）:
+//    ・休み / 予定 は除外する
+//    ・同じ人の同じ日は「昼の最大値 + 夜勤の最大値」（重複入力を二重に数えない）
+//    ・倉庫は通常勤務として数える
+// ★ アーカイブ済み（約3ヶ月より前）は手元に無いので出ない。その場合は警告を出す。
+function pkDayList(from,to){
+  const out=[];const d=new Date(from+'T00:00:00');const e=new Date(to+'T00:00:00');
+  while(d<=e){out.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'));d.setDate(d.getDate()+1);}
+  return out;
+}
+function pkQuick(which){
+  const now=new Date();const p=n=>String(n).padStart(2,'0');
+  const lastDay=(y,m)=>new Date(y,m+1,0).getDate();
+  let y=now.getFullYear(),m=now.getMonth(),from,to;
+  if(which==='pm'){const d=new Date(y,m-1,1);y=d.getFullYear();m=d.getMonth();}
+  const ym=y+'-'+p(m+1);
+  if(which==='1'){from=ym+'-01';to=ym+'-10';}
+  else if(which==='2'){from=ym+'-11';to=ym+'-20';}
+  else if(which==='3'){from=ym+'-21';to=ym+'-'+p(lastDay(y,m));}
+  else {from=ym+'-01';to=ym+'-'+p(lastDay(y,m));}
+  document.getElementById('pk-from').value=from;
+  document.getElementById('pk-to').value=to;
+  renderPeriodKakunin();
+}
+function renderPeriodKakunin(){
+  const from=(document.getElementById('pk-from')||{}).value||'';
+  const to=(document.getElementById('pk-to')||{}).value||'';
+  const wrap=document.getElementById('pk-wrap'),meta=document.getElementById('pk-meta');
+  if(!from||!to){meta.textContent='開始日と終了日を選んでください';wrap.style.display='none';return;}
+  if(from>to){meta.textContent='開始日が終了日より後になっています';wrap.style.display='none';return;}
+  const co=currentCompany;
+  const recs=allNippos.filter(n=>!n.isGhost&&n.date>=from&&n.date<=to&&(!co||co==='全社'||n.company===co));
+  const eff=recs.filter(n=>!n.yasumi&&!n.yotei);
+  const names=[...new Set(eff.map(n=>n.name))].filter(Boolean).sort();
+  const days=pkDayList(from,to);
+  const cell={};
+  eff.forEach(n=>{
+    const k=n.name+'\u0000'+n.date;
+    if(!cell[k])cell[k]={d:0,n:0};
+    const v=Number(n.kosu)||0;
+    if(n.yakin){if(v>cell[k].n)cell[k].n=v;}else{if(v>cell[k].d)cell[k].d=v;}
+  });
+  const dn=['日','月','火','水','木','金','土'];
+  const h=['<table style="border-collapse:collapse;font-size:12px;white-space:nowrap">'];
+  h.push('<tr style="background:#1D9E75;color:#fff;font-weight:700">'
+    +'<td style="border:1px solid #e5e7eb;padding:4px 8px;position:sticky;left:0;background:#1D9E75">名前</td>');
+  days.forEach(d=>{const dt=new Date(d+'T00:00:00');
+    const we=dt.getDay()===0||dt.getDay()===6;
+    h.push('<td style="border:1px solid #e5e7eb;padding:4px 6px;text-align:center'+(we?';opacity:.75':'')+'">'
+      +(dt.getMonth()+1)+'/'+dt.getDate()+'<br>('+dn[dt.getDay()]+')</td>');});
+  h.push('<td style="border:1px solid #e5e7eb;padding:4px 8px">合計</td></tr>');
+  let grand=0;
+  names.forEach(nm=>{
+    let sum=0;
+    const tds=days.map(d=>{
+      const c=cell[nm+'\u0000'+d];const v=c?(c.d+c.n):0;sum+=v;
+      return '<td style="border:1px solid #e5e7eb;padding:3px 6px;text-align:center'+(v?';font-weight:600':';color:#d1d5db')+'">'+v+'</td>';
+    }).join('');
+    grand+=sum;
+    h.push('<tr><td style="border:1px solid #e5e7eb;padding:3px 8px;font-weight:600;position:sticky;left:0;background:#fff">'
+      +escViewCell(nm)+'</td>'+tds
+      +'<td style="border:1px solid #e5e7eb;padding:3px 8px;text-align:center;font-weight:700;background:#F1F5F9">'+sum+'</td></tr>');
+  });
+  h.push('</table>');
+  if(!names.length)wrap.innerHTML='<div style="padding:12px;color:#999">この期間に出面がありません</div>';
+  else wrap.innerHTML=h.join('');
+  wrap.style.display='block';
+  let msg=from+' 〜 '+to+'（'+(co||'全社')+'）／ '+names.length+'名・のべ'+grand+'人工';
+  const dates=allNippos.filter(n=>!n.isGhost).map(n=>n.date).filter(Boolean).sort();
+  const oldest=dates[0]||'';
+  if(oldest&&from<oldest)msg+=' ／ \u26a0\ufe0f '+oldest+' より前はアーカイブ済みでこの画面には出ません（Excel出力なら出ます）';
+  meta.textContent=msg;
+}
+// 画面で見た期間そのままでExcelも出す（証拠として残す用・スクショ用）
+function pkExportXlsx(){
+  const f=(document.getElementById('pk-from')||{}).value||'';
+  const t=(document.getElementById('pk-to')||{}).value||'';
+  if(!f||!t){alert('開始日と終了日を選んでください');return;}
+  const a=document.getElementById('csv-date-from'),b=document.getElementById('csv-date-to');
+  if(a)a.value=f;if(b)b.value=t;
+  downloadPeriodKakuninXlsx();
+}
 let viewSheetBusy=false;
 function escViewCell(v){
   let s=String(v==null?'':v);
