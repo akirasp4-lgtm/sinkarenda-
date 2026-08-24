@@ -15,6 +15,23 @@
 //   修正3: members/genbaMaster/jobsitesにも日報と同じ半減チェックを適用した。
 //   修正7: 半減チェックで拒否し続けると自己回復しない失敗ループになるため、
 //          連続拒否がしきい値を超えたら自動的に受け入れる／force=1での明示的上書きを設けた。
+//
+// ★2026-08-24 3回目レビュー（Fable 5 / Codex）で、なお2件の重大・高が残っているとの
+// 判定を受け、さらに以下を修正した：
+//   修正3（急減ガードの自己回復・作り直し）: 旧実装は「直近3件が急減ログか」という
+//     “回数”だけで自己回復していた。Codexが「日報→職人→元請→現場と毎回まったく別の
+//     欠損を起こしても、4回目が『3回連続』の条件を満たして自動受入されてしまう」ことを
+//     実際に再現した（=私が入れた安全装置そのものが攻撃経路になっていた）。
+//     回数ではなく「拒否した取得内容のハッシュが直近と同一で、かつ最初の拒否から
+//     一定時間（30分）が経過している」ことを条件にする。中身が変わるたびに時計が
+//     リセットされるため、異なる欠損を連発しても自動受入には辿り着けない。
+//   修正4（世代ガードの同着対策）: WHERE条件を `>=` から `>` に変える。旧条件では
+//     ロックがフェイルオープンした状態で2つの同期が同一ミリ秒に開始すると、
+//     先に完了した新しい内容を、後から完了した（同じ開始ミリ秒の）古い内容が
+//     上書きできてしまうことをCodexが再現した。`>` にすることで「同じ開始時刻の
+//     書き込みは最初の1回しか勝てない」に変わり、後続の同着書き込みは無条件で弾かれる
+//     （meta.changes=0）。真に同時始まりの2件のどちらが「本当は新しいか」は
+//     決められないが、少なくとも「先に保存済みの内容が後から上書きされる」ことは無くなる。
 
 const EXPECTED_HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤',
   '人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両'];
@@ -39,10 +56,18 @@ const LOCK_STALE_MS = 90_000;
 // 修正7（急減ガードの自己回復）。件数半減で拒否したことを示す固定の目印文字列。
 // sync_logのmessageにこれが含まれる行を「拒否ログ」として数える。
 const SHRINK_REJECT_MARKER = '件数が急減しました';
-// 連続でこの回数だけ拒否が続いたら、以後は自動的に受け入れる（自己回復）。
-// Cronは5分間隔のため、3回連続＝最大15分は安全側（拒否＝既存の古いデータを保持）に倒し、
-// それでも状況が変わらなければ「本当にそういうデータなのだろう」とみなして受け入れる。
-const SHRINK_AUTO_ACCEPT_AFTER_N = 3;
+// ★3回目レビュー修正3: 「回数」ではなく「同一内容の拒否が続いた時間」で自己回復を
+// 判定する。最初に拒否してからこの時間が経過し、かつその間ずっと同じ内容
+// （ハッシュ一致）で拒否され続けていた場合のみ、自動的に受け入れる。
+// 30分＝Cron(5分間隔)なら約6回、同じ状態が続いて初めて「本当にそういうデータ
+// なのだろう」とみなす。回数を基準にしないため、/api/syncを連打しても
+// （＝異なる内容を次々送りつけても、同じ内容を高速に送りつけても）早められない。
+const SHRINK_AUTO_ACCEPT_MIN_ELAPSED_MS = 30 * 60 * 1000;
+// 「直近が同一ハッシュで何件連続拒否されているか」を遡って見るための上限。
+// Cron間隔(5分)基準なら30分でも6件だが、書き込み後の即時同期等で呼び出し頻度が
+// 上がっても十分に遡れるよう余裕を持たせてある（多く見ても実害は無い＝古い方向に
+// 安全側なだけで、自動受入を早めることはない）。
+const SHRINK_LOG_SCAN_LIMIT = 500;
 
 /**
  * GAS応答の妥当性を検証する（修正3）。ここで甘い判定をすると、将来GAS側で
@@ -105,10 +130,13 @@ async function sha256Hex(text) {
 }
 
 // sync_log に1行残す（取り込みの成功/失敗どちらも記録する。障害調査用）。
-async function writeSyncLog(env, { rows, ok, message }) {
+// ★3回目レビュー修正3: payloadHash（今回取得した内容のハッシュ。取得自体が失敗した
+// ときはnull）も一緒に記録する。急減ガードの自己回復が「同一内容の拒否が何分
+// 続いているか」を判定するのに使う（下記 sameHashShrinkRejectStreak 参照）。
+async function writeSyncLog(env, { rows, ok, message, payloadHash }) {
   const at = new Date().toISOString();
-  await env.DB.prepare('INSERT OR REPLACE INTO sync_log (at,rows,ok,message) VALUES (?,?,?,?)')
-    .bind(at, rows, ok, message).run();
+  await env.DB.prepare('INSERT OR REPLACE INTO sync_log (at,rows,ok,message,payload_hash) VALUES (?,?,?,?,?)')
+    .bind(at, rows, ok, message, payloadHash || null).run();
 }
 
 // writeSyncLog自体が失敗しても、それを理由に本来の失敗原因(message)を
@@ -159,25 +187,34 @@ async function releaseLock(env) {
   }
 }
 
-// 修正7（急減ガードの自己回復）。直近のsync_logを新しい順に見て、
-// 「件数急減による拒否」が何回連続しているかを数える。拒否以外（成功や別の理由の
-// 失敗）に当たった時点で数えるのをやめる＝あくまで「直近ずっと同じ理由で
-// 拒否され続けているか」を見る。
-async function recentConsecutiveShrinkRejections(env) {
+// ★3回目レビュー修正3（作り直し）: 急減ガードの自己回復を「回数」ではなく
+// 「同一内容（ハッシュ一致）の拒否が、最初の拒否からどれだけの時間続いているか」で
+// 判定する。直近のsync_logを新しい順に遡り、「件数急減による拒否」かつ「今回と
+// 同じハッシュ」である限り数え続け、それ以外（成功・別の理由の失敗・違う内容の
+// 拒否）に当たった時点で止める。
+//
+// 旧実装（回数だけを見る版）は、Codexにより「日報→職人→元請→現場と毎回まったく
+// 別の欠損を起こしても、4回目に“3回連続拒否”の条件を満たして自動受入されてしまう」
+// ことを再現された。ハッシュを条件に加えることで、内容が変わるたびにこの判定は
+// リセットされる＝異なる欠損を連続させても自動受入には辿り着けない。
+async function sameHashShrinkRejectStreak(env, currentHash) {
   try {
     const res = await env.DB.prepare(
-      'SELECT ok, message FROM sync_log ORDER BY at DESC LIMIT ?'
-    ).bind(SHRINK_AUTO_ACCEPT_AFTER_N).all();
-    const logs = (res.results || []).slice(0, SHRINK_AUTO_ACCEPT_AFTER_N);
+      'SELECT at, ok, message, payload_hash FROM sync_log ORDER BY at DESC LIMIT ?'
+    ).bind(SHRINK_LOG_SCAN_LIMIT).all();
+    const logs = res.results || [];
     let count = 0;
+    let earliestAt = null; // ハッシュが一致したまま遡れた中で最も古い（＝最初の拒否）at
     for (const r of logs) {
-      if (Number(r.ok) === 0 && String(r.message || '').includes(SHRINK_REJECT_MARKER)) count++;
-      else break;
+      const isReject = Number(r.ok) === 0 && String(r.message || '').includes(SHRINK_REJECT_MARKER);
+      if (!isReject || r.payload_hash !== currentHash) break;
+      count++;
+      earliestAt = r.at;
     }
-    return count;
+    return { count, earliestAt };
   } catch (_e) {
-    // 履歴が読めなければ「まだ0回」として扱う＝これまでどおり拒否を継続する安全側。
-    return 0;
+    // 履歴が読めなければ「まだ実績なし」として扱う＝これまでどおり拒否を継続する安全側。
+    return { count: 0, earliestAt: null };
   }
 }
 
@@ -191,10 +228,12 @@ async function recentConsecutiveShrinkRejections(env) {
  * のみ。DELETE+複数INSERTのような「複数の文にまたがる書き込み」が無いため、
  * 途中状態が外部の読み取りに見える瞬間が原理的に存在しない。
  *
- * ★世代の逆転防止（再レビュー修正2）：書き込み文のWHERE条件が「今回の取得開始時刻
- * (fetch_started_at) が保存済みのものと同じか新しいときだけ上書きする」ことを強制する。
+ * ★世代の逆転防止（再レビュー修正2・3回目レビュー修正4）：書き込み文のWHERE条件が
+ * 「今回の取得開始時刻(fetch_started_at) が保存済みのものより厳密に新しいときだけ
+ * 上書きする」ことを強制する（`>`。同じ時刻での上書きは不可＝3回目レビュー修正4）。
  * 同時に2つの同期が走り、遅く始まった方が先に完了しても、先に始まった方（古い内容）が
- * 後から上書きすることはできない。
+ * 後から上書きすることはできない。同一ミリ秒に始まった2件は「先に書き込めた方」が
+ * 保持され、後続は無条件で弾かれる。
  *
  * ★費用（重大2の解決）：1回の同期の書き込みは常に1行（変更が無ければ0行）。
  * Cronが5分ごと(288回/日)に走っても最大288行/日で、無料枠10万行/日の0.3%。
@@ -250,6 +289,11 @@ export async function syncAll(env, opts = {}) {
       return { ok: false, rows: 0, message };
     }
 
+    // ★3回目レビュー修正3: 急減ガードの自己回復（下記）がハッシュ一致の判定を
+    // 必要とするため、ここで先に計算しておく（以前は変更なしスキップの直前だけで
+    // 計算していた）。値そのものは変わらない＝安全なリファクタリング。
+    const hash = await sha256Hex(payloadText);
+
     const existingRes = await env.DB.prepare(
       'SELECT rows, hash, members_count, genba_count, jobsites_count FROM snapshot WHERE id = 1'
     ).all();
@@ -272,32 +316,40 @@ export async function syncAll(env, opts = {}) {
         // ★修正7（急減ガードの自己回復）: アーカイブ等の正当な操作でも件数は
         // 半分以下になりうる。拒否し続けるだけだと、正しい操作の後でも人手での
         // 復旧が必要になる失敗ループになる（レビュー指摘）。
+        //
+        // ★3回目レビュー修正3（作り直し）: 「回数」ではなく「同一内容（ハッシュ一致）の
+        // 拒否が最初の拒否から何分続いているか」で判定する。Codexが「毎回違う内容の
+        // 欠損を連発しても3回で自動受入されてしまう」ことを再現したため、回数だけの
+        // 判定は廃止した。詳細は sameHashShrinkRejectStreak のコメント参照。
         if (force) {
           shrinkNote = `（★${SHRINK_REJECT_MARKER}：${shrunk.join('、')}／force=1が指定されたため強制的に受け入れました）`;
         } else {
-          const consecutive = await recentConsecutiveShrinkRejections(env);
-          if (consecutive < SHRINK_AUTO_ACCEPT_AFTER_N) {
-            const remain = SHRINK_AUTO_ACCEPT_AFTER_N - consecutive - 1;
-            const hint = remain > 0
-              ? `あと${remain}回連続で同じ状態が続くと自動的に受け入れます。`
-              : `次回も同じ状態が続けば自動的に受け入れます。`;
+          const streak = await sameHashShrinkRejectStreak(env, hash);
+          const elapsedMs = streak.earliestAt ? Date.now() - Date.parse(streak.earliestAt) : 0;
+          const stable = !!streak.earliestAt && Number.isFinite(elapsedMs) && elapsedMs >= SHRINK_AUTO_ACCEPT_MIN_ELAPSED_MS;
+          if (!stable) {
+            const remainMin = streak.earliestAt
+              ? Math.max(1, Math.ceil((SHRINK_AUTO_ACCEPT_MIN_ELAPSED_MS - elapsedMs) / 60000))
+              : Math.ceil(SHRINK_AUTO_ACCEPT_MIN_ELAPSED_MS / 60000);
+            const hint = streak.earliestAt
+              ? `同じ内容の拒否が既に${streak.count}回続いています。このままあと約${remainMin}分、同じ内容が続けば自動的に受け入れます。`
+              : `今回が最初の拒否です。同じ内容のまま約${remainMin}分続けば自動的に受け入れます。`;
             const message = `${SHRINK_REJECT_MARKER}：${shrunk.join('、')}。GAS側の異常を疑い、書き込みを中止しました`
-              + `（連続${consecutive + 1}回目。${hint}今すぐ反映したい場合は /api/sync?force=1 を使ってください）`;
-            await safeWriteSyncLog(env, { rows: rowCount, ok: 0, message });
+              + `（${hint}今すぐ反映したい場合は /api/sync?force=1 を使ってください）`;
+            await safeWriteSyncLog(env, { rows: rowCount, ok: 0, message, payloadHash: hash });
             return { ok: false, rows: 0, message };
           }
-          // 連続拒否がしきい値に達した＝自己回復。今回は受け入れて書き込みへ進む。
-          shrinkNote = `（★${SHRINK_REJECT_MARKER}：${shrunk.join('、')}／連続${consecutive}回拒否のため自動的に受け入れました）`;
+          // 同一内容の拒否が30分以上続いた＝自己回復。今回は受け入れて書き込みへ進む。
+          const elapsedMin = Math.round(elapsedMs / 60000);
+          shrinkNote = `（★${SHRINK_REJECT_MARKER}：${shrunk.join('、')}／同一内容の拒否が${elapsedMin}分継続したため自動的に受け入れました）`;
         }
       }
     }
 
-    const hash = await sha256Hex(payloadText);
-
     // ★修正1（変更が無ければ書かない）: 夜間・休日の書き込みが0になる。
     if (existing && existing.hash === hash) {
       const message = '変更なし（書き込みをスキップしました）' + shrinkNote;
-      await safeWriteSyncLog(env, { rows: rowCount, ok: 1, message });
+      await safeWriteSyncLog(env, { rows: rowCount, ok: 1, message, payloadHash: hash });
       return { ok: true, rows: rowCount, message, skipped: true };
     }
 
@@ -307,6 +359,16 @@ export async function syncAll(env, opts = {}) {
     // 保存済みのより新しい結果を上書きできない。この1文が成功するか
     // （条件不成立で）何も変えずに終わるかのどちらかであり、「一部だけ入った」
     // 中途半端な状態は無い。
+    //
+    // ★3回目レビュー修正4: 条件を `>=` から `>` に変更。ロックがフェイルオープンした
+    // 状態で2つの同期が同一ミリ秒(Date.now())に開始すると、`>=`では「後から完了した
+    // 方（内容の新旧を問わない）」が常に上書きできてしまい、Codexが「新しい内容を
+    // 保存した後に古い内容が上書きする」ケースを再現した。`>`にすることで、同じ
+    // fetch_started_atでの書き込みは最初の1回しか成功しなくなる（2回目以降は
+    // meta.changes=0で弾かれる）。真に同一ミリ秒に始まった2件のどちらが本当に
+    // 新しいかは決められないが、「既に保存済みの内容が後から上書きされる」ことは
+    // 無くなる（＝最初に書き込めた方が保持される。それ以上は分からないので保守的に
+    // 「何もしない」側へ倒す）。
     const writeRes = await env.DB.prepare(
       `INSERT INTO snapshot (id, payload, hash, rows, members_count, genba_count, jobsites_count, bytes, fetch_started_at, at)
        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -320,21 +382,21 @@ export async function syncAll(env, opts = {}) {
          bytes = excluded.bytes,
          fetch_started_at = excluded.fetch_started_at,
          at = excluded.at
-       WHERE CAST(excluded.fetch_started_at AS INTEGER) >= CAST(snapshot.fetch_started_at AS INTEGER)`
+       WHERE CAST(excluded.fetch_started_at AS INTEGER) > CAST(snapshot.fetch_started_at AS INTEGER)`
     ).bind(payloadText, hash, rowCount, memberCount, genbaCount, jobsitesCount, bytes, String(fetchStartedAt), at).run();
 
     const wrote = !!(writeRes && writeRes.meta && writeRes.meta.changes > 0);
     if (!wrote) {
-      // ★世代の逆転防止が実際に働いた瞬間：この取得結果より新しいものが
+      // ★世代の逆転防止が実際に働いた瞬間：この取得結果と同じか新しいものが
       // 既に保存されている。取得自体は正常に終わっているのでok:trueとし、
       // 「書かなかったこと」をskippedで表す（失敗ではない）。
-      const message = 'より新しい取得結果が既に保存されているため、今回の取得内容は書き込みませんでした（正常な動作です）' + shrinkNote;
-      await safeWriteSyncLog(env, { rows: rowCount, ok: 1, message });
+      const message = 'より新しい（または同じ開始時刻の）取得結果が既に保存されているため、今回の取得内容は書き込みませんでした（正常な動作です）' + shrinkNote;
+      await safeWriteSyncLog(env, { rows: rowCount, ok: 1, message, payloadHash: hash });
       return { ok: true, rows: rowCount, message, skipped: true };
     }
 
     const message = shrinkNote || '';
-    await safeWriteSyncLog(env, { rows: rowCount, ok: 1, message });
+    await safeWriteSyncLog(env, { rows: rowCount, ok: 1, message, payloadHash: hash });
     return { ok: true, rows: rowCount, message };
   } catch (e) {
     const message = String((e && e.message) || e);
@@ -342,5 +404,25 @@ export async function syncAll(env, opts = {}) {
     return { ok: false, rows: 0, message };
   } finally {
     if (locked) await releaseLock(env);
+  }
+}
+
+// ★修正8（低・sync_logの掃除）: sync_logはCronのたびに1行増える（5分間隔で最大288行/日）。
+// 何もしないと無限に増え続けるため、保持期間を過ぎた行をCronのたびに削除する。
+// 30日より新しい行は、読み取り側の鮮度ガード（15分）・急減ガードの自己回復（30分）
+// どちらの判定にも十分すぎるほど余裕がある。呼び出し元（scheduled()）はsyncAllとは
+// 独立にこれを呼ぶため、掃除の成否が同期そのものに影響しないようにする（例外を
+// 投げない契約はsyncAllと揃える）。
+const SYNC_LOG_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+export async function cleanupSyncLog(env) {
+  try {
+    const cutoff = new Date(Date.now() - SYNC_LOG_RETENTION_MS).toISOString();
+    await env.DB.prepare('DELETE FROM sync_log WHERE at < ?').bind(cutoff).run();
+    return { ok: true };
+  } catch (e) {
+    // 掃除の失敗は同期本体に影響させない（ログ肥大化は障害調査の材料が増えるだけで、
+    // アプリの正しさには関わらないため）。
+    return { ok: false, message: String((e && e.message) || e) };
   }
 }

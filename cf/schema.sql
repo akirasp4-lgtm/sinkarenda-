@@ -34,12 +34,34 @@
 --      は空配列でも受け入れていた。→ snapshotに各マスタの件数
 --      (members_count/genba_count/jobsites_count) を持たせ、日報と同じ半減チェックを
 --      3つのマスタにも適用する（cf/src/sync.js）。
+--
+-- ★2026-08-24 3回目レビュー（Fable 5 / Codex）で、なお以下2件（重大・高）が残っている
+-- 判定を受け、sync_logに列を1つ追加した（cf/src/sync.js参照）：
+--   6) 急減ガードの自己回復が「回数」だけで判定しており、Codexが「毎回まったく別の
+--      欠損を連発しても3回連続で自動受入されてしまう」ことを再現した。→ 拒否した
+--      取得内容のハッシュ(payload_hash)をsync_logに記録し、「同一ハッシュの拒否が
+--      最初の拒否から30分以上続いている」ときだけ自己回復するように変更した。
+--
+-- ついでに /api/sync のレート制限（cf/src/index.js、修正5）もsync_logの直近1分間の
+-- 行数を数えて判定する形にした（新しいテーブルを増やさず、既存の「実際にGAS/D1へ
+-- 負荷をかけた回数」の記録をそのまま使う）。
 
--- ★上記3)〜5)で列構成が変わるため、snapshot/sync_lockは一度DROPしてから作り直す。
--- D1はあくまでGASの派生コピー（sync.js冒頭のコメント参照）で、まだ本番切替前
--- （backend.jsonはgasのまま）のため、安全に作り直せる。壊れても次の同期で全件戻る。
+-- ★上記6)でsync_logの列構成も変わるため、snapshot/sync_lock/sync_logをすべて
+-- 一度DROPしてから作り直す。
+--
+-- ★注意（この一括DROPは「まだ本番切替前だから安全」という前提に依存している）:
+-- backend.jsonが"gas"のまま（＝画面がまだD1を読みに行っていない）今のうちは、
+-- 一度空にしても実害が無い（D1はあくまでGASの派生コピー。次のCronの成功で全件戻る）。
+-- しかし本番切替後（backend.jsonが"d1"になった後）にこのファイルを再適用すると、
+-- その瞬間 snapshot / sync_log が空になる。read.jsは「まだ取り込みが行われていません」
+-- を返し、画面側は自動でGASへフォールバックするため利用者に実害は無いが、次のCron
+-- （最大5分後）が成功するまでD1経由の読み取りが一時的に使えなくなる。列追加などで
+-- 切替後にこのファイルを再適用する必要が生じたときは、深夜・早朝などアクセスの
+-- 少ない時間帯に行うこと（毎回DROPする設計そのものを変えない限り、この注意点は
+-- 消えない）。
 DROP TABLE IF EXISTS snapshot;
 DROP TABLE IF EXISTS sync_lock;
+DROP TABLE IF EXISTS sync_log;
 
 CREATE TABLE IF NOT EXISTS snapshot (
   id               INTEGER PRIMARY KEY CHECK (id = 1),  -- 常に1行だけ（CHECKで強制）
@@ -74,13 +96,22 @@ CREATE TABLE IF NOT EXISTS sync_lock (
 --   - ★再レビュー修正: 読み取り側（read.js）の鮮度ガードが「直近の成功時刻」を
 --     ここから読む。ハッシュ一致で書き込みをスキップした場合も ok=1 で記録するため
 --     （sync.jsのsyncAll）、「変更が無いだけ」を「古い」と誤判定しない。
---   - ★再レビュー修正: 急減ガードの自己回復（修正7）が、直近の拒否が何回連続したかを
---     ここから数える（cf/src/sync.jsのrecentConsecutiveShrinkRejections）。
+--   - ★3回目レビュー修正3: 急減ガードの自己回復が、直近の拒否が「同じ内容
+--     (payload_hash)のまま」何分続いているかをここから遡って数える
+--     （cf/src/sync.jsのsameHashShrinkRejectStreak）。回数だけでなく内容の一致も
+--     見るようにしたのは、Codexが「毎回別の内容で拒否させても回数だけで自動受入
+--     されてしまう」ことを再現したため。
+--   - ★3回目レビュー修正5: /api/syncのレート制限（cf/src/index.js）が、直近1分間の
+--     行数を「実際にGAS/D1へ負荷をかけた回数」の実測値として使う。
+-- ★30日より古い行はCronのたびに掃除する（cf/src/sync.jsのcleanupSyncLog。修正8）。
+-- 無限に増え続けるのを防ぐ。
 CREATE TABLE IF NOT EXISTS sync_log (
-  at       TEXT PRIMARY KEY,
-  rows     INTEGER,
-  ok       INTEGER,
-  message  TEXT
+  at            TEXT PRIMARY KEY,
+  rows          INTEGER,
+  ok            INTEGER,
+  message       TEXT,
+  payload_hash  TEXT  -- 今回取得した内容のSHA-256。取得自体が失敗し内容が無いときはNULL。
+                       -- 急減ガードの自己回復（同一内容の拒否が続いているか）の判定に使う。
 );
 
 -- ★旧設計（行ごとのテーブル）は廃止。もう使わない。

@@ -46,7 +46,13 @@ function makeMockDB({ snapshot = null, syncLog = null } = {}) {
           const oks = state.syncLog.filter(l => Number(l.ok) === 1).sort((a, b) => b.at.localeCompare(a.at));
           return { results: oks.length ? [{ at: oks[0].at }] : [] };
         }
-        if (/SELECT ok, message FROM sync_log/.test(sql)) {
+        // ★3回目レビュー修正5（レート制限）: 直近1分間の実行回数を数えるクエリ。
+        if (/SELECT COUNT\(\*\) AS c FROM sync_log WHERE at > \?/.test(sql)) {
+          const [cutoff] = args;
+          return { results: [{ c: state.syncLog.filter(l => l.at > cutoff).length }] };
+        }
+        // ★3回目レビュー修正3（急減ガードの自己回復）: payload_hash列も含めて取得する。
+        if (/SELECT at, ok, message, payload_hash FROM sync_log/.test(sql)) {
           return { results: [...state.syncLog].sort((a, b) => b.at.localeCompare(a.at)) };
         }
         if (/FROM sync_log/.test(sql)) {
@@ -63,17 +69,25 @@ function makeMockDB({ snapshot = null, syncLog = null } = {}) {
           state.lockedAt = newLockedAt;
           return { success: true, meta: { changes: 1 } };
         }
+        if (/DELETE FROM sync_log/.test(sql)) {
+          // ★修正8（sync_logの掃除）: 掃除対象がテストの前提を壊さないよう、
+          // cutoffより古い行だけを取り除く（本番のDELETEと同じ挙動）。
+          const [cutoff] = args;
+          state.syncLog = state.syncLog.filter(l => l.at >= cutoff);
+          return { success: true };
+        }
         if (/INSERT INTO snapshot/.test(sql) && /ON CONFLICT/.test(sql)) {
           const [payload, hash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at] = args;
-          const isNewer = !state.snapshot || Number(fetchStartedAt) >= Number(state.snapshot.fetchStartedAt || 0);
+          // ★3回目レビュー修正4: 本番のWHERE条件が`>=`から`>`（同着不可）に変わった。
+          const isNewer = !state.snapshot || Number(fetchStartedAt) > Number(state.snapshot.fetchStartedAt || 0);
           if (!isNewer) return { success: true, meta: { changes: 0 } };
           state.snapshot = { payload, hash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at };
           return { success: true, meta: { changes: 1 } };
         }
         if (/INSERT OR REPLACE INTO sync_log/.test(sql)) {
-          const [at, rows, ok, message] = args;
+          const [at, rows, ok, message, payloadHash] = args;
           const idx = state.syncLog.findIndex(l => l.at === at);
-          const entry = { at, rows, ok, message };
+          const entry = { at, rows, ok, message, payload_hash: payloadHash ?? null };
           if (idx >= 0) state.syncLog[idx] = entry; else state.syncLog.push(entry);
           return { success: true };
         }
@@ -104,6 +118,22 @@ function makeSnapshot(rows, members = [], overrides = {}) {
 // snapshotを直接注入する（syncAllを経由しない）ため、鮮度ログも合わせて用意する。
 function freshSyncLog(at = new Date().toISOString()) {
   return [{ at, rows: 0, ok: 1, message: '' }];
+}
+
+// ★3回目レビュー修正5（Origin検証）: /api/syncは正規の呼び出し元（画面のオリジン）
+// からのリクエストであることをOriginヘッダで確認するようになった。
+// SYNC_KEY・同時実行抑止・force=1など「Origin検証より後」の挙動を確認するテストは、
+// Origin検証で弾かれてしまわないよう、正しいOriginを付けて呼ぶ必要がある。
+const ALLOWED_ORIGIN = 'https://akirasp4-lgtm.github.io';
+function syncRequest(url, opts = {}) {
+  const { headers = {}, ...init } = opts;
+  // ★'origin'キー自体が渡されなければ既定（正しいOrigin）を使う。
+  // 明示的に origin: null を渡したときだけ「Originヘッダ無し」を表す
+  // （origin: undefined は「キーはあるが値が無い」で default 引数と区別できないため使わない）。
+  const useOrigin = Object.prototype.hasOwnProperty.call(opts, 'origin') ? opts.origin : ALLOWED_ORIGIN;
+  const h = { ...headers };
+  if (useOrigin) h.Origin = useOrigin;
+  return new Request(url, { method: 'POST', ...init, headers: h });
 }
 
 describe('GET /api/schedule のcompanyパラメータのtrim（レビュー指摘: 会社名の前後空白）', () => {
@@ -160,7 +190,7 @@ describe('POST /api/sync（修正2: 共有秘密による簡易認証）', () =>
     const { db } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec' }; // SYNC_KEY未設定
 
-    const res = await worker.fetch(new Request('https://worker.test/api/sync', { method: 'POST' }), env, {});
+    const res = await worker.fetch(syncRequest('https://worker.test/api/sync'), env, {});
     const body = await res.json();
 
     expect(res.status).toBe(200);
@@ -173,7 +203,7 @@ describe('POST /api/sync（修正2: 共有秘密による簡易認証）', () =>
     const { db, state } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec', SYNC_KEY: 'himitsu-123' };
 
-    const res = await worker.fetch(new Request('https://worker.test/api/sync', { method: 'POST' }), env, {});
+    const res = await worker.fetch(syncRequest('https://worker.test/api/sync'), env, {});
     const body = await res.json();
 
     expect(res.status).toBe(403);
@@ -187,7 +217,7 @@ describe('POST /api/sync（修正2: 共有秘密による簡易認証）', () =>
     const { db } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec', SYNC_KEY: 'himitsu-123' };
 
-    const req = new Request('https://worker.test/api/sync', { method: 'POST', headers: { 'X-Sync-Key': 'chigau-key' } });
+    const req = syncRequest('https://worker.test/api/sync', { headers: { 'X-Sync-Key': 'chigau-key' } });
     const res = await worker.fetch(req, env, {});
     expect(res.status).toBe(403);
   });
@@ -200,13 +230,136 @@ describe('POST /api/sync（修正2: 共有秘密による簡易認証）', () =>
     const { db, state } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec', SYNC_KEY: 'himitsu-123' };
 
-    const req = new Request('https://worker.test/api/sync', { method: 'POST', headers: { 'X-Sync-Key': 'himitsu-123' } });
+    const req = syncRequest('https://worker.test/api/sync', { headers: { 'X-Sync-Key': 'himitsu-123' } });
     const res = await worker.fetch(req, env, {});
     const body = await res.json();
 
     expect(res.status).toBe(200);
     expect(body.status).toBe('ok');
     expect(state.snapshot).toBeTruthy();
+  });
+});
+
+describe('POST /api/sync（3回目レビュー修正5: Origin検証）', () => {
+  it('Originヘッダが無いと403で拒否し、GASへの取得もD1への書き込みも一切起きない', async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock;
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const res = await worker.fetch(syncRequest('https://worker.test/api/sync', { origin: null }), env, {});
+    const body = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(body.status).toBe('error');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(state.snapshot).toBeNull();
+  });
+
+  it('許可されたドメイン以外のOriginは403で拒否する（第三者のWebページから叩かれた想定）', async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock;
+    const { db } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const res = await worker.fetch(
+      syncRequest('https://worker.test/api/sync', { origin: 'https://evil.example.com' }), env, {}
+    );
+    expect(res.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('force=1が付いていても、Origin不一致なら急減ガードの脱出口として機能しない（先にOrigin検証で弾かれる）', async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock;
+    const { db } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const res = await worker.fetch(
+      syncRequest('https://worker.test/api/sync?force=1', { origin: 'https://evil.example.com' }), env, {}
+    );
+    expect(res.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('正しいOriginなら（SYNC_KEY未設定の環境で）通常どおり実行される（回帰確認）', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
+    }));
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const res = await worker.fetch(syncRequest('https://worker.test/api/sync'), env, {});
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe('ok');
+    expect(state.snapshot).toBeTruthy();
+  });
+});
+
+describe('POST /api/sync（3回目レビュー修正5: レート制限）', () => {
+  it('直近1分間の実行回数がしきい値以上なら、GASへの取得を行わず「進行中」と同じ扱いでスキップする', async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock;
+    const { db, state } = makeMockDB();
+    // しきい値(12件)ちょうどのsync_logを直近1分以内に積んでおく。
+    const now = Date.now();
+    for (let i = 0; i < 12; i++) {
+      state.syncLog.push({ at: new Date(now - i * 1000).toISOString(), rows: 0, ok: 1, message: '' });
+    }
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const res = await worker.fetch(syncRequest('https://worker.test/api/sync'), env, {});
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe('ok');
+    expect(body.skipped).toBe(true);
+    expect(body.message).toMatch(/レート制限|回数/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('直近1分間の実行回数がしきい値未満なら、通常どおり実行される', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
+    }));
+    const { db, state } = makeMockDB();
+    const now = Date.now();
+    for (let i = 0; i < 3; i++) {
+      state.syncLog.push({ at: new Date(now - i * 1000).toISOString(), rows: 0, ok: 1, message: '' });
+    }
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const res = await worker.fetch(syncRequest('https://worker.test/api/sync'), env, {});
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe('ok');
+    expect(body.skipped).toBeFalsy();
+    expect(state.snapshot).toBeTruthy();
+  });
+
+  it('1分より古いsync_logはカウントに含まれない（古い実行が居座って永久にレート制限されることはない）', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
+    }));
+    const { db, state } = makeMockDB();
+    const now = Date.now();
+    for (let i = 0; i < 20; i++) {
+      state.syncLog.push({ at: new Date(now - 5 * 60 * 1000 - i * 1000).toISOString(), rows: 0, ok: 1, message: '' }); // 5分以上前
+    }
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const res = await worker.fetch(syncRequest('https://worker.test/api/sync'), env, {});
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe('ok');
+    expect(body.skipped).toBeFalsy();
   });
 });
 
@@ -219,7 +372,7 @@ describe('POST /api/sync（修正2: 同時実行の抑止）', () => {
     locked.state.lockedAt = String(Date.now() - 500);
     const env = { DB: locked.db, GAS_URL: 'https://example.test/exec' };
 
-    const res = await worker.fetch(new Request('https://worker.test/api/sync', { method: 'POST' }), env, {});
+    const res = await worker.fetch(syncRequest('https://worker.test/api/sync'), env, {});
     const body = await res.json();
 
     expect(res.status).toBe(200);
@@ -286,7 +439,7 @@ describe('POST /api/sync（修正7: force=1の結線）', () => {
 
     // force無しなら拒否されるはず、という前提の確認は sync.test.js 側で担保済み。
     // ここではforce=1の指定がindex.js→syncAllへ実際に配線されていることを確認する。
-    const res = await worker.fetch(new Request('https://worker.test/api/sync?force=1', { method: 'POST' }), env, {});
+    const res = await worker.fetch(syncRequest('https://worker.test/api/sync?force=1'), env, {});
     const body = await res.json();
 
     expect(res.status).toBe(200);

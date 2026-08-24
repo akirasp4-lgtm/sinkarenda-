@@ -1153,10 +1153,33 @@ const GAS_URL='https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3eg
 // ★2026-08-24修正6: 画面からWorker/GASへの通信にタイムアウトが無かった
 // （Worker→GASのタイムアウトは既にあったが、ブラウザ→Worker・ブラウザ→GASには無かった）。
 // Workerが無応答だとGASへ移る機会を失い、画面が止まってしまう（レビュー指摘）。
-// 読み取り(/api/schedule・GAS直読み・職人マスタ取得)は15秒、同期(/api/sync)は20秒で
-// タイムアウトし、次の候補（GAS）へ進む。
-const READ_TIMEOUT_MS=15000;
-const SYNC_TIMEOUT_MS=20000;
+// ★3回目レビュー修正6: 15秒は「D1(Worker)への読み取り」用としては妥当だが、
+// 「GASへの読み取り」に同じ15秒を使うと、GASの実測応答時間（3.9〜56秒。doGet内の
+// ロック待ち最大10秒を含む）より短く、「遅いが成功していた」読み取りが失敗に変わって
+// しまう（レビュー指摘）。D1用とGAS用でタイムアウトを分ける（職人マスタ取得もGAS
+// への読み取りなのでGAS_READ_TIMEOUT_MSを使う）。
+// ★3回目レビュー修正6: backend.json自体の読み込みにタイムアウトが無かった。
+// loadData()はbackend.jsonを待ってから候補URL（D1/GAS）へ進むため、ここが無応答だと
+// 上記のどのタイムアウトにも到達できず画面が止まる（レビュー指摘）。短いタイムアウト
+// を設け、失敗したら既定の{backend:'gas'}のまま続行する（安全側）。
+const READ_TIMEOUT_MS=15000;       // D1(Worker)への読み取り用
+const GAS_READ_TIMEOUT_MS=45000;   // GASへの読み取り用（D1より長い猶予を持たせる）
+const SYNC_TIMEOUT_MS=20000;       // /api/sync（Worker）用
+const BACKEND_JSON_TIMEOUT_MS=3000; // backend.json読み込み用
+
+// ★修正1（最優先）: AbortSignal.timeout() はSafari 16未満（iOS15止まりのiPhone 6s/7/
+// SE初代等）・Chrome 103未満には存在しない。無い環境で使うと
+// 「AbortSignal.timeout is not a function」がD1試行にもGAS試行にも例外として発生し、
+// loadDataが全滅して「前回の内容です（登録・保存はできません）」の表示で恒久固定に
+// なる（backendの設定とは無関係に、この2ファイルを公開した瞬間から発症する回帰。
+// レビュー指摘・Fable 5が最も差し迫ると評価）。存在しない環境ではタイムアウト無し
+// （signal:undefined＝従来どおりの動作）にフォールバックする。
+function timeoutSignal(ms){
+  try{
+    if(typeof AbortSignal!=='undefined'&&typeof AbortSignal.timeout==='function')return AbortSignal.timeout(ms);
+  }catch(e){}
+  return undefined;
+}
 
 // ── 合言葉(k)の自動付与（2026-06-10 セキュリティ強化）──────────────
 // URLの ?k=合言葉 を一度受け取ると端末(localStorage)に保存し、
@@ -1992,22 +2015,40 @@ function addLocalRows(rows){
 }
 function refreshInBackground(after){
   // 2026-08-22: 書き込みはGASへ行くので、D1へ取り込ませてから読み直す。
-  // 取り込み(/api/sync)に失敗しても loadData 側がGASへ落ちるので実害はない＝握りつぶして続行。
   // ★2026-08-24修正5: 書き込み直後にこれを挟まず直接loadData()を呼ぶと、切替後は
   // 最大5分古いD1を読んで再描画してしまう（「完了にしたのに進行中に戻る」等）。
+  //
+  // ★3回目レビュー修正2（最重要・両者一致）: 以前はここで/api/syncの結果
+  // （HTTPステータス・JSONのstatus・skipped）を一切見ず、通信例外も握りつぶして
+  // 必ずloadData()（＝D1優先）へ進んでいた。コード中の「取り込みに失敗しても
+  // loadData側がGASへ落ちるので実害はない」という説明は誤りだった：鮮度ガードの
+  // おかげで直近成功していればD1はstatus:'ok'を返し続けるため、今回の同期が
+  // 「進行中でスキップ」「急減ガードで拒否」「403」「タイムアウト」のいずれで
+  // 終わっても、loadDataはGASへは落ちずD1（＝書き込み前の古い内容）を読んでしまう。
+  // 被害: 職人が予定を登録→「登録しました」→目の前で予定が消える→再登録→
+  // 日報重複→人工（給料の元数字）の二重計上。
+  //
+  // 対策: 同期が「確実に成功した」（HTTP 200・JSON.status==='ok'・skippedでない）
+  // とき以外は、直後の1回だけD1を使わずGASから読む（一度きりの
+  // 「今回はGASを優先」フラグ＝forceGas。loadDataの引数）。GASは常に最新なので、
+  // これで「登録したのに消える」が構造的に起きなくなる。
   // await で待つ必要がある呼び出し元のためPromiseを返す（await refreshInBackground()）。
-  const done=()=>loadData().then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
-  return fetch('backend.json?t='+Date.now()).then(r=>r.ok?r.json():null).then(cfg=>{
+  const done=(forceGas)=>loadData(forceGas).then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
+  return fetch('backend.json?t='+Date.now(),{signal:timeoutSignal(BACKEND_JSON_TIMEOUT_MS)}).then(r=>r.ok?r.json():null).then(cfg=>{
     if(cfg&&cfg.backend==='d1'&&cfg.workerUrl){
       // ★修正2: /api/syncの簡易認証。backend.jsonにsyncKeyがあればヘッダへ載せる
       // （未設定ならヘッダなしで送る＝Worker側もSYNC_KEY未設定なら認証を要求しない）。
       const headers=cfg.syncKey?{'X-Sync-Key':cfg.syncKey}:{};
-      return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers,signal:AbortSignal.timeout(SYNC_TIMEOUT_MS)}).catch(()=>{});
+      return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers,signal:timeoutSignal(SYNC_TIMEOUT_MS)}).then(res=>{
+        if(!res.ok)return true;   // HTTPエラー（403・500等）→今回はGASを優先
+        return res.json().then(j=>!(j&&j.status==='ok'&&!j.skipped)).catch(()=>true);
+      }).catch(()=>true);         // 通信失敗・タイムアウト→今回はGASを優先
     }
-  }).catch(()=>{}).then(done);
+    return false;   // backendがd1でなければloadData側もD1を読みに行かないので関係ない
+  }).catch(()=>false).then(done);
 }
 
-async function loadData(){
+async function loadData(forceGas){
   const requestSeq=++dataLoadSeq;
   const requestCompany=currentCompany;
   setLoading(true);dataLoadOk=false;
@@ -2022,19 +2063,24 @@ async function loadData(){
     let json=null,lastErr=null,usedBackend='gas';
     let cfg={backend:'gas'};
     try{
-      const c=await fetch('backend.json?t='+Date.now());
+      const c=await fetch('backend.json?t='+Date.now(),{signal:timeoutSignal(BACKEND_JSON_TIMEOUT_MS)});
       if(c.ok)cfg=await c.json();
     }catch(e){/* 取れなければGASのまま＝安全側 */}
 
     const tryUrls=[];
-    if(cfg.backend==='d1'&&cfg.workerUrl)
+    // ★3回目レビュー修正2: forceGasのときはD1を候補に入れない（refreshInBackground
+    // 参照。直前の/api/syncが「確実に成功した」と確認できなかった場合の一度きりの
+    // 安全弁）。
+    if(cfg.backend==='d1'&&cfg.workerUrl&&!forceGas)
       tryUrls.push({kind:'d1',url:cfg.workerUrl+'/api/schedule?company='+encodeURIComponent(companyParam)});
     tryUrls.push({kind:'gas',url:GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam)});
     tryUrls.push({kind:'gas',url:GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam)});
 
     for(const t of tryUrls){
       try{
-        const res=await fetch(t.url,{signal:AbortSignal.timeout(READ_TIMEOUT_MS)});
+        // ★3回目レビュー修正6: D1とGASでタイムアウトを分ける（上部の定数コメント参照）。
+        const timeoutMs=t.kind==='d1'?READ_TIMEOUT_MS:GAS_READ_TIMEOUT_MS;
+        const res=await fetch(t.url,{signal:timeoutSignal(timeoutMs)});
         const j=await res.json();
         if(j.status!=='ok')throw new Error(j.message||'予定データの取得に失敗しました');
         json=j;usedBackend=t.kind;lastErr=null;break;
@@ -4082,7 +4128,7 @@ function setGenbaValue(p,val){
 // ★backend（gas/d1）で分岐しない。ここは常にGASから取り直す＝分岐は事故の元。
 // ★Cloudflare(D1)は給料情報を持たない方針のため、単価はここでしか取れない。
 // ★allMembers（予定表示に使う本体・loadDataで backend 切替の影響を受けうる）は上書きしない。
-let settingsMembers=null;   // 取得成功時: [{name,company,division,rate}, ...]
+let settingsMembers=null;   // 取得成功時: [{name,company,division,rate,rateOk}, ...]（rateOk＝単価セルが数値として妥当だったか。修正7）
 let settingsMembersOk=false; // false のままなら単価欄は編集不可にする（0で誤上書きを防ぐ）
 
 async function loadSettingsMembers(){
@@ -4091,7 +4137,7 @@ async function loadSettingsMembers(){
   // （このままだと職人管理を開くたび約2割で「取得できませんでした」表示になっていた）。
   for(let attempt=0;attempt<2;attempt++){
     try{
-      const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'get_sheet',sheet:'職人マスタ'}),headers:{'Content-Type':'text/plain'},signal:AbortSignal.timeout(READ_TIMEOUT_MS)});
+      const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'get_sheet',sheet:'職人マスタ'}),headers:{'Content-Type':'text/plain'},signal:timeoutSignal(GAS_READ_TIMEOUT_MS)});
       const json=await res.json();
       if(json.status!=='ok')throw new Error(json.message||'職人マスタの取得に失敗しました');
       const data=json.data;
@@ -4109,12 +4155,25 @@ async function loadSettingsMembers(){
         throw new Error('職人マスタのヘッダに「氏名」または「単価」列が見つかりません: '+JSON.stringify(header));
       }
       const companyIdx=header.indexOf('会社'),divIdx=header.indexOf('事業部');
-      settingsMembers=data.slice(1).map(r=>({
-        name:String(r[nameIdx]||''),
-        company:String(companyIdx>=0?(r[companyIdx]||''):''),
-        division:String(divIdx>=0?(r[divIdx]||''):''),
-        rate:Number(r[rateIdx])||0
-      }));
+      settingsMembers=data.slice(1).map(r=>{
+        // ★3回目レビュー修正7: 行（氏名）は存在するが単価セルの値だけが欠落・
+        // 非数値の場合、これまでは Number(...)||0 で一律0に正規化していた。
+        // すると修正4の「行が存在するか」チェックは通ってしまい、その人の欄が
+        // 「空欄かつ編集可能」になる＝管理者が触ると0が保存される穴が残っていた
+        // （レビュー指摘）。単価セルが「数値として妥当」かどうかを rateOk として
+        // 別途記録し、renderSettingsで氏名の有無だけでなくrateOkも見て編集可否を
+        // 決める（空文字・null・undefined・非数値はrateOk:false。0は妥当な数値
+        // なのでrateOk:trueのまま扱う＝無給ではなく「未取得」だけを区別する）。
+        const raw=r[rateIdx];
+        const rateOk=raw!==''&&raw!==null&&raw!==undefined&&Number.isFinite(Number(raw));
+        return{
+          name:String(r[nameIdx]||''),
+          company:String(companyIdx>=0?(r[companyIdx]||''):''),
+          division:String(divIdx>=0?(r[divIdx]||''):''),
+          rate:rateOk?Number(raw):0,
+          rateOk
+        };
+      });
       settingsMembersOk=true;
       return;
     }catch(e){
@@ -4145,8 +4204,14 @@ function renderSettings(){
   // 応答に含まれなかった残り全員の単価欄が「空欄かつ編集可能」になっていた（レビュー指摘）。
   // 全体の成功フラグに加えて、今の会社に表示すべき職人が実際に取得結果へ全員そろっているかを
   // 個々に確認する。欠けている人だけ編集不可にする（全体を丸ごと失敗扱いにするより丁寧）。
+  // ★3回目レビュー修正7: 「行が存在するか」だけでなく、その行の単価セルが数値として
+  // 妥当だったか(rateOk)も見る。行はあるが単価セルだけ壊れている部分応答も、
+  // 氏名だけで「取得できた人」に含めていた（レビュー指摘）。
   const missingNames=settingsMembersOk
-    ?shokuninList.filter(s=>!settingsMembers||!settingsMembers.some(m=>m.name===s&&m.company===currentCompany))
+    ?shokuninList.filter(s=>{
+      const m=settingsMembers&&settingsMembers.find(m=>m.name===s&&m.company===currentCompany);
+      return !m||!m.rateOk;
+    })
     :[];
   const warnHtml=!settingsMembersOk
     ?'<div style="background:#fef2f2;color:#c00;border:1px solid #fca5a5;border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">⚠️ 単価を取得できませんでした（通信エラー）。保存済みの単価は変わっていません。編集するには一度閉じて開き直してください。</div>'
@@ -4158,7 +4223,9 @@ function renderSettings(){
     const member=settingsMembers?settingsMembers.find(m=>m.name===s&&m.company===currentCompany):null;
     // ★修正5: 全体成功(settingsMembersOk)だけでなく、この人が実際に取得結果に
     // いたか(member)も見る。部分応答で欠けている人はここがfalseになる。
-    const memberOk=settingsMembersOk&&!!member;
+    // ★3回目レビュー修正7: 行が存在しても単価セルが非数値・欠落なら(member.rateOk===false)
+    // memberOkはfalseにする＝空欄かつ編集可能な穴を塞ぐ。
+    const memberOk=settingsMembersOk&&!!member&&member.rateOk;
     const div=(member&&member.division)||'';
     const rate=(member&&member.rate)||0;
     const divSelect=isGrowise?`<select onchange="updateMemberDivision('${esc(s)}',this.value)" style="width:auto;margin:0;padding:4px 8px;font-size:12px;border:1px solid #ddd;border-radius:6px;background:#f9f9f9">
@@ -4179,7 +4246,7 @@ async function addShokunin(){
   const isGrowise=currentCompany==='グローライズ';const divSel=document.getElementById('new-shokunin-division');const division=isGrowise&&divSel?divSel.value:'';
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'add_member',name:v,company:currentCompany,division}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status==='ok'){allMembers.push({name:v,company:currentCompany,division});if(settingsMembers)settingsMembers.push({name:v,company:currentCompany,division,rate:0});document.getElementById('new-shokunin').value='';if(divSel)divSel.value='';renderSettings();initMemberUI();
+    if(json.status==='ok'){allMembers.push({name:v,company:currentCompany,division});if(settingsMembers)settingsMembers.push({name:v,company:currentCompany,division,rate:0,rateOk:true});document.getElementById('new-shokunin').value='';if(divSel)divSel.value='';renderSettings();initMemberUI();
       if(settingsOpenedForSelect){const sel=document.getElementById(settingsOpenedForSelect);if(sel)sel.value=v;if(settingsOpenedForSelect==='s-operator'){currentUsername=v;try{localStorage.setItem('admin-username',v);}catch(e){}updateUsernameDisplay();}settingsOpenedForSelect=null;}
       // ★修正5: D1切替後に他画面が古い職人マスタを読まないよう、裏でsyncしておく
       // （同名の3重登録が実在した原因＝この経路が同期を挟んでいなかったこと）。

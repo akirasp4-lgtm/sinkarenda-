@@ -32,6 +32,15 @@ describe('schema.sql', () => {
     for (const col of ['at', 'rows', 'ok', 'message']) expect(m[0]).toMatch(new RegExp('\\b' + col + '\\b'));
   });
 
+  it('sync_logはpayload_hash列を持つ（3回目レビュー修正3: 急減ガードの自己回復が同一内容かを判定するため）', () => {
+    const m = sql.match(/CREATE TABLE IF NOT EXISTS\s+sync_log\s*\([\s\S]*?\n\);/i);
+    expect(m[0]).toMatch(/\bpayload_hash\b/);
+  });
+
+  it('sync_logも列構成が変わったためDROPしてから作り直す（3回目レビュー修正3で列を追加したため）', () => {
+    expect(sql).toMatch(/DROP TABLE IF EXISTS\s+sync_log/i);
+  });
+
   it('sync_lockテーブルがある（修正2: 同時実行の抑止用）', () => {
     const m = sql.match(/CREATE TABLE IF NOT EXISTS\s+sync_lock\s*\([\s\S]*?\n\);/i);
     expect(m, 'sync_lockのCREATE TABLE文が見つからない').toBeTruthy();

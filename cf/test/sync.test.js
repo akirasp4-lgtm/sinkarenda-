@@ -178,7 +178,9 @@ function makeMockDB({ initialLockedAt = null, throwOnSnapshotWrite = false, thro
         if (/SELECT rows, bytes, at FROM snapshot/.test(sql)) {
           return { results: state.snapshot ? [{ rows: state.snapshot.rows, bytes: state.snapshot.bytes, at: state.snapshot.at }] : [] };
         }
-        if (/SELECT ok, message FROM sync_log/.test(sql)) {
+        // ★3回目レビュー修正3: 急減ガードの自己回復（sameHashShrinkRejectStreak）が
+        // payload_hash列も含めて取得するようになった。
+        if (/SELECT at, ok, message, payload_hash FROM sync_log/.test(sql)) {
           return { results: [...state.syncLog].sort((a, b) => b.at.localeCompare(a.at)) };
         }
         if (/FROM sync_log/.test(sql)) {
@@ -208,21 +210,24 @@ function makeMockDB({ initialLockedAt = null, throwOnSnapshotWrite = false, thro
           calls.snapshotWriteAttempts++;
           if (throwOnSnapshotWrite) throw new Error('mock snapshot write failure');
           const [payload, hash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at] = args;
-          const isNewer = !state.snapshot || Number(fetchStartedAt) >= Number(state.snapshot.fetchStartedAt);
+          // ★3回目レビュー修正4: 本番のWHERE条件が `>=` から `>` に変わったことに合わせる。
+          // 初回（保存済みが無い）はON CONFLICTに入らず素直にINSERTされるのでtrue。
+          // 2回目以降は「保存済みより厳密に新しい」ときだけ上書きできる（同着は不可）。
+          const isNewer = !state.snapshot || Number(fetchStartedAt) > Number(state.snapshot.fetchStartedAt);
           if (!isNewer) return { success: true, meta: { changes: 0 } };
           state.snapshot = { payload, hash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at };
           calls.snapshotWrites++;
           return { success: true, meta: { changes: 1 } };
         }
         if (/INSERT OR REPLACE INTO sync_log/.test(sql)) {
-          const [at, rows, ok, message] = args;
+          const [at, rows, ok, message, payloadHash] = args;
           // ★実際のschema.sqlではat(TEXT)がPRIMARY KEYのため、同じatでの書き込みは
           // 新しい行としてpushされず、既存行を置き換える（INSERT OR REPLACEの本来の意味）。
           // これを素朴なpush()だけにすると、テストの高速な連続呼び出しで同一ミリ秒の
           // at が発生した際に「本来は1行のはずが2行できてしまう」というモック特有の
           // 不具合でテストがまれに揺れる（本番のD1では起こらない）。
           const idx = state.syncLog.findIndex(l => l.at === at);
-          const entry = { at, rows, ok, message };
+          const entry = { at, rows, ok, message, payload_hash: payloadHash ?? null };
           if (idx >= 0) state.syncLog[idx] = entry; else state.syncLog.push(entry);
           calls.syncLogWrites.push(entry);
           return { success: true };
@@ -257,6 +262,19 @@ function makeRows(n, extra = {}) {
     row[1] = '2026-05-02'; row[4] = '作業員' + i; row[8] = 1; row[11] = 'グローライズ'; row[12] = 'id-' + i;
     return row;
   });
+}
+
+// ★3回目レビュー修正4（世代ガードの同着対策）でsnapshot書き込みのWHERE条件が
+// `>=` から `>`（同一ミリ秒は不可）に変わったため、同じテスト内で複数回 syncAll() を
+// 呼んで「両方とも書き込まれる」ことを期待するテストは、Date.now() が実際に進む
+// ことを保証しないと、実機のD1（fetchのたびに本物の通信時間が経つので実質衝突しない）
+// と違ってテスト環境（fetchは即座に解決する）では同一ミリ秒に衝突しうる
+// （実行速度に依存するため、直さないと「たまに落ちるテスト」になる）。
+// 使い終わったら必ず stop() でspyを元に戻すこと。
+function stubIncreasingClock(startAt = 1_000_000, stepMs = 1000) {
+  let t = startAt;
+  const spy = vi.spyOn(Date, 'now').mockImplementation(() => { const v = t; t += stepMs; return v; });
+  return { stop: () => spy.mockRestore() };
 }
 
 describe('syncAll（正常系）', () => {
@@ -316,16 +334,23 @@ describe('syncAll（修正1: 変更が無ければ書かない）', () => {
   it('内容が変わっていれば2回目も書き込む', async () => {
     const { db, calls } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    // ★修正4でfetch_started_atの比較が`>`（同着不可）になったため、2回とも書き込まれる
+    // ことを期待するこのテストはDate.now()を明示的に単調増加させる（stubIncreasingClock参照）。
+    const clock = stubIncreasingClock();
 
-    mockFetchOk(makeCompactPayload({ rows: makeRows(300) }));
-    await syncAll(env);
-    expect(calls.snapshotWrites).toBe(1);
+    try {
+      mockFetchOk(makeCompactPayload({ rows: makeRows(300) }));
+      await syncAll(env);
+      expect(calls.snapshotWrites).toBe(1);
 
-    mockFetchOk(makeCompactPayload({ rows: makeRows(301) }));
-    const second = await syncAll(env);
-    expect(second.ok).toBe(true);
-    expect(second.skipped).toBeFalsy();
-    expect(calls.snapshotWrites).toBe(2);
+      mockFetchOk(makeCompactPayload({ rows: makeRows(301) }));
+      const second = await syncAll(env);
+      expect(second.ok).toBe(true);
+      expect(second.skipped).toBeFalsy();
+      expect(calls.snapshotWrites).toBe(2);
+    } finally {
+      clock.stop();
+    }
   });
 });
 
@@ -541,29 +566,37 @@ describe('syncAll（修正3・再レビュー: members/genbaMaster/jobsitesの�
   it('日報が変わらずマスタだけ増えるのは半減ではないので通す（回帰確認）', async () => {
     const { db, state } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    // ★修正4の同着対策により、2回とも書き込まれることを期待するのでDate.now()を進める。
+    const clock = stubIncreasingClock();
 
-    mockFetchOk(makeCompactPayload({ rows: makeRows(5), members: [{ name: '森', company: 'G', division: '' }] }));
-    await syncAll(env);
+    try {
+      mockFetchOk(makeCompactPayload({ rows: makeRows(5), members: [{ name: '森', company: 'G', division: '' }] }));
+      await syncAll(env);
 
-    mockFetchOk(makeCompactPayload({
-      rows: makeRows(5),
-      members: [{ name: '森', company: 'G', division: '' }, { name: '田中', company: 'G', division: '' }]
-    }));
-    const out = await syncAll(env);
-    expect(out.ok).toBe(true);
-    expect(state.snapshot.membersCount).toBe(2);
+      mockFetchOk(makeCompactPayload({
+        rows: makeRows(5),
+        members: [{ name: '森', company: 'G', division: '' }, { name: '田中', company: 'G', division: '' }]
+      }));
+      const out = await syncAll(env);
+      expect(out.ok).toBe(true);
+      expect(state.snapshot.membersCount).toBe(2);
+    } finally {
+      clock.stop();
+    }
   });
 });
 
-describe('syncAll（修正7: 急減ガードが自己回復しない失敗ループにならないこと）', () => {
-  it('連続3回拒否された後の4回目は自動的に受け入れる（アーカイブ等の正当な大幅減が続いた場合の自己回復）', async () => {
-    const { db, state, calls } = makeMockDB();
+describe('syncAll（3回目レビュー修正3: 急減ガードの自己回復は「同一内容が30分」でなければ進まない・作り直し）', () => {
+  // ★旧実装（回数だけを見る版）はCodexにより「日報→職人→元請→現場と毎回まったく
+  // 別の欠損を起こしても、4回目が“3回連続拒否”の条件を満たして自動受入されてしまう」
+  // ことを再現された。ここでは新実装（ハッシュ一致＋経過時間）がその脆弱性を
+  // 閉じていることと、正当なケース（同一内容が続く）では従来どおり自己回復することの
+  // 両方を確認する。
+  it('同一内容（ハッシュ一致）の拒否がCronの間隔(5分)で続いても、最初の拒否から30分経つまでは受け入れない', async () => {
+    const { db, state } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    const CRON_INTERVAL_MS = 5 * 60 * 1000;
 
-    // ★sync_log.at はミリ秒分解能のISO文字列（かつ実schemaではPRIMARY KEY）のため、
-    // テストのように短時間に何度も呼ぶと同一ミリ秒に当たりうる。連続拒否の判定は
-    // 「直近の行が何個連続で拒否ログか」を見るため、時刻を明示的に進めて
-    // 各呼び出しのatを確実に一意にする（本番はCronが5分間隔なので衝突しない）。
     let t = 1_700_000_000_000;
     vi.useFakeTimers();
     try {
@@ -572,22 +605,92 @@ describe('syncAll（修正7: 急減ガードが自己回復しない失敗ルー
       await syncAll(env);
       expect(state.snapshot.rows).toBe(600);
 
+      // 以後ずっと同じ内容（＝同じハッシュ）の急減応答を返す（実際にそういう欠損が
+      // 起きて、GAS側の状態が変わらないまま続いている状況を模す）。
       mockFetchOk(makeCompactPayload({ rows: makeRows(100) })); // 600の半分未満
-      t += 1000; vi.setSystemTime(t);
-      const r1 = await syncAll(env);
-      t += 1000; vi.setSystemTime(t);
-      const r2 = await syncAll(env);
-      t += 1000; vi.setSystemTime(t);
-      const r3 = await syncAll(env);
-      expect([r1, r2, r3].every(r => r.ok === false)).toBe(true);
-      expect(state.snapshot.rows).toBe(600); // 3回とも拒否され、既存のまま
 
-      t += 1000; vi.setSystemTime(t);
-      const r4 = await syncAll(env);
-      expect(r4.ok).toBe(true);
-      expect(r4.message).toMatch(/自動的に受け入れ/);
-      expect(state.snapshot.rows).toBe(100); // 4回目で自己回復し受け入れられる
-      expect(calls.syncLogWrites.filter(l => l.ok === 0)).toHaveLength(3);
+      // Cronの間隔(5分)どおり6回（=30分ぶん）呼ぶ。最初の拒否からちょうど30分に
+      // 達するのは7回目なので、この6回はすべて拒否されるはず。
+      const results = [];
+      for (let i = 0; i < 6; i++) {
+        t += CRON_INTERVAL_MS; vi.setSystemTime(t);
+        results.push(await syncAll(env));
+      }
+      expect(results.every(r => r.ok === false)).toBe(true);
+      expect(state.snapshot.rows).toBe(600); // 既存のまま
+
+      // 7回目＝最初の拒否からちょうど30分後。ここで初めて自動的に受け入れる。
+      t += CRON_INTERVAL_MS; vi.setSystemTime(t);
+      const accepted = await syncAll(env);
+      expect(accepted.ok).toBe(true);
+      expect(accepted.message).toMatch(/自動的に受け入れ/);
+      expect(state.snapshot.rows).toBe(100);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('30分経っていなければ、何度呼んでも（＝/api/syncを連打しても）自動受入は早まらない', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    let t = 1_700_000_000_000;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(t);
+      mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+      await syncAll(env);
+
+      mockFetchOk(makeCompactPayload({ rows: makeRows(100) }));
+      // 5分間隔ではなく1秒間隔で20回連打しても、経過時間そのものは変わらない
+      // （＝回数を稼いでも早く受け入れられることはない）。
+      let last = null;
+      for (let i = 0; i < 20; i++) {
+        t += 1000; vi.setSystemTime(t);
+        last = await syncAll(env);
+      }
+      expect(last.ok).toBe(false);
+      expect(state.snapshot.rows).toBe(600);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('日報→職人→元請→現場と毎回まったく別の欠損を送りつけても自動受入されない（Codexが旧実装で再現した脆弱性の再現テスト）', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    const members = (n) => Array.from({ length: n }, (_, i) => ({ name: '職人' + i, company: 'G', division: '' }));
+    const genba = (n) => Array.from({ length: n }, (_, i) => ({ name: '現場' + i, company: '' }));
+    const jobsites = (n) => genba(n).map(g => ({ genba: g.name, loc: 'x', jobNo: '', completed: false, billingMethod: '応援' }));
+
+    let t = 1_700_000_000_000;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(t);
+      mockFetchOk(makeCompactPayload({ rows: makeRows(100), members: members(10), genbaMaster: genba(10), jobsites: jobsites(10) }));
+      await syncAll(env);
+      expect(state.snapshot.rows).toBe(100);
+      expect(state.snapshot.genbaCount).toBe(10);
+
+      // Codexの再現手順どおり：日報だけ100→10、職人だけ10→1、元請だけ10→1、
+      // 現場だけ10→1、と毎回別のテーブルだけを半減させる。/api/syncを短時間で
+      // 連打できることを模して1秒おきに送る。
+      const attempts = [
+        makeCompactPayload({ rows: makeRows(10), members: members(10), genbaMaster: genba(10), jobsites: jobsites(10) }),
+        makeCompactPayload({ rows: makeRows(100), members: members(1), genbaMaster: genba(10), jobsites: jobsites(10) }),
+        makeCompactPayload({ rows: makeRows(100), members: members(10), genbaMaster: genba(1), jobsites: jobsites(10) }),
+        makeCompactPayload({ rows: makeRows(100), members: members(10), genbaMaster: genba(10), jobsites: jobsites(1) })
+      ];
+      for (const attempt of attempts) {
+        t += 1000; vi.setSystemTime(t);
+        mockFetchOk(attempt);
+        const out = await syncAll(env);
+        expect(out.ok).toBe(false);
+      }
+      // 4回とも拒否され、最初のスナップショットのまま（現場が1件になる等の事故は起きない）
+      expect(state.snapshot.rows).toBe(100);
+      expect(state.snapshot.genbaCount).toBe(10);
+      expect(state.snapshot.jobsitesCount).toBe(10);
     } finally {
       vi.useRealTimers();
     }
@@ -596,16 +699,22 @@ describe('syncAll（修正7: 急減ガードが自己回復しない失敗ルー
   it('force:trueを指定すると、1回目の拒否条件でも即座に受け入れる（利用者が今すぐ反映したい場合の脱出口）', async () => {
     const { db, state } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    // ★修正4の同着対策により、2回とも書き込まれることを期待するのでDate.now()を進める。
+    const clock = stubIncreasingClock();
 
-    mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
-    await syncAll(env);
+    try {
+      mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+      await syncAll(env);
 
-    mockFetchOk(makeCompactPayload({ rows: makeRows(100) }));
-    const out = await syncAll(env, { force: true });
+      mockFetchOk(makeCompactPayload({ rows: makeRows(100) }));
+      const out = await syncAll(env, { force: true });
 
-    expect(out.ok).toBe(true);
-    expect(out.message).toMatch(/force=1/);
-    expect(state.snapshot.rows).toBe(100);
+      expect(out.ok).toBe(true);
+      expect(out.message).toMatch(/force=1/);
+      expect(state.snapshot.rows).toBe(100);
+    } finally {
+      clock.stop();
+    }
   });
 
   it('force:trueでも応答形式検証・サイズ上限は無条件のまま維持される（forceは急減ガードのみの脱出口）', async () => {
@@ -662,12 +771,49 @@ describe('syncAll（修正2・再レビュー: 世代の逆転防止＝古い取
       // ★世代の逆転防止：古い取得時刻の内容は書き込まれない（失敗ではなくskipped:trueで正常終了）
       expect(second.ok).toBe(true);
       expect(second.skipped).toBe(true);
-      expect(second.message).toMatch(/より新しい取得結果/);
+      expect(second.message).toMatch(/より新しい.*取得結果/);
       // snapshotはBの内容のまま（Aで上書きされていない）＝古いデータが新しいデータを上書きしないことの証拠
       expect(state.snapshot.payload).toBe(afterB);
       expect(state.snapshot.payload).toContain('NEW-0');
       expect(state.snapshot.payload).not.toContain('OLD-0');
       expect(calls.snapshotWrites).toBe(1); // Aの書き込みは実際には行われていない
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+});
+
+describe('syncAll（3回目レビュー修正4: 世代ガードの同着対策＝同一ミリ秒の競合で旧内容が新内容を上書きしない）', () => {
+  it('ロックがフェイルオープンし、2つの取得が同一のfetch_started_atで完了した場合、先に書き込めた内容を後続が上書きしない（Codexが`>=`条件で再現した競合の再現テスト）', async () => {
+    // ★Codexの再現方法を模す: ロック機構自体が使えない（フェイルオープン）状態で、
+    // 2つの同期の取得開始時刻(Date.now())がまったく同一のミリ秒になったケース。
+    const { db, state, calls } = makeMockDB({ throwOnLockRead: true });
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    try {
+      nowSpy.mockReturnValue(5_000_000); // 2つの取得が同じミリ秒に開始したことにする
+
+      // 「新」＝先に完了して書き込まれる
+      mockFetchOk(makeCompactPayload({ rows: makeRows(3).map((r, i) => { r[12] = 'NEW-' + i; return r; }) }));
+      const first = await syncAll(env);
+      expect(first.ok).toBe(true);
+      expect(calls.snapshotWrites).toBe(1);
+      const afterNew = state.snapshot.payload;
+      expect(afterNew).toContain('NEW-0');
+
+      // 「旧」＝同じミリ秒に始まったが、後から完了して書き込もうとする
+      mockFetchOk(makeCompactPayload({ rows: makeRows(3).map((r, i) => { r[12] = 'OLD-' + i; return r; }) }));
+      const second = await syncAll(env);
+
+      // ★修正4の直接的な証拠：同一のfetch_started_atでの2回目の書き込みは
+      // `>`条件により無条件で弾かれる（`>=`だった旧条件では上書きできてしまっていた）。
+      expect(second.ok).toBe(true);
+      expect(second.skipped).toBe(true);
+      expect(state.snapshot.payload).toBe(afterNew);
+      expect(state.snapshot.payload).toContain('NEW-0');
+      expect(state.snapshot.payload).not.toContain('OLD-0');
+      expect(calls.snapshotWrites).toBe(1); // 旧の書き込みは実際には行われていない
     } finally {
       nowSpy.mockRestore();
     }

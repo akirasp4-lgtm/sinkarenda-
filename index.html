@@ -973,10 +973,32 @@ const GAS_URL='https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3eg
 // ★2026-08-24修正6: 画面からWorker/GASへの通信にタイムアウトが無かった
 // （Worker→GASのタイムアウトは既にあったが、ブラウザ→Worker・ブラウザ→GASには無かった）。
 // Workerが無応答だとGASへ移る機会を失い、画面が止まってしまう（レビュー指摘）。
-// 読み取り(/api/schedule・GAS直読み)は15秒、同期(/api/sync)は20秒でタイムアウトし、
-// 次の候補（GAS）へ進む。
-const READ_TIMEOUT_MS=15000;
-const SYNC_TIMEOUT_MS=20000;
+// ★3回目レビュー修正6: 15秒は「D1(Worker)への読み取り」用としては妥当だが、
+// 「GASへの読み取り」に同じ15秒を使うと、GASの実測応答時間（3.9〜56秒。doGet内の
+// ロック待ち最大10秒を含む）より短く、「遅いが成功していた」読み取りが失敗に変わって
+// しまう（レビュー指摘）。D1用とGAS用でタイムアウトを分ける。
+// ★3回目レビュー修正6: backend.json自体の読み込みにタイムアウトが無かった。
+// loadData()はbackend.jsonを待ってから候補URL（D1/GAS）へ進むため、ここが無応答だと
+// 上記のどのタイムアウトにも到達できず画面が止まる（レビュー指摘）。短いタイムアウト
+// を設け、失敗したら既定の{backend:'gas'}のまま続行する（安全側）。
+const READ_TIMEOUT_MS=15000;       // D1(Worker)への読み取り用
+const GAS_READ_TIMEOUT_MS=45000;   // GASへの読み取り用（D1より長い猶予を持たせる）
+const SYNC_TIMEOUT_MS=20000;       // /api/sync（Worker）用
+const BACKEND_JSON_TIMEOUT_MS=3000; // backend.json読み込み用
+
+// ★修正1（最優先）: AbortSignal.timeout() はSafari 16未満（iOS15止まりのiPhone 6s/7/
+// SE初代等）・Chrome 103未満には存在しない。無い環境で使うと
+// 「AbortSignal.timeout is not a function」がD1試行にもGAS試行にも例外として発生し、
+// loadDataが全滅して「前回の内容です（登録・保存はできません）」の表示で恒久固定に
+// なる（backendの設定とは無関係に、この2ファイルを公開した瞬間から発症する回帰。
+// レビュー指摘・Fable 5が最も差し迫ると評価）。存在しない環境ではタイムアウト無し
+// （signal:undefined＝従来どおりの動作）にフォールバックする。
+function timeoutSignal(ms){
+  try{
+    if(typeof AbortSignal!=='undefined'&&typeof AbortSignal.timeout==='function')return AbortSignal.timeout(ms);
+  }catch(e){}
+  return undefined;
+}
 
 // ── 合言葉(k)の自動付与（2026-06-10 セキュリティ強化）──────────────
 // URLの ?k=合言葉 を一度受け取ると端末(localStorage)に保存し、
@@ -2176,22 +2198,40 @@ function addLocalRows(rows){
 }
 function refreshInBackground(after){
   // 2026-08-22: 書き込みはGASへ行くので、D1へ取り込ませてから読み直す。
-  // 取り込み(/api/sync)に失敗しても loadData 側がGASへ落ちるので実害はない＝握りつぶして続行。
   // ★2026-08-24修正5: 書き込み直後にこれを挟まず直接loadData()を呼ぶと、切替後は
   // 最大5分古いD1を読んで再描画してしまう（「完了にしたのに進行中に戻る」等）。
+  //
+  // ★3回目レビュー修正2（最重要・両者一致）: 以前はここで/api/syncの結果
+  // （HTTPステータス・JSONのstatus・skipped）を一切見ず、通信例外も握りつぶして
+  // 必ずloadData()（＝D1優先）へ進んでいた。コード中の「取り込みに失敗しても
+  // loadData側がGASへ落ちるので実害はない」という説明は誤りだった：鮮度ガードの
+  // おかげで直近成功していればD1はstatus:'ok'を返し続けるため、今回の同期が
+  // 「進行中でスキップ」「急減ガードで拒否」「403」「タイムアウト」のいずれで
+  // 終わっても、loadDataはGASへは落ちずD1（＝書き込み前の古い内容）を読んでしまう。
+  // 被害: 職人が予定を登録→「登録しました」→目の前で予定が消える→再登録→
+  // 日報重複→人工（給料の元数字）の二重計上。
+  //
+  // 対策: 同期が「確実に成功した」（HTTP 200・JSON.status==='ok'・skippedでない）
+  // とき以外は、直後の1回だけD1を使わずGASから読む（一度きりの
+  // 「今回はGASを優先」フラグ＝forceGas。loadDataの引数）。GASは常に最新なので、
+  // これで「登録したのに消える」が構造的に起きなくなる。
   // await で待つ必要がある呼び出し元のためPromiseを返す（await refreshInBackground()）。
-  const done=()=>loadData().then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
-  return fetch('backend.json?t='+Date.now()).then(r=>r.ok?r.json():null).then(cfg=>{
+  const done=(forceGas)=>loadData(forceGas).then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
+  return fetch('backend.json?t='+Date.now(),{signal:timeoutSignal(BACKEND_JSON_TIMEOUT_MS)}).then(r=>r.ok?r.json():null).then(cfg=>{
     if(cfg&&cfg.backend==='d1'&&cfg.workerUrl){
       // ★修正2: /api/syncの簡易認証。backend.jsonにsyncKeyがあればヘッダへ載せる
       // （未設定ならヘッダなしで送る＝Worker側もSYNC_KEY未設定なら認証を要求しない）。
       const headers=cfg.syncKey?{'X-Sync-Key':cfg.syncKey}:{};
-      return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers,signal:AbortSignal.timeout(SYNC_TIMEOUT_MS)}).catch(()=>{});
+      return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers,signal:timeoutSignal(SYNC_TIMEOUT_MS)}).then(res=>{
+        if(!res.ok)return true;   // HTTPエラー（403・500等）→今回はGASを優先
+        return res.json().then(j=>!(j&&j.status==='ok'&&!j.skipped)).catch(()=>true);
+      }).catch(()=>true);         // 通信失敗・タイムアウト→今回はGASを優先
     }
-  }).catch(()=>{}).then(done);
+    return false;   // backendがd1でなければloadData側もD1を読みに行かないので関係ない
+  }).catch(()=>false).then(done);
 }
 
-async function loadData(){
+async function loadData(forceGas){
   const requestSeq=++dataLoadSeq;
   const requestCompany=currentCompany;
   setLoading(true);dataLoadOk=false;
@@ -2206,19 +2246,24 @@ async function loadData(){
     let json=null,lastErr=null,usedBackend='gas';
     let cfg={backend:'gas'};
     try{
-      const c=await fetch('backend.json?t='+Date.now());
+      const c=await fetch('backend.json?t='+Date.now(),{signal:timeoutSignal(BACKEND_JSON_TIMEOUT_MS)});
       if(c.ok)cfg=await c.json();
     }catch(e){/* 取れなければGASのまま＝安全側 */}
 
     const tryUrls=[];
-    if(cfg.backend==='d1'&&cfg.workerUrl)
+    // ★3回目レビュー修正2: forceGasのときはD1を候補に入れない（refreshInBackground
+    // 参照。直前の/api/syncが「確実に成功した」と確認できなかった場合の一度きりの
+    // 安全弁）。
+    if(cfg.backend==='d1'&&cfg.workerUrl&&!forceGas)
       tryUrls.push({kind:'d1',url:cfg.workerUrl+'/api/schedule?company='+encodeURIComponent(companyParam)});
     tryUrls.push({kind:'gas',url:GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam)});
     tryUrls.push({kind:'gas',url:GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam)});
 
     for(const t of tryUrls){
       try{
-        const res=await fetch(t.url,{signal:AbortSignal.timeout(READ_TIMEOUT_MS)});
+        // ★3回目レビュー修正6: D1とGASでタイムアウトを分ける（上部の定数コメント参照）。
+        const timeoutMs=t.kind==='d1'?READ_TIMEOUT_MS:GAS_READ_TIMEOUT_MS;
+        const res=await fetch(t.url,{signal:timeoutSignal(timeoutMs)});
         const j=await res.json();
         if(j.status!=='ok')throw new Error(j.message||'予定データの取得に失敗しました');
         json=j;usedBackend=t.kind;lastErr=null;break;
