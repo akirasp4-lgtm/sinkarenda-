@@ -29,7 +29,15 @@ export function parseGasPayload(json) {
   for (const row of (json.rows || [])) {
     const rec = {};
     H.forEach((h, i) => { rec[COL[i]] = row[pos[h]]; });
-    rec.kosu = Number(rec.kosu) || 0;
+    // ★2026-08-24 追加修正：以前はここで `rec.kosu = Number(rec.kosu) || 0;`
+    // と強制変換していたが、これがスプレッドシート側で「人工」セルが
+    // 計算エラー（例: #NUM!）になっている行（車検期限リマインダー行）を
+    // 一律 0 に書き換えてしまい、本番データ突き合わせでGASとの値の不一致
+    // （14行）として検出された。GASから来た値をそのまま渡す（強制変換しない）。
+    // SQLiteの型親和性（type affinity）により、REAL列(kosu)へ数値化できない
+    // 文字列（#NUM!等）を入れるとTEXTのまま保持され、通常の数値はそのまま
+    // 数値として入るため、schema.sql側の列定義（kosu REAL DEFAULT 0）は
+    // 変更不要（下の null→'' 正規化だけは他の列と同じく適用される）。
     // ★D1側の絞り込み（WHERE kaisha = ?）は完全一致のため、会社名セルに
     // 紛れ込んだ前後の空白をここ（格納時）で落としておく。GASのdoGetは
     // 読み取りのたびに .trim() して比較しているが、D1は毎回trimしないので、

@@ -158,6 +158,50 @@ describe('parseGasPayload（行を捨てるフィルタの回帰防止 = 2026-08
   });
 });
 
+// --- ここから追加（2026-08-24 追加修正：本番データ突き合わせで見つかった
+// 「人工」の値の不一致14件の再発防止）。
+//
+// 原因は `rec.kosu = Number(rec.kosu) || 0;`。スプレッドシート側の「人工」
+// セルが計算エラー（#NUM!）になっている行（車検期限リマインダー行）で、
+// GASは文字列 "#NUM!" をそのまま返すが、この強制変換が一律0へ書き換えて
+// いた。GASから来た値をそのまま渡す（強制変換しない）方針へ修正。
+describe('parseGasPayload（人工(kosu)を強制変換しない = 2026-08-24 本番突き合わせで発覚した値不一致の回帰防止）', () => {
+  it('人工が#NUM!のような数値でない文字列でも、0に変換されずそのまま保持されること', () => {
+    const row = new Array(19).fill('');
+    row[1] = '2026-10-16'; row[3] = 'ハイエース白 車検期限'; row[4] = '';
+    row[8] = '#NUM!';                             // 人工（スプレッドシート側の計算エラー）
+    row[12] = 'VKEN_なにわ432そ8800';
+    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
+                   members:[], genbaMaster:[], jobsites:[] };
+    const out = parseGasPayload(json);
+    expect(out.nippo).toHaveLength(1);
+    expect(out.nippo[0].kosu).toBe('#NUM!');
+  });
+
+  it('通常の数値（1、0.5など）はこれまでどおり数値として扱われること', () => {
+    const rows = [1, 0.5, 0].map(kosu => {
+      const row = new Array(19).fill('');
+      row[1] = '2026-05-02'; row[4] = '森'; row[8] = kosu; row[12] = 'id-' + kosu;
+      return row;
+    });
+    const json = { status:'ok', compact:1, headers:HEADERS, rows,
+                   members:[], genbaMaster:[], jobsites:[] };
+    const out = parseGasPayload(json);
+    expect(out.nippo.map(r => r.kosu)).toEqual([1, 0.5, 0]);
+    for (const r of out.nippo) expect(typeof r.kosu).toBe('number');
+  });
+
+  it('人工セルが空（未入力）のときは空文字のまま保持される（他の列と同じnull→\'\'正規化）', () => {
+    const row = new Array(19).fill('');
+    row[1] = '2026-05-02'; row[4] = '森'; row[12] = 'id-empty-kosu';
+    // row[8]（人工）は fill('') により空文字のまま
+    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
+                   members:[], genbaMaster:[], jobsites:[] };
+    const out = parseGasPayload(json);
+    expect(out.nippo[0].kosu).toBe('');
+  });
+});
+
 describe('fetchWithRetry', () => {
   it('1回目が404でも2回目で成功すれば結果を返す（GASは5回に1回404を返す）', async () => {
     const calls = [];
