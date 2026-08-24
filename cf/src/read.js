@@ -6,8 +6,20 @@
 // 読み取りは1行SELECT→JSON.parseし、会社での絞り込みはWorker内(JS)で行う。
 // 絞り込みの条件は現行GASのdoGet（gas.js の1164行あたり）と完全に同じにする
 // （特に「全社」と空文字の扱い、genbaMasterとjobsitesの絞り込み条件）。
+//
+// ★2026-08-24 再レビュー（Fable 5 / Codex 両者）で「切り替え不可」の判定を受け、
+// 鮮度ガード（修正1）を追加した：snapshotが「存在するだけ」で正常返却していたため、
+// 同期が失敗し続けても最後に成功した内容を永久に「正常」として返し続けてしまっていた
+// （Codexが実測で再現）。ここでは直近の同期成功時刻（sync_log）を確認し、
+// 一定時間より古ければstatus:'error'を返す（→ 画面側は自動でGASへフォールバックする）。
 export const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤',
   '人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両'];
+
+// 修正1（鮮度ガード）: 直近の同期成功からこの時間より古ければ「もう正常データとは
+// 言えない」とみなしてエラーを返す。Cronは5分間隔のため、15分＝3回分の猶予を持たせて
+// ある（一時的な取得失敗が1〜2回続いても、GASの遅延・混雑程度なら次のCronで自然に
+// 回復するため無用にフォールバックしない）。
+const FRESHNESS_THRESHOLD_MS = 15 * 60 * 1000;
 
 /**
  * 保存済みスナップショット（sanitizeForStorageで保存した形＝
@@ -57,6 +69,19 @@ export function filterSnapshot(payload, company) {
   };
 }
 
+// 修正1（鮮度ガード）: sync_logのうちok=1（成功）の直近1件のatを取得する。
+// ハッシュ一致で書き込みをスキップした場合もsync.jsはok=1で記録するため
+// （「変更が無いだけ」を確認できた、という意味での成功）、その場合もここで
+// 「直近の成功」として時刻が更新される。これが無いと、変更が無いだけの
+// 日・週末が続くと鮮度ガードに誤って引っかかってしまう。
+async function getLastSuccessAt(env) {
+  const res = await env.DB.prepare(
+    'SELECT at FROM sync_log WHERE ok = 1 ORDER BY at DESC LIMIT 1'
+  ).all();
+  const row = (res.results && res.results[0]) || null;
+  return row ? row.at : null;
+}
+
 export async function readSchedule(env, company) {
   const res = await env.DB.prepare('SELECT payload FROM snapshot WHERE id = 1').all();
   const row = (res.results && res.results[0]) || null;
@@ -65,13 +90,27 @@ export async function readSchedule(env, company) {
     // 空のD1を「予定ゼロ件」として返してはいけないため、GASのerror()と
     // 同じ形で返す。画面側は status!=='ok' を見て自動的にGASへ切り替わる
     // ので、利用者にはエラーすら見えない（遅くなるだけで済む）。
-    //
-    // ★スナップショット方式では、失敗した同期はsnapshotを一切書き換えない
-    // （修正1の原子性・ガード類）。そのため「直近の同期が失敗したか」を
-    // sync_logで確認する必要はない：snapshotが存在する時点で、それは常に
-    // 検証済みの内容（最新の成功、または前回成功時点のまま）である。
     return { status: 'error', message: 'まだ取り込みが行われていません' };
   }
+
+  // ★修正1（鮮度ガード・再レビュー対応）: 以前はここで「snapshotが存在する時点で
+  // 常に検証済みの内容」と判断していたが、これは誤りだった。失敗した同期は
+  // snapshotを書き換えないぶん一見安全に見えるが、それは裏を返せば「同期が
+  // 何日失敗し続けても、最後に成功した古い内容を無条件に正常として返し続ける」
+  // ということでもある（Codexが実測で再現）。sync_logの直近の成功時刻を確認し、
+  // 一定時間より古ければ画面をGASへフォールバックさせる。
+  const lastSuccessAt = await getLastSuccessAt(env);
+  if (!lastSuccessAt) {
+    return { status: 'error', message: '同期の成功記録がありません' };
+  }
+  const lastSuccessMs = Date.parse(lastSuccessAt);
+  if (!Number.isFinite(lastSuccessMs) || Date.now() - lastSuccessMs > FRESHNESS_THRESHOLD_MS) {
+    return {
+      status: 'error',
+      message: `同期が長時間成功していません（最終成功: ${lastSuccessAt}）。最新のデータではない可能性があるため取得を中止しました`
+    };
+  }
+
   let payload;
   try {
     payload = JSON.parse(row.payload);

@@ -147,13 +147,26 @@ describe('filterSnapshot（jobsitesの絞り込み = gas.js:1256 と同条件）
 // ============================================================
 // readSchedule（D1アクセスを含む結線）
 // ============================================================
-function makeMockDB({ snapshotPayload = null } = {}) {
+// ★修正1（再レビュー対応・鮮度ガード）: readScheduleはsnapshotの存在だけでなく
+// sync_logの直近の成功(ok=1)時刻も確認するようになった。そのためモックは
+// snapshotPayloadに加えてsyncLog（[{at, ok}, ...]）も受け取れるようにする。
+// デフォルトの `freshSuccess: true` は「たった今成功した」ログを1件自動的に
+// 用意する（＝素朴に「snapshotがあればok」だった頃と同じ結果になる）ので、
+// 既存の正常系テストは鮮度ガードを意識せず書けるままにしてある。
+function makeMockDB({ snapshotPayload = null, syncLog = null, freshSuccess = true } = {}) {
+  const log = syncLog != null
+    ? syncLog
+    : (freshSuccess ? [{ at: new Date().toISOString(), ok: 1, message: '' }] : []);
   const db = {
     prepare(sql) {
       return {
         all: async () => {
           if (/SELECT payload FROM snapshot/.test(sql)) {
             return { results: snapshotPayload != null ? [{ payload: snapshotPayload }] : [] };
+          }
+          if (/SELECT at FROM sync_log WHERE ok = 1/.test(sql)) {
+            const oks = log.filter(l => Number(l.ok) === 1).sort((a, b) => b.at.localeCompare(a.at));
+            return { results: oks.length ? [{ at: oks[0].at }] : [] };
           }
           return { results: [] };
         }
@@ -175,6 +188,67 @@ describe('readSchedule（snapshotが無い/壊れている場合の安全装置�
     const env = { DB: makeMockDB({ snapshotPayload: '{not valid json' }) };
     const out = await readSchedule(env, '');
     expect(out.status).toBe('error');
+  });
+});
+
+describe('readSchedule（修正1・再レビュー: 鮮度ガード）', () => {
+  it('同期が失敗し続けていて（sync_logに直近の成功が無い）snapshotだけが残っている場合はstatus:errorを返す（Codexの再現ケース）', async () => {
+    // 1,500,414バイトで同期失敗した直後：sync_logはok=0だけ、snapshotは前回成功時点のまま残っている、
+    // という状況を模す。以前はここでstatus:'ok'を返してしまっていた（レビュー指摘）。
+    const payload = JSON.stringify(makePayload({ rows: [makeRow({ ID: 'STORED' })] }));
+    const env = { DB: makeMockDB({
+      snapshotPayload: payload,
+      syncLog: [
+        { at: '2026-08-24T00:00:00.000Z', ok: 1, message: '' }, // 大昔の成功（15分以上前）
+        { at: new Date().toISOString(), ok: 0, message: '件数が急減しました：...' } // たった今の失敗
+      ]
+    }) };
+    const out = await readSchedule(env, '');
+    expect(out.status).toBe('error');
+    expect(out.rows).toBeUndefined();
+  });
+
+  it('直近の成功が15分以内なら新しいデータとしてstatus:okを返す', async () => {
+    const payload = JSON.stringify(makePayload({ rows: [makeRow({ ID: 'a-1' })] }));
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const env = { DB: makeMockDB({
+      snapshotPayload: payload,
+      syncLog: [{ at: fiveMinAgo, ok: 1, message: '' }]
+    }) };
+    const out = await readSchedule(env, '');
+    expect(out.status).toBe('ok');
+  });
+
+  it('直近の成功が15分より古ければstatus:errorを返す（同期が長時間失敗し続けている想定）', async () => {
+    const payload = JSON.stringify(makePayload({ rows: [makeRow({ ID: 'old-data' })] }));
+    const twentyMinAgo = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    const env = { DB: makeMockDB({
+      snapshotPayload: payload,
+      syncLog: [{ at: twentyMinAgo, ok: 1, message: '' }]
+    }) };
+    const out = await readSchedule(env, '');
+    expect(out.status).toBe('error');
+    expect(out.message).toMatch(/同期|成功/);
+  });
+
+  it('sync_logが1件も無ければ（snapshotだけ存在する想定外の状態）status:errorを返す', async () => {
+    const payload = JSON.stringify(makePayload({ rows: [] }));
+    const env = { DB: makeMockDB({ snapshotPayload: payload, syncLog: [] }) };
+    const out = await readSchedule(env, '');
+    expect(out.status).toBe('error');
+  });
+
+  it('ハッシュ一致でスキップされた同期でも「成功」としてsync_logの時刻が更新されるため、鮮度は新しいと判定される（変更が無いだけを古いと誤判定しない）', async () => {
+    const payload = JSON.stringify(makePayload({ rows: [makeRow({ ID: 'unchanged' })] }));
+    const env = { DB: makeMockDB({
+      snapshotPayload: payload,
+      syncLog: [
+        { at: '2026-08-24T00:00:00.000Z', ok: 1, message: '' }, // 最初に書き込んだ時刻（古い）
+        { at: new Date(Date.now() - 60 * 1000).toISOString(), ok: 1, message: '変更なし（書き込みをスキップしました）' } // 1分前に「変更なし」を確認
+      ]
+    }) };
+    const out = await readSchedule(env, '');
+    expect(out.status).toBe('ok');
   });
 });
 

@@ -146,19 +146,31 @@ describe('fetchWithRetry', () => {
 // D1のprepare/bind/run/all()を模した簡易・状態保持モック。
 // snapshot / sync_lock / sync_log の3テーブルだけを実装する
 // （sync.jsが実際に発行するクエリはこの3つだけのため）。
+//
+// ★再レビュー対応でsync.jsのSQLが以下のように変わった点を反映している:
+//   - ロック取得: 「SELECT→INSERT」の2文 → 単一の
+//     「INSERT ... ON CONFLICT ... WHERE」。D1同様、meta.changesで成否を返す。
+//   - snapshot書き込み: 「INSERT OR REPLACE」（無条件） → 単一の
+//     「INSERT ... ON CONFLICT ... WHERE fetch_started_at比較」。
+//     古い取得時刻での書き込みは無視され、meta.changesが0になる。
 function makeMockDB({ initialLockedAt = null, throwOnSnapshotWrite = false, throwOnLockRead = false } = {}) {
   const state = { snapshot: null, lockedAt: initialLockedAt, syncLog: [] };
-  const calls = { snapshotWrites: 0, lockWrites: [], syncLogWrites: [] };
+  const calls = { snapshotWrites: 0, snapshotWriteAttempts: 0, lockWrites: [], lockAttempts: 0, syncLogWrites: [] };
 
   function respond(sql, args) {
     return {
       async all() {
-        if (throwOnLockRead && /FROM sync_lock/.test(sql)) throw new Error('mock lock read failure');
-        if (/SELECT locked_at FROM sync_lock/.test(sql)) {
-          return { results: state.lockedAt != null ? [{ locked_at: state.lockedAt }] : [] };
-        }
-        if (/SELECT rows, hash FROM snapshot/.test(sql)) {
-          return { results: state.snapshot ? [{ rows: state.snapshot.rows, hash: state.snapshot.hash }] : [] };
+        if (throwOnLockRead && /sync_lock/.test(sql)) throw new Error('mock lock read failure');
+        if (/SELECT rows, hash, members_count, genba_count, jobsites_count FROM snapshot/.test(sql)) {
+          return {
+            results: state.snapshot
+              ? [{
+                  rows: state.snapshot.rows, hash: state.snapshot.hash,
+                  members_count: state.snapshot.membersCount, genba_count: state.snapshot.genbaCount,
+                  jobsites_count: state.snapshot.jobsitesCount
+                }]
+              : []
+          };
         }
         if (/SELECT payload FROM snapshot/.test(sql)) {
           return { results: state.snapshot ? [{ payload: state.snapshot.payload }] : [] };
@@ -166,32 +178,53 @@ function makeMockDB({ initialLockedAt = null, throwOnSnapshotWrite = false, thro
         if (/SELECT rows, bytes, at FROM snapshot/.test(sql)) {
           return { results: state.snapshot ? [{ rows: state.snapshot.rows, bytes: state.snapshot.bytes, at: state.snapshot.at }] : [] };
         }
+        if (/SELECT ok, message FROM sync_log/.test(sql)) {
+          return { results: [...state.syncLog].sort((a, b) => b.at.localeCompare(a.at)) };
+        }
         if (/FROM sync_log/.test(sql)) {
           return { results: [...state.syncLog].sort((a, b) => b.at.localeCompare(a.at)) };
         }
         return { results: [] };
       },
       async run() {
+        if (throwOnLockRead && /sync_lock/.test(sql) && !/VALUES \(1, NULL\)/.test(sql)) {
+          throw new Error('mock lock read failure');
+        }
         if (/VALUES \(1, NULL\)/.test(sql) && /sync_lock/.test(sql)) {
           state.lockedAt = null;
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
-        if (/INSERT OR REPLACE INTO sync_lock/.test(sql)) {
-          state.lockedAt = args[0];
-          calls.lockWrites.push(args[0]);
-          return { success: true };
+        if (/INSERT INTO sync_lock/.test(sql) && /ON CONFLICT/.test(sql)) {
+          calls.lockAttempts++;
+          const [newLockedAt, staleCutoff] = args;
+          const cutoff = Number(staleCutoff);
+          const isFree = state.lockedAt == null || Number(state.lockedAt) < cutoff;
+          if (!isFree) return { success: true, meta: { changes: 0 } };
+          state.lockedAt = newLockedAt;
+          calls.lockWrites.push(newLockedAt);
+          return { success: true, meta: { changes: 1 } };
         }
-        if (/INSERT OR REPLACE INTO snapshot/.test(sql)) {
+        if (/INSERT INTO snapshot/.test(sql) && /ON CONFLICT/.test(sql)) {
+          calls.snapshotWriteAttempts++;
           if (throwOnSnapshotWrite) throw new Error('mock snapshot write failure');
-          const [payload, hash, rows, bytes, at] = args;
-          state.snapshot = { payload, hash, rows, bytes, at };
+          const [payload, hash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at] = args;
+          const isNewer = !state.snapshot || Number(fetchStartedAt) >= Number(state.snapshot.fetchStartedAt);
+          if (!isNewer) return { success: true, meta: { changes: 0 } };
+          state.snapshot = { payload, hash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at };
           calls.snapshotWrites++;
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
         if (/INSERT OR REPLACE INTO sync_log/.test(sql)) {
           const [at, rows, ok, message] = args;
-          state.syncLog.push({ at, rows, ok, message });
-          calls.syncLogWrites.push({ at, rows, ok, message });
+          // ★実際のschema.sqlではat(TEXT)がPRIMARY KEYのため、同じatでの書き込みは
+          // 新しい行としてpushされず、既存行を置き換える（INSERT OR REPLACEの本来の意味）。
+          // これを素朴なpush()だけにすると、テストの高速な連続呼び出しで同一ミリ秒の
+          // at が発生した際に「本来は1行のはずが2行できてしまう」というモック特有の
+          // 不具合でテストがまれに揺れる（本番のD1では起こらない）。
+          const idx = state.syncLog.findIndex(l => l.at === at);
+          const entry = { at, rows, ok, message };
+          if (idx >= 0) state.syncLog[idx] = entry; else state.syncLog.push(entry);
+          calls.syncLogWrites.push(entry);
           return { success: true };
         }
         return { success: true };
@@ -444,6 +477,220 @@ describe('syncAll（修正2: 同時実行の抑止）', () => {
 
     expect(out.ok).toBe(true);
     expect(state.snapshot).toBeTruthy();
+  });
+});
+
+describe('syncAll（修正3・再レビュー: members/genbaMaster/jobsitesの半減・全消えガード）', () => {
+  it('職人マスタが全消え（保存済み2件→今回0件）なら書き込みを拒否する（レビューのCodex再現ケース）', async () => {
+    const { db, state, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    mockFetchOk(makeCompactPayload({
+      rows: makeRows(5),
+      members: [{ name: '森', company: 'グローライズ', division: '' }, { name: '田中', company: 'グローライズ', division: '' }]
+    }));
+    await syncAll(env);
+    expect(state.snapshot.membersCount).toBe(2);
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(5), members: [] })); // 職人マスタが空配列で返る
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(false);
+    expect(out.message).toMatch(/職人マスタ/);
+    // 既存の職人マスタ件数は変わらない（書き込まれていない）
+    expect(state.snapshot.membersCount).toBe(2);
+    expect(calls.syncLogWrites.at(-1).ok).toBe(0);
+  });
+
+  it('元請マスタが半分未満に減ったら書き込みを拒否する', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    mockFetchOk(makeCompactPayload({
+      rows: makeRows(5),
+      genbaMaster: [{ name: 'A', company: '' }, { name: 'B', company: '' }, { name: 'C', company: '' }, { name: 'D', company: '' }]
+    }));
+    await syncAll(env);
+    expect(state.snapshot.genbaCount).toBe(4);
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(5), genbaMaster: [{ name: 'A', company: '' }] })); // 4→1（半分未満）
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(false);
+    expect(out.message).toMatch(/元請マスタ/);
+    expect(state.snapshot.genbaCount).toBe(4);
+  });
+
+  it('現場マスタが半分未満に減ったら書き込みを拒否する', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const jobsites4 = ['a', 'b', 'c', 'd'].map(loc => ({ genba: 'G', loc, jobNo: '', completed: false, billingMethod: '応援' }));
+    mockFetchOk(makeCompactPayload({ rows: makeRows(5), jobsites: jobsites4 }));
+    await syncAll(env);
+    expect(state.snapshot.jobsitesCount).toBe(4);
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(5), jobsites: [jobsites4[0]] })); // 4→1
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(false);
+    expect(out.message).toMatch(/現場マスタ/);
+    expect(state.snapshot.jobsitesCount).toBe(4);
+  });
+
+  it('日報が変わらずマスタだけ増えるのは半減ではないので通す（回帰確認）', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(5), members: [{ name: '森', company: 'G', division: '' }] }));
+    await syncAll(env);
+
+    mockFetchOk(makeCompactPayload({
+      rows: makeRows(5),
+      members: [{ name: '森', company: 'G', division: '' }, { name: '田中', company: 'G', division: '' }]
+    }));
+    const out = await syncAll(env);
+    expect(out.ok).toBe(true);
+    expect(state.snapshot.membersCount).toBe(2);
+  });
+});
+
+describe('syncAll（修正7: 急減ガードが自己回復しない失敗ループにならないこと）', () => {
+  it('連続3回拒否された後の4回目は自動的に受け入れる（アーカイブ等の正当な大幅減が続いた場合の自己回復）', async () => {
+    const { db, state, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    // ★sync_log.at はミリ秒分解能のISO文字列（かつ実schemaではPRIMARY KEY）のため、
+    // テストのように短時間に何度も呼ぶと同一ミリ秒に当たりうる。連続拒否の判定は
+    // 「直近の行が何個連続で拒否ログか」を見るため、時刻を明示的に進めて
+    // 各呼び出しのatを確実に一意にする（本番はCronが5分間隔なので衝突しない）。
+    let t = 1_700_000_000_000;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(t);
+      mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+      await syncAll(env);
+      expect(state.snapshot.rows).toBe(600);
+
+      mockFetchOk(makeCompactPayload({ rows: makeRows(100) })); // 600の半分未満
+      t += 1000; vi.setSystemTime(t);
+      const r1 = await syncAll(env);
+      t += 1000; vi.setSystemTime(t);
+      const r2 = await syncAll(env);
+      t += 1000; vi.setSystemTime(t);
+      const r3 = await syncAll(env);
+      expect([r1, r2, r3].every(r => r.ok === false)).toBe(true);
+      expect(state.snapshot.rows).toBe(600); // 3回とも拒否され、既存のまま
+
+      t += 1000; vi.setSystemTime(t);
+      const r4 = await syncAll(env);
+      expect(r4.ok).toBe(true);
+      expect(r4.message).toMatch(/自動的に受け入れ/);
+      expect(state.snapshot.rows).toBe(100); // 4回目で自己回復し受け入れられる
+      expect(calls.syncLogWrites.filter(l => l.ok === 0)).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('force:trueを指定すると、1回目の拒否条件でも即座に受け入れる（利用者が今すぐ反映したい場合の脱出口）', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+    await syncAll(env);
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(100) }));
+    const out = await syncAll(env, { force: true });
+
+    expect(out.ok).toBe(true);
+    expect(out.message).toMatch(/force=1/);
+    expect(state.snapshot.rows).toBe(100);
+  });
+
+  it('force:trueでも応答形式検証・サイズ上限は無条件のまま維持される（forceは急減ガードのみの脱出口）', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    mockFetchOk({ status: 'ok', compact: 1, headers: HEADERS.slice(0, 18), rows: [], members: [], genbaMaster: [], jobsites: [] });
+
+    const out = await syncAll(env, { force: true });
+    expect(out.ok).toBe(false);
+    expect(state.snapshot).toBeNull();
+  });
+});
+
+describe('syncAll（修正2・再レビュー: ロック取得の単一SQL化）', () => {
+  it('同時に2回呼んでも、ロックを取得できるのは1回だけ（SELECT→INSERTの2文に分かれていた旧設計では両方成功しえた）', async () => {
+    mockFetchOk(makeCompactPayload({ rows: makeRows(5) }));
+    const { db, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const [a, b] = await Promise.all([syncAll(env), syncAll(env)]);
+    const progressing = [a, b].filter(r => r.skipped && /進行中/.test(r.message));
+    const executed = [a, b].filter(r => !(r.skipped && /進行中/.test(r.message)));
+
+    // どちらか一方だけがロックを取得して実行され、もう一方は「進行中」でスキップされる。
+    // 両方が実行される（＝両方がロックを取得できてしまう）ことは無い。
+    expect(progressing).toHaveLength(1);
+    expect(executed).toHaveLength(1);
+    expect(calls.snapshotWrites).toBe(1);
+  });
+});
+
+describe('syncAll（修正2・再レビュー: 世代の逆転防止＝古い取得結果は新しい結果を上書きしない）', () => {
+  it('先に始まったが後から完了する取得（古いfetch_started_at）は、既に保存済みのより新しい取得結果を上書きしない（Codexが再現した競合の再現テスト）', async () => {
+    const { db, state, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    try {
+      // 「B」＝後から始まったが先に完了する取得（新しいfetch_started_at）
+      nowSpy.mockReturnValue(2_000_000);
+      mockFetchOk(makeCompactPayload({ rows: makeRows(3).map((r, i) => { r[12] = 'NEW-' + i; return r; }) }));
+      const first = await syncAll(env);
+      expect(first.ok).toBe(true);
+      expect(calls.snapshotWrites).toBe(1);
+      const afterB = state.snapshot.payload;
+      expect(afterB).toContain('NEW-0');
+
+      // 「A」＝先に始まったが後から完了する取得（Bより古いfetch_started_at）。
+      // 現実のWorkerでは、Aのfetchが遅延しBの完了後に届くとこの状態になる。
+      nowSpy.mockReturnValue(1_000_000); // Bより古い取得開始時刻
+      mockFetchOk(makeCompactPayload({ rows: makeRows(3).map((r, i) => { r[12] = 'OLD-' + i; return r; }) }));
+      const second = await syncAll(env);
+
+      // ★世代の逆転防止：古い取得時刻の内容は書き込まれない（失敗ではなくskipped:trueで正常終了）
+      expect(second.ok).toBe(true);
+      expect(second.skipped).toBe(true);
+      expect(second.message).toMatch(/より新しい取得結果/);
+      // snapshotはBの内容のまま（Aで上書きされていない）＝古いデータが新しいデータを上書きしないことの証拠
+      expect(state.snapshot.payload).toBe(afterB);
+      expect(state.snapshot.payload).toContain('NEW-0');
+      expect(state.snapshot.payload).not.toContain('OLD-0');
+      expect(calls.snapshotWrites).toBe(1); // Aの書き込みは実際には行われていない
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+});
+
+describe('syncAll（修正1・再レビュー: ハッシュ一致スキップでも鮮度ログは更新される）', () => {
+  it('2回目が変更なしでスキップされても、sync_logには新しいok=1の行が追加される（読み取り側の鮮度ガードが「変更が無いだけ」を「古い」と誤判定しないための前提）', async () => {
+    const payload = makeCompactPayload({ rows: makeRows(10) });
+    mockFetchOk(payload);
+    const { db, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    await syncAll(env);
+    expect(calls.syncLogWrites).toHaveLength(1);
+    expect(calls.syncLogWrites[0].ok).toBe(1);
+
+    mockFetchOk(payload); // 同じ内容
+    const second = await syncAll(env);
+    expect(second.skipped).toBe(true);
+    expect(calls.syncLogWrites).toHaveLength(2);
+    expect(calls.syncLogWrites[1].ok).toBe(1); // 変更なしも「成功」として記録される
+    expect(calls.syncLogWrites[1].message).toMatch(/変更なし/);
   });
 });
 

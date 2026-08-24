@@ -51,9 +51,14 @@ export default {
         console.log('[sync] SYNC_KEY未設定のため、認証なしで /api/sync を許可しています（移行期間中の暫定運用）');
       }
 
+      // ★修正7（急減ガードの自己回復）: ?force=1 が付いていれば、件数急減ガード
+      // （sync.js）だけを明示的に無視して受け入れる。連続拒否を待たずに今すぐ
+      // 反映したい場合の脱出口。サイズ上限や応答形式の検証はforceでも無条件のまま。
+      const force = url.searchParams.get('force') === '1';
+
       // ★syncAllは例外を投げない契約。同時実行中は{ok:true, skipped:true}で
       // 返る（修正2の同時実行抑止）ので、try/catchではなく戻り値のokを見る。
-      const r = await syncAll(env);
+      const r = await syncAll(env, { force });
       return json({ status: r.ok ? 'ok' : 'error', rows: r.rows, message: r.message, skipped: !!r.skipped });
     }
 

@@ -1150,6 +1150,13 @@ const ADMIN_PIN = '8800';
 // ============================================================
 
 const GAS_URL='https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3egJrKdWmXRK2AVnFrmBm4iO1QHCk-FZEH5LFFv7OloqcjQ/exec';
+// ★2026-08-24修正6: 画面からWorker/GASへの通信にタイムアウトが無かった
+// （Worker→GASのタイムアウトは既にあったが、ブラウザ→Worker・ブラウザ→GASには無かった）。
+// Workerが無応答だとGASへ移る機会を失い、画面が止まってしまう（レビュー指摘）。
+// 読み取り(/api/schedule・GAS直読み・職人マスタ取得)は15秒、同期(/api/sync)は20秒で
+// タイムアウトし、次の候補（GAS）へ進む。
+const READ_TIMEOUT_MS=15000;
+const SYNC_TIMEOUT_MS=20000;
 
 // ── 合言葉(k)の自動付与（2026-06-10 セキュリティ強化）──────────────
 // URLの ?k=合言葉 を一度受け取ると端末(localStorage)に保存し、
@@ -1995,7 +2002,7 @@ function refreshInBackground(after){
       // ★修正2: /api/syncの簡易認証。backend.jsonにsyncKeyがあればヘッダへ載せる
       // （未設定ならヘッダなしで送る＝Worker側もSYNC_KEY未設定なら認証を要求しない）。
       const headers=cfg.syncKey?{'X-Sync-Key':cfg.syncKey}:{};
-      return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers}).catch(()=>{});
+      return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers,signal:AbortSignal.timeout(SYNC_TIMEOUT_MS)}).catch(()=>{});
     }
   }).catch(()=>{}).then(done);
 }
@@ -2027,7 +2034,7 @@ async function loadData(){
 
     for(const t of tryUrls){
       try{
-        const res=await fetch(t.url);
+        const res=await fetch(t.url,{signal:AbortSignal.timeout(READ_TIMEOUT_MS)});
         const j=await res.json();
         if(j.status!=='ok')throw new Error(j.message||'予定データの取得に失敗しました');
         json=j;usedBackend=t.kind;lastErr=null;break;
@@ -3216,6 +3223,9 @@ async function onBillingMethodChange(el){
     if(json.status!=='ok'){alert('方式の保存に失敗：'+(json.message||''));renderBillingTable();return;}
     const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
     if(j)j.billingMethod=method; else (allJobsites=allJobsites||[]).push({genba,loc,billingMethod:method});
+    // ★2026-08-24修正4: D1切替後に他画面が古いbillingMethodを読まないよう、裏でsyncしておく
+    // （レビュー指摘: この経路だけ同期が抜けていた）。
+    refreshInBackground();
   }catch(e){console.error(e);alert('方式の保存に失敗しました（通信エラー）');renderBillingTable();return;}
   renderBillingTable();
 }
@@ -3983,6 +3993,9 @@ async function toggleJnfixCompleted(checkbox,genba,loc,idx){
       // プルダウンが開いている可能性に備えて再描画
       populateLocationSelect&&populateLocationSelect('s');
       populateLocationSelect&&populateLocationSelect('e');
+      // ★2026-08-24修正4: D1切替後に他画面が古いcompletedを読まないよう、裏でsyncしておく
+      // （レビュー指摘: この経路だけ同期が抜けていた）。
+      refreshInBackground();
     }else{checkbox.checked=!completed;alert('エラー：'+(json.message||'不明'));}
   }catch(e){checkbox.checked=!completed;alert('エラー：'+e.message);}
 }
@@ -4078,7 +4091,7 @@ async function loadSettingsMembers(){
   // （このままだと職人管理を開くたび約2割で「取得できませんでした」表示になっていた）。
   for(let attempt=0;attempt<2;attempt++){
     try{
-      const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'get_sheet',sheet:'職人マスタ'}),headers:{'Content-Type':'text/plain'}});
+      const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'get_sheet',sheet:'職人マスタ'}),headers:{'Content-Type':'text/plain'},signal:AbortSignal.timeout(READ_TIMEOUT_MS)});
       const json=await res.json();
       if(json.status!=='ok')throw new Error(json.message||'職人マスタの取得に失敗しました');
       const data=json.data;
@@ -4126,17 +4139,33 @@ function renderSettings(){
   document.getElementById('settings-company-name').textContent=currentCompany;
   const isGrowise=currentCompany==='グローライズ';
   const divField=document.getElementById('division-field');if(divField)divField.style.display=isGrowise?'':'none';
-  const warnHtml=settingsMembersOk?'':'<div style="background:#fef2f2;color:#c00;border:1px solid #fca5a5;border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">⚠️ 単価を取得できませんでした（通信エラー）。保存済みの単価は変わっていません。編集するには一度閉じて開き直してください。</div>';
-  document.getElementById('shokunin-list').innerHTML=warnHtml+getShokunin().map((s,i)=>{
+  const shokuninList=getShokunin();
+  // ★2026-08-24修正5: 「2行以上・氏名/単価列あり」だけでsettingsMembersOk=trueにしていたため、
+  // GASが一部の職人だけを返す「部分応答」（例：ヘッダ+職人1名だけ）でも全体成功扱いになり、
+  // 応答に含まれなかった残り全員の単価欄が「空欄かつ編集可能」になっていた（レビュー指摘）。
+  // 全体の成功フラグに加えて、今の会社に表示すべき職人が実際に取得結果へ全員そろっているかを
+  // 個々に確認する。欠けている人だけ編集不可にする（全体を丸ごと失敗扱いにするより丁寧）。
+  const missingNames=settingsMembersOk
+    ?shokuninList.filter(s=>!settingsMembers||!settingsMembers.some(m=>m.name===s&&m.company===currentCompany))
+    :[];
+  const warnHtml=!settingsMembersOk
+    ?'<div style="background:#fef2f2;color:#c00;border:1px solid #fca5a5;border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">⚠️ 単価を取得できませんでした（通信エラー）。保存済みの単価は変わっていません。編集するには一度閉じて開き直してください。</div>'
+    :missingNames.length>0
+      ?`<div style="background:#fef2f2;color:#c00;border:1px solid #fca5a5;border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">⚠️ ${missingNames.length}名分の単価を取得できませんでした（${missingNames.map(esc).join('、')}）。該当する方の単価欄は編集不可にしています。編集するには一度閉じて開き直してください。</div>`
+      :'';
+  document.getElementById('shokunin-list').innerHTML=warnHtml+shokuninList.map((s,i)=>{
     // 単価は settingsMembers（GASから取り直した専用キャッシュ）を使う。allMembers は使わない。
     const member=settingsMembers?settingsMembers.find(m=>m.name===s&&m.company===currentCompany):null;
+    // ★修正5: 全体成功(settingsMembersOk)だけでなく、この人が実際に取得結果に
+    // いたか(member)も見る。部分応答で欠けている人はここがfalseになる。
+    const memberOk=settingsMembersOk&&!!member;
     const div=(member&&member.division)||'';
     const rate=(member&&member.rate)||0;
     const divSelect=isGrowise?`<select onchange="updateMemberDivision('${esc(s)}',this.value)" style="width:auto;margin:0;padding:4px 8px;font-size:12px;border:1px solid #ddd;border-radius:6px;background:#f9f9f9">
       <option value=""${!div?' selected':''}>（なし）</option>${DIVISIONS.map(d=>`<option value="${d}"${d===div?' selected':''}>${d}</option>`).join('')}</select>`:'';
-    // 取得に失敗している間は単価欄を編集不可にする。0や空欄のまま保存できてしまうと
-    // 実際の給料データを0で上書きする恐れがあるため。
-    const rateInput=settingsMembersOk
+    // 取得に失敗している間（全体または個人単位）は単価欄を編集不可にする。0や空欄のまま
+    // 保存できてしまうと実際の給料データを0で上書きする恐れがあるため。
+    const rateInput=memberOk
       ?`<input type="number" value="${rate||''}" placeholder="単価" onchange="updateMemberRate('${esc(s)}',this.value)" style="width:80px;margin:0;padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:6px">`
       :`<input type="text" value="取得できませんでした" disabled title="単価を取得できませんでした" style="width:130px;margin:0;padding:4px 6px;font-size:11px;border:1px solid #fca5a5;border-radius:6px;background:#fef2f2;color:#c00;cursor:not-allowed">`;
     return`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee;gap:6px">
@@ -4165,7 +4194,13 @@ async function removeShokunin(i){
 }
 async function updateMemberDivision(name,division){
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_division',name,company:currentCompany,division}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();if(json.status==='ok'){const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.division=division;const sm=settingsMembers&&settingsMembers.find(x=>x.name===name&&x.company===currentCompany);if(sm)sm.division=division;}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+    const json=await res.json();if(json.status==='ok'){
+      const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.division=division;
+      const sm=settingsMembers&&settingsMembers.find(x=>x.name===name&&x.company===currentCompany);if(sm)sm.division=division;
+      // ★2026-08-24修正4: D1切替後に他画面が古いdivisionを読まないよう、裏でsyncしておく
+      // （レビュー指摘: この経路だけ同期が抜けていた）。
+      refreshInBackground();
+    }else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 async function updateMemberRate(name,rateStr){
   const rate=Number(rateStr||0);

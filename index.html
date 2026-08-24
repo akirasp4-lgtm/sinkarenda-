@@ -970,6 +970,13 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 
 <script>
 const GAS_URL='https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3egJrKdWmXRK2AVnFrmBm4iO1QHCk-FZEH5LFFv7OloqcjQ/exec';
+// ★2026-08-24修正6: 画面からWorker/GASへの通信にタイムアウトが無かった
+// （Worker→GASのタイムアウトは既にあったが、ブラウザ→Worker・ブラウザ→GASには無かった）。
+// Workerが無応答だとGASへ移る機会を失い、画面が止まってしまう（レビュー指摘）。
+// 読み取り(/api/schedule・GAS直読み)は15秒、同期(/api/sync)は20秒でタイムアウトし、
+// 次の候補（GAS）へ進む。
+const READ_TIMEOUT_MS=15000;
+const SYNC_TIMEOUT_MS=20000;
 
 // ── 合言葉(k)の自動付与（2026-06-10 セキュリティ強化）──────────────
 // URLの ?k=合言葉 を一度受け取ると端末(localStorage)に保存し、
@@ -1863,6 +1870,9 @@ async function updateMemberDivision(name,division){
     if(json.status==='ok'){
       const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);
       if(m)m.division=division;
+      // ★2026-08-24修正4: D1切替後に他画面が古いdivisionを読まないよう、裏でsyncしておく
+      // （レビュー指摘: この経路だけ同期が抜けていた）。
+      refreshInBackground();
     }else alert('エラー：'+json.message);
   }catch(e){alert('更新エラー：'+e.message);}
 }
@@ -2176,7 +2186,7 @@ function refreshInBackground(after){
       // ★修正2: /api/syncの簡易認証。backend.jsonにsyncKeyがあればヘッダへ載せる
       // （未設定ならヘッダなしで送る＝Worker側もSYNC_KEY未設定なら認証を要求しない）。
       const headers=cfg.syncKey?{'X-Sync-Key':cfg.syncKey}:{};
-      return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers}).catch(()=>{});
+      return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers,signal:AbortSignal.timeout(SYNC_TIMEOUT_MS)}).catch(()=>{});
     }
   }).catch(()=>{}).then(done);
 }
@@ -2208,7 +2218,7 @@ async function loadData(){
 
     for(const t of tryUrls){
       try{
-        const res=await fetch(t.url);
+        const res=await fetch(t.url,{signal:AbortSignal.timeout(READ_TIMEOUT_MS)});
         const j=await res.json();
         if(j.status!=='ok')throw new Error(j.message||'予定データの取得に失敗しました');
         json=j;usedBackend=t.kind;lastErr=null;break;

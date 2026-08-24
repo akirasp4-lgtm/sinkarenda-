@@ -13,17 +13,28 @@ function makeRow(fields) {
 // D1のprepare/bind/run/all()を模した簡易・状態保持モック。
 // snapshot / sync_lock / sync_log の3テーブルをカバーする（index.js経由で
 // read.js・sync.jsの両方が発行するクエリをすべて処理できるようにする）。
-function makeMockDB({ snapshot = null } = {}) {
-  const state = { snapshot, lockedAt: null, syncLog: [] };
+//
+// ★再レビュー対応でsync.js/read.jsのSQLが変わった点を反映している
+// （詳細はtest/sync.test.js・test/read.test.jsのコメント参照）:
+//   - ロック取得・snapshot書き込みは単一の「INSERT ... ON CONFLICT ... WHERE」文になり、
+//     D1のmeta.changesで成否を返す。
+//   - read.jsはsnapshotに加えてsync_log(ok=1の直近1件)も見て鮮度を判定する。
+function makeMockDB({ snapshot = null, syncLog = null } = {}) {
+  const state = { snapshot, lockedAt: null, syncLog: syncLog || [] };
 
   function respond(sql, args) {
     return {
       async all() {
-        if (/SELECT locked_at FROM sync_lock/.test(sql)) {
-          return { results: state.lockedAt != null ? [{ locked_at: state.lockedAt }] : [] };
-        }
-        if (/SELECT rows, hash FROM snapshot/.test(sql)) {
-          return { results: state.snapshot ? [{ rows: state.snapshot.rows, hash: state.snapshot.hash }] : [] };
+        if (/SELECT rows, hash, members_count, genba_count, jobsites_count FROM snapshot/.test(sql)) {
+          return {
+            results: state.snapshot
+              ? [{
+                  rows: state.snapshot.rows, hash: state.snapshot.hash,
+                  members_count: state.snapshot.membersCount || 0, genba_count: state.snapshot.genbaCount || 0,
+                  jobsites_count: state.snapshot.jobsitesCount || 0
+                }]
+              : []
+          };
         }
         if (/SELECT payload FROM snapshot/.test(sql)) {
           return { results: state.snapshot ? [{ payload: state.snapshot.payload }] : [] };
@@ -31,22 +42,39 @@ function makeMockDB({ snapshot = null } = {}) {
         if (/SELECT rows, bytes, at FROM snapshot/.test(sql)) {
           return { results: state.snapshot ? [{ rows: state.snapshot.rows, bytes: state.snapshot.bytes, at: state.snapshot.at }] : [] };
         }
+        if (/SELECT at FROM sync_log WHERE ok = 1/.test(sql)) {
+          const oks = state.syncLog.filter(l => Number(l.ok) === 1).sort((a, b) => b.at.localeCompare(a.at));
+          return { results: oks.length ? [{ at: oks[0].at }] : [] };
+        }
+        if (/SELECT ok, message FROM sync_log/.test(sql)) {
+          return { results: [...state.syncLog].sort((a, b) => b.at.localeCompare(a.at)) };
+        }
         if (/FROM sync_log/.test(sql)) {
           return { results: [...state.syncLog].sort((a, b) => b.at.localeCompare(a.at)) };
         }
         return { results: [] };
       },
       async run() {
-        if (/VALUES \(1, NULL\)/.test(sql) && /sync_lock/.test(sql)) { state.lockedAt = null; return { success: true }; }
-        if (/INSERT OR REPLACE INTO sync_lock/.test(sql)) { state.lockedAt = args[0]; return { success: true }; }
-        if (/INSERT OR REPLACE INTO snapshot/.test(sql)) {
-          const [payload, hash, rows, bytes, at] = args;
-          state.snapshot = { payload, hash, rows, bytes, at };
-          return { success: true };
+        if (/VALUES \(1, NULL\)/.test(sql) && /sync_lock/.test(sql)) { state.lockedAt = null; return { success: true, meta: { changes: 1 } }; }
+        if (/INSERT INTO sync_lock/.test(sql) && /ON CONFLICT/.test(sql)) {
+          const [newLockedAt, staleCutoff] = args;
+          const isFree = state.lockedAt == null || Number(state.lockedAt) < Number(staleCutoff);
+          if (!isFree) return { success: true, meta: { changes: 0 } };
+          state.lockedAt = newLockedAt;
+          return { success: true, meta: { changes: 1 } };
+        }
+        if (/INSERT INTO snapshot/.test(sql) && /ON CONFLICT/.test(sql)) {
+          const [payload, hash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at] = args;
+          const isNewer = !state.snapshot || Number(fetchStartedAt) >= Number(state.snapshot.fetchStartedAt || 0);
+          if (!isNewer) return { success: true, meta: { changes: 0 } };
+          state.snapshot = { payload, hash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at };
+          return { success: true, meta: { changes: 1 } };
         }
         if (/INSERT OR REPLACE INTO sync_log/.test(sql)) {
           const [at, rows, ok, message] = args;
-          state.syncLog.push({ at, rows, ok, message });
+          const idx = state.syncLog.findIndex(l => l.at === at);
+          const entry = { at, rows, ok, message };
+          if (idx >= 0) state.syncLog[idx] = entry; else state.syncLog.push(entry);
           return { success: true };
         }
         return { success: true };
@@ -64,7 +92,18 @@ function makeMockDB({ snapshot = null } = {}) {
 
 function makeSnapshot(rows, members = [], overrides = {}) {
   const payload = JSON.stringify({ compact: 1, headers: HEADERS, rows, members, genbaMaster: [], jobsites: [] });
-  return { payload, hash: 'fixed-hash-for-test', rows: rows.length, bytes: payload.length, at: '2026-08-24T00:00:00.000Z', ...overrides };
+  return {
+    payload, hash: 'fixed-hash-for-test', rows: rows.length,
+    membersCount: members.length, genbaCount: 0, jobsitesCount: 0,
+    bytes: payload.length, fetchStartedAt: 1000, at: '2026-08-24T00:00:00.000Z', ...overrides
+  };
+}
+
+// ★修正1（鮮度ガード）: /api/scheduleがstatus:'ok'を返すには、snapshotに加えて
+// sync_logに「直近15分以内のok=1」が必要になった。/api/scheduleの正常系テストは
+// snapshotを直接注入する（syncAllを経由しない）ため、鮮度ログも合わせて用意する。
+function freshSyncLog(at = new Date().toISOString()) {
+  return [{ at, rows: 0, ok: 1, message: '' }];
 }
 
 describe('GET /api/schedule のcompanyパラメータのtrim（レビュー指摘: 会社名の前後空白）', () => {
@@ -73,7 +112,7 @@ describe('GET /api/schedule のcompanyパラメータのtrim（レビュー指�
       [makeRow({ ID: 'a-1', 会社: 'グローライズ' })],
       [{ name: '森', company: 'グローライズ', division: 'ICT' }]
     );
-    const { db } = makeMockDB({ snapshot });
+    const { db } = makeMockDB({ snapshot, syncLog: freshSyncLog() });
     const env = { DB: db };
 
     const req = new Request('https://worker.test/api/schedule?' +
@@ -92,7 +131,7 @@ describe('GET /api/schedule のcompanyパラメータのtrim（レビュー指�
       [makeRow({ ID: 'a-1', 会社: 'グローライズ' })],
       [{ name: '森', company: 'グローライズ', division: 'ICT' }]
     );
-    const { db } = makeMockDB({ snapshot });
+    const { db } = makeMockDB({ snapshot, syncLog: freshSyncLog() });
     const env = { DB: db };
 
     const req = new Request('https://worker.test/api/schedule?company=' + encodeURIComponent('グローライズ'));
@@ -211,5 +250,47 @@ describe('GET /api/health', () => {
     const res = await worker.fetch(new Request('https://worker.test/api/health'), env, {});
     const body = await res.json();
     expect(body.status).toBe('error');
+  });
+});
+
+describe('GET /api/schedule（修正1・再レビュー: 鮮度ガードの結線）', () => {
+  it('sync_logに直近の成功が無ければ、snapshotがあってもstatus:errorを返す（画面はGASへフォールバックする）', async () => {
+    const snapshot = makeSnapshot([makeRow({ ID: 'old' })]);
+    const { db } = makeMockDB({
+      snapshot,
+      syncLog: [{ at: new Date(Date.now() - 20 * 60 * 1000).toISOString(), rows: 1, ok: 1, message: '' }] // 20分前＝古い
+    });
+    const env = { DB: db };
+    const res = await worker.fetch(new Request('https://worker.test/api/schedule'), env, {});
+    const body = await res.json();
+    expect(body.status).toBe('error');
+  });
+});
+
+describe('POST /api/sync（修正7: force=1の結線）', () => {
+  it('?force=1を付けると、急減ガードで拒否されるはずの内容でも受け入れる', async () => {
+    // 既存snapshot=600行、今回のGAS応答=100行（半分未満）という急減状況を用意する。
+    const rows600 = Array.from({ length: 600 }, (_, i) => makeRow({ ID: 'r' + i, 作業日: '2026-05-01' }));
+    const existing = {
+      payload: JSON.stringify({ compact: 1, headers: HEADERS, rows: rows600, members: [], genbaMaster: [], jobsites: [] }),
+      hash: 'old-hash', rows: 600, membersCount: 0, genbaCount: 0, jobsitesCount: 0,
+      bytes: 100, fetchStartedAt: 1000, at: '2026-08-24T00:00:00.000Z'
+    };
+    const { db, state } = makeMockDB({ snapshot: existing });
+    const rows100 = Array.from({ length: 100 }, (_, i) => makeRow({ ID: 'new' + i, 作業日: '2026-05-01' }));
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: rows100, members: [], genbaMaster: [], jobsites: [] })
+    }));
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    // force無しなら拒否されるはず、という前提の確認は sync.test.js 側で担保済み。
+    // ここではforce=1の指定がindex.js→syncAllへ実際に配線されていることを確認する。
+    const res = await worker.fetch(new Request('https://worker.test/api/sync?force=1', { method: 'POST' }), env, {});
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe('ok');
+    expect(state.snapshot.rows).toBe(100);
   });
 });
