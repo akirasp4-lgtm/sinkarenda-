@@ -1986,10 +1986,16 @@ function addLocalRows(rows){
 function refreshInBackground(after){
   // 2026-08-22: 書き込みはGASへ行くので、D1へ取り込ませてから読み直す。
   // 取り込み(/api/sync)に失敗しても loadData 側がGASへ落ちるので実害はない＝握りつぶして続行。
+  // ★2026-08-24修正5: 書き込み直後にこれを挟まず直接loadData()を呼ぶと、切替後は
+  // 最大5分古いD1を読んで再描画してしまう（「完了にしたのに進行中に戻る」等）。
+  // await で待つ必要がある呼び出し元のためPromiseを返す（await refreshInBackground()）。
   const done=()=>loadData().then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
-  fetch('backend.json?t='+Date.now()).then(r=>r.ok?r.json():null).then(cfg=>{
+  return fetch('backend.json?t='+Date.now()).then(r=>r.ok?r.json():null).then(cfg=>{
     if(cfg&&cfg.backend==='d1'&&cfg.workerUrl){
-      return fetch(cfg.workerUrl+'/api/sync',{method:'POST'}).catch(()=>{});
+      // ★修正2: /api/syncの簡易認証。backend.jsonにsyncKeyがあればヘッダへ載せる
+      // （未設定ならヘッダなしで送る＝Worker側もSYNC_KEY未設定なら認証を要求しない）。
+      const headers=cfg.syncKey?{'X-Sync-Key':cfg.syncKey}:{};
+      return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers}).catch(()=>{});
     }
   }).catch(()=>{}).then(done);
 }
@@ -2619,8 +2625,8 @@ async function toggleSiteCompletion_(genba,loc,completed){
       // 即時に詳細画面を再描画
       if(typeof renderEventDetail==='function')renderEventDetail();
       showAlert(completed?`✓ 「${loc}」を完了にしました`:`↩ 「${loc}」を進行中に戻しました`,'ok');
-      // サーバから最新データ取得・全体再描画
-      await loadData();
+      // サーバから最新データ取得・全体再描画（D1切替後もrefreshInBackgroundでsync→再取得の順を守る）
+      await refreshInBackground();
       // 詳細画面がまだ開いていれば最終データで再描画
       if(document.getElementById('cal-detail-modal')?.classList.contains('active')&&typeof renderEventDetail==='function')renderEventDetail();
     }else alert('エラー：'+(json.message||'不明'));
@@ -3680,7 +3686,7 @@ async function runSummary(){
 async function archiveOldData(){
   if(!confirm('3ヶ月以上前のデータをアーカイブします。よろしいですか？'))return;
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'archive',months:3,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();if(json.status==='ok'){alert(`${json.archived}件をアーカイブしました`);await loadData();}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+    const json=await res.json();if(json.status==='ok'){alert(`${json.archived}件をアーカイブしました`);await refreshInBackground();}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 
 // ===== 工番クリーンアップ =====
@@ -3692,7 +3698,7 @@ async function runJobNoCleanup(){
     const json=await res.json();
     if(json.status==='ok'){
       alert(`✓ ${json.cleaned}件の工番・事業部をクリアしました`);
-      await loadData();
+      await refreshInBackground();
     }else alert('エラー: '+json.message);
   }catch(e){alert('エラー: '+e.message);}
   finally{setLoading(false);}
@@ -3741,7 +3747,7 @@ async function runMergeGenba(){
     if(json.status==='ok'){
       alert(`✓ マージ完了\n\n日報更新: ${json.nippoUpdated||0}件\nアーカイブ更新: ${json.archiveUpdated||0}件\n現場マスタ更新: ${json.jobsiteUpdated||0}件\n元請マスタ: ${json.masterAction||'-'}`);
       document.getElementById('merge-genba-modal').classList.remove('active');
-      await loadData();
+      await refreshInBackground();
     }else alert('エラー: '+json.message);
   }catch(e){alert('エラー: '+e.message);}
   finally{setLoading(false);}
@@ -3847,7 +3853,7 @@ async function runMergeLocChoice(keep){
       const masterMsg={deleted_duplicate:'統合元行を削除',renamed:'統合元行を改名',to_only:'統合先のみ存在',none:'操作なし'}[json.masterAction]||json.masterAction;
       alert(`✓ マージ完了\n\n日報更新: ${json.nippoUpdated||0}件\nアーカイブ更新: ${json.archiveUpdated||0}件\n現場マスタ: ${masterMsg}${json.toJobNo?`\n統一された工番: ${json.toJobNo}`:''}`);
       document.getElementById('merge-loc-modal').classList.remove('active');
-      await loadData();
+      await refreshInBackground();
     }else alert('エラー: '+json.message);
   }catch(e){alert('エラー: '+e.message);}
   finally{setLoading(false);}
@@ -3997,7 +4003,7 @@ async function deleteSiteFromJnfix(genba,loc){
     }
     if(json.status==='ok'){
       showAlert(`✓ 「${loc||genba}」を削除しました（工番 ${json.oldJobNo||'-'}）`,'ok');
-      await loadData();
+      await refreshInBackground();
       await openJobNoFix(); // モーダルを再読み込み
     }else alert('エラー: '+(json.message||'不明'));
   }catch(e){alert('エラー: '+e.message);}
@@ -4015,7 +4021,7 @@ async function saveJobNoFix(idx,genba,loc){
     if(json.status==='ok'){
       if(json.message){alert(json.message);return;}
       alert(`更新完了\n旧: ${json.oldJobNo}\n新: ${json.newJobNo}\n日報: ${json.updatedRows}行 / アーカイブ: ${json.archivedUpdated||0}行`);
-      await loadData();
+      await refreshInBackground();
       await openJobNoFix();
     }else alert('エラー：'+json.message);
   }catch(e){alert('エラー：'+e.message);}
@@ -4068,16 +4074,40 @@ let settingsMembersOk=false; // false のままなら単価欄は編集不可に
 
 async function loadSettingsMembers(){
   settingsMembersOk=false;
-  try{
-    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'get_sheet',sheet:'職人マスタ'}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();
-    if(json.status!=='ok')throw new Error(json.message||'職人マスタの取得に失敗しました');
-    const rows=(json.data||[]).slice(1); // 1行目はヘッダー（氏名,会社,事業部,単価）
-    settingsMembers=rows.map(r=>({name:String(r[0]||''),company:String(r[1]||''),division:String(r[2]||''),rate:Number(r[3])||0}));
-    settingsMembersOk=true;
-  }catch(e){
-    console.error('[職人管理] 職人マスタの取得に失敗:',e);
-    settingsMembers=null;settingsMembersOk=false;
+  // ★2026-08-24修正4: GASは実測で5回に1回HTTP404を返すため、1回だけリトライする
+  // （このままだと職人管理を開くたび約2割で「取得できませんでした」表示になっていた）。
+  for(let attempt=0;attempt<2;attempt++){
+    try{
+      const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'get_sheet',sheet:'職人マスタ'}),headers:{'Content-Type':'text/plain'}});
+      const json=await res.json();
+      if(json.status!=='ok')throw new Error(json.message||'職人マスタの取得に失敗しました');
+      const data=json.data;
+      // ★修正4: {status:'ok'}でもdataが無い/短すぎる/列が想定外だと、これまでは
+      // [] として扱い settingsMembersOk=true にしてしまっていた。すると単価欄が
+      // 「空欄かつ編集可能」になり、管理者が触れば Number(''||0)=0 がGASへ保存
+      // される穴になる（レビュー指摘）。ヘッダ行を含めて2行以上、かつヘッダに
+      // 「氏名」「単価」の両列があるときだけ取得成功とみなす。
+      if(!Array.isArray(data)||data.length<2){
+        throw new Error('職人マスタの応答行数が想定より少ないです（'+(Array.isArray(data)?data.length:'配列でない')+'行）');
+      }
+      const header=data[0]||[];
+      const nameIdx=header.indexOf('氏名'),rateIdx=header.indexOf('単価');
+      if(nameIdx<0||rateIdx<0){
+        throw new Error('職人マスタのヘッダに「氏名」または「単価」列が見つかりません: '+JSON.stringify(header));
+      }
+      const companyIdx=header.indexOf('会社'),divIdx=header.indexOf('事業部');
+      settingsMembers=data.slice(1).map(r=>({
+        name:String(r[nameIdx]||''),
+        company:String(companyIdx>=0?(r[companyIdx]||''):''),
+        division:String(divIdx>=0?(r[divIdx]||''):''),
+        rate:Number(r[rateIdx])||0
+      }));
+      settingsMembersOk=true;
+      return;
+    }catch(e){
+      console.error('[職人管理] 職人マスタの取得に失敗（試行'+(attempt+1)+'回目）:',e);
+      settingsMembers=null;settingsMembersOk=false;
+    }
   }
 }
 
@@ -4122,12 +4152,15 @@ async function addShokunin(){
     const json=await res.json();
     if(json.status==='ok'){allMembers.push({name:v,company:currentCompany,division});if(settingsMembers)settingsMembers.push({name:v,company:currentCompany,division,rate:0});document.getElementById('new-shokunin').value='';if(divSel)divSel.value='';renderSettings();initMemberUI();
       if(settingsOpenedForSelect){const sel=document.getElementById(settingsOpenedForSelect);if(sel)sel.value=v;if(settingsOpenedForSelect==='s-operator'){currentUsername=v;try{localStorage.setItem('admin-username',v);}catch(e){}updateUsernameDisplay();}settingsOpenedForSelect=null;}
+      // ★修正5: D1切替後に他画面が古い職人マスタを読まないよう、裏でsyncしておく
+      // （同名の3重登録が実在した原因＝この経路が同期を挟んでいなかったこと）。
+      refreshInBackground();
     }else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 async function removeShokunin(i){
   const name=getShokunin()[i];if(!confirm(name+'を削除しますか？'))return;
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'remove_member',name,company:currentCompany}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();if(json.status==='ok'){allMembers=allMembers.filter(m=>!(m.name===name&&m.company===currentCompany));if(settingsMembers)settingsMembers=settingsMembers.filter(m=>!(m.name===name&&m.company===currentCompany));renderSettings();initMemberUI();}
+    const json=await res.json();if(json.status==='ok'){allMembers=allMembers.filter(m=>!(m.name===name&&m.company===currentCompany));if(settingsMembers)settingsMembers=settingsMembers.filter(m=>!(m.name===name&&m.company===currentCompany));renderSettings();initMemberUI();refreshInBackground();}
     else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 async function updateMemberDivision(name,division){
@@ -4159,13 +4192,15 @@ async function addGenbaMaster(){
     if(json.status==='ok'){if(!json.duplicate)allGenbaMaster.push({name:v,company:currentCompany});allGenbaMaster.sort((a,b)=>a.name.localeCompare(b.name));
       document.getElementById('new-genba-master').value='';renderGenbaSettings();initGenbaSelects();
       if(genbaSettingsOpenedForSelect){const sel=document.getElementById(genbaSettingsOpenedForSelect);if(sel)sel.value=v;const prefix=genbaSettingsOpenedForSelect==='s-genba-select'?'s':genbaSettingsOpenedForSelect==='e-genba-select'?'e':null;if(prefix)onGenbaSelect(prefix);genbaSettingsOpenedForSelect=null;}
+      // ★修正5: D1切替後に他画面が古い元請マスタを読まないよう、裏でsyncしておく
+      refreshInBackground();
     }else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 async function removeGenbaMaster(i){
   const list=allGenbaMaster.filter(g=>g.company===currentCompany||!g.company);const g=list[i];if(!g)return;
   if(!confirm(g.name+'を削除しますか？'))return;const delCompany=g.company||'';
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'remove_genba',name:g.name,company:delCompany}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();if(json.status==='ok'){allGenbaMaster=allGenbaMaster.filter(x=>!(x.name===g.name&&(x.company||'')===delCompany));renderGenbaSettings();initGenbaSelects();}
+    const json=await res.json();if(json.status==='ok'){allGenbaMaster=allGenbaMaster.filter(x=>!(x.name===g.name&&(x.company||'')===delCompany));renderGenbaSettings();initGenbaSelects();refreshInBackground();}
     else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 </script>

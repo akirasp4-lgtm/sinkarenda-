@@ -2167,10 +2167,16 @@ function addLocalRows(rows){
 function refreshInBackground(after){
   // 2026-08-22: 書き込みはGASへ行くので、D1へ取り込ませてから読み直す。
   // 取り込み(/api/sync)に失敗しても loadData 側がGASへ落ちるので実害はない＝握りつぶして続行。
+  // ★2026-08-24修正5: 書き込み直後にこれを挟まず直接loadData()を呼ぶと、切替後は
+  // 最大5分古いD1を読んで再描画してしまう（「完了にしたのに進行中に戻る」等）。
+  // await で待つ必要がある呼び出し元のためPromiseを返す（await refreshInBackground()）。
   const done=()=>loadData().then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
-  fetch('backend.json?t='+Date.now()).then(r=>r.ok?r.json():null).then(cfg=>{
+  return fetch('backend.json?t='+Date.now()).then(r=>r.ok?r.json():null).then(cfg=>{
     if(cfg&&cfg.backend==='d1'&&cfg.workerUrl){
-      return fetch(cfg.workerUrl+'/api/sync',{method:'POST'}).catch(()=>{});
+      // ★修正2: /api/syncの簡易認証。backend.jsonにsyncKeyがあればヘッダへ載せる
+      // （未設定ならヘッダなしで送る＝Worker側もSYNC_KEY未設定なら認証を要求しない）。
+      const headers=cfg.syncKey?{'X-Sync-Key':cfg.syncKey}:{};
+      return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers}).catch(()=>{});
     }
   }).catch(()=>{}).then(done);
 }
@@ -2571,8 +2577,8 @@ async function toggleSiteCompletion_(genba,loc,completed){
       // 詳細画面を即時に再描画（楽観更新の結果が見える）
       if(typeof renderEventDetail==='function')renderEventDetail();
       showAlert(completed?`✓ 「${loc}」を完了にしました`:`↩ 「${loc}」を進行中に戻しました`,'ok');
-      // サーバから最新データを再取得して全体を再描画
-      await loadData();
+      // サーバから最新データを再取得して全体を再描画（D1切替後もrefreshInBackgroundでsync→再取得の順を守る）
+      await refreshInBackground();
       // 詳細画面がまだ開いていれば最終データで再描画
       if(document.getElementById('cal-detail-modal')?.classList.contains('active')&&typeof renderEventDetail==='function')renderEventDetail();
     }else alert('エラー：'+(json.message||'不明'));
@@ -3519,7 +3525,7 @@ async function archiveOldData(){
   try{
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'archive',months:3}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status==='ok'){alert(`${json.archived}件のデータをアーカイブしました`);await loadData();}
+    if(json.status==='ok'){alert(`${json.archived}件のデータをアーカイブしました`);await refreshInBackground();}
     else alert('エラー：'+json.message);
   }catch(e){alert('アーカイブエラー：'+e.message);}
 }
@@ -3569,6 +3575,9 @@ async function addShokunin(){
       document.getElementById('new-shokunin').value='';
       if(divSel)divSel.value='';
       renderSettings();initMemberUI();
+      // ★修正5: D1切替後に他画面が古い職人マスタを読まないよう、裏でsyncしておく
+      // （同名の3重登録が実在した原因＝この経路が同期を挟んでいなかったこと）。
+      refreshInBackground();
       // 呼び出し元セレクトに自動選択
       if(settingsOpenedForSelect){
         const sel=document.getElementById(settingsOpenedForSelect);
@@ -3589,7 +3598,7 @@ async function removeShokunin(i){
   try{
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'remove_member',name,company:currentCompany}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status==='ok'){allMembers=allMembers.filter(m=>!(m.name===name&&m.company===currentCompany));renderSettings();initMemberUI();}
+    if(json.status==='ok'){allMembers=allMembers.filter(m=>!(m.name===name&&m.company===currentCompany));renderSettings();initMemberUI();refreshInBackground();}
     else alert('エラー：'+json.message);
   }catch(e){alert('削除エラー：'+e.message);}
 }
@@ -3697,6 +3706,8 @@ async function addGenbaMaster(){
         if(prefix)onGenbaSelect(prefix);
         genbaSettingsOpenedForSelect=null;
       }
+      // ★修正5: D1切替後に他画面が古い元請マスタを読まないよう、裏でsyncしておく
+      refreshInBackground();
     }else alert('エラー：'+json.message);
   }catch(e){alert('追加エラー：'+e.message);}
 }
@@ -3713,6 +3724,8 @@ async function removeGenbaMaster(i){
     if(json.status==='ok'){
       allGenbaMaster=allGenbaMaster.filter(x=>!(x.name===g.name&&(x.company||'')===delCompany));
       renderGenbaSettings();initGenbaSelects();
+      // ★修正5: D1切替後に他画面が古い元請マスタを読まないよう、裏でsyncしておく
+      refreshInBackground();
     }else alert('エラー：'+json.message);
   }catch(e){alert('削除エラー：'+e.message);}
 }
