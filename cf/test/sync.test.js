@@ -728,6 +728,90 @@ describe('syncAll（3回目レビュー修正3: 急減ガードの自己回復�
   });
 });
 
+describe('syncAll（4回目レビュー修正5: 自己回復は「同一内容が30分」に加えて最低観測回数・直近観測の鮮度も要求する）', () => {
+  // ★指摘: 旧実装（3回目レビュー修正3）は「最初の拒否」からの経過時間だけを見ており、
+  // その間の観測が実質0回（＝最初の拒否と今回の“2点”だけ）でも成立してしまっていた。
+  // 例: 0分に1回拒否→Cronが何らかの理由で止まる→31分後に同じ欠損が再発、の2点だけで
+  // 自動受理される（「30分間ずっと同じだった」ではなく「31分離れた2点で同じだった」
+  // しか確認できていない）。ここでは、その穴が実際に塞がれていること（最低観測回数
+  // 未満では受け入れない）と、直近観測が古い（監視に空白期間があった）場合も受け入れ
+  // ないこと、そして両方の追加条件を満たしたときは従来どおり自己回復することを確認する。
+  it('「0分の1回」と「31分後の1回」の2点だけでは自動受入されない（最低観測回数（3回）未満）', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    let t = 1_700_000_000_000;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(t);
+      mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+      await syncAll(env);
+      expect(state.snapshot.rows).toBe(600);
+
+      // 0分後: 1回目の拒否（観測1件目）。
+      t += 1000; vi.setSystemTime(t);
+      mockFetchOk(makeCompactPayload({ rows: makeRows(100) })); // 600の半分未満・以後同一内容
+      const first = await syncAll(env);
+      expect(first.ok).toBe(false);
+      expect(state.snapshot.rows).toBe(600);
+
+      // Cronが31分ほど止まっていた想定（この間、syncAllは一切呼ばれない＝観測が無い）。
+      // 31分後、同じ内容がもう一度拒否される。旧実装（経過時間のみ）なら
+      // 「最初の拒否から30分経過」を満たして自動受入されてしまっていた。
+      t += 31 * 60 * 1000; vi.setSystemTime(t);
+      const second = await syncAll(env);
+
+      // 新実装: 直近の拒否ログは1件（＝上の1回目）しか無く、最低観測回数3回に満たない
+      // ため、経過時間は満たしていても自動受入されない。
+      expect(second.ok).toBe(false);
+      expect(state.snapshot.rows).toBe(600); // 事故（現場が1件になる等）は起きない
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('観測回数・経過時間を満たしていても、直近観測が古く監視に空白期間があれば自己回復しない。その後、間隔を空けずに観測が続けば自己回復する', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    let t = 1_700_000_000_000;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(t);
+      mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+      await syncAll(env);
+
+      mockFetchOk(makeCompactPayload({ rows: makeRows(100) })); // 以後ずっと同一内容
+      // 0分・5分・10分に拒否（観測3件・最低観測回数は満たす）。
+      for (let i = 0; i < 3; i++) {
+        t += 5 * 60 * 1000; vi.setSystemTime(t);
+        const r = await syncAll(env);
+        expect(r.ok).toBe(false);
+      }
+      expect(state.snapshot.rows).toBe(600);
+
+      // ここでCronが25分止まる（10分時点の観測から25分後＝35分時点で再開）。
+      // 経過時間（最初の拒否=5分時点から35分時点までで30分）・観測回数（3件）は
+      // 満たすが、直近観測（10分時点）からの間隔が25分あり、鮮度条件（10分以内）を
+      // 満たさない。旧実装（経過時間のみ）なら自動受入されていたはずの局面。
+      t += 25 * 60 * 1000; vi.setSystemTime(t);
+      const stillBlocked = await syncAll(env);
+      expect(stillBlocked.ok).toBe(false);
+      expect(state.snapshot.rows).toBe(600);
+
+      // 間隔を空けずに（5分後）もう一度観測する。これで直近観測が新しくなり、
+      // 経過時間・観測回数・鮮度の3条件が揃うため、自己回復して受け入れる。
+      t += 5 * 60 * 1000; vi.setSystemTime(t);
+      const accepted = await syncAll(env);
+      expect(accepted.ok).toBe(true);
+      expect(accepted.message).toMatch(/自動的に受け入れ/);
+      expect(state.snapshot.rows).toBe(100);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('syncAll（修正2・再レビュー: ロック取得の単一SQL化）', () => {
   it('同時に2回呼んでも、ロックを取得できるのは1回だけ（SELECT→INSERTの2文に分かれていた旧設計では両方成功しえた）', async () => {
     mockFetchOk(makeCompactPayload({ rows: makeRows(5) }));

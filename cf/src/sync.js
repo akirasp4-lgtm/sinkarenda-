@@ -69,6 +69,23 @@ const SHRINK_AUTO_ACCEPT_MIN_ELAPSED_MS = 30 * 60 * 1000;
 // 安全側なだけで、自動受入を早めることはない）。
 const SHRINK_LOG_SCAN_LIMIT = 500;
 
+// ★4回目レビュー修正5: 上記「経過時間」だけの判定は、「最初の拒否」と「今回」の
+// “2点”が同じ内容でありさえすれば、その間の観測が0回（＝Cron停止等で誰も見ていない
+// 空白期間）でも成立してしまう（レビュー指摘: 「30分間ずっと同じだった」ではなく
+// 「31分離れた2点で同じだった」しか確認できていない）。例: 0分に1回拒否→Cronが
+// 何らかの理由で30分近く止まる→31分後に同じ欠損が再発、の2点だけで自動受理される。
+// そこで以下の2条件を追加する（両方とも既存の「同一ハッシュ・経過30分」条件に
+// 加えて満たす必要がある。既存条件を緩めるものではない）。
+//   ①最低観測回数: 直近の拒否ログが最低でもこの件数だけ同一ハッシュで連続している
+//     こと。Cron間隔(5分)で30分継続していれば通常6件は観測されるはずなので、
+//     実際に継続監視できていたことの傍証にする。
+//   ②直近観測の鮮度: 直近の（今回より前の）同一ハッシュ拒否ログが、今回からこの
+//     時間以内であること。これが無いと「Cronが長時間止まっていた」ケースを
+//     ①の回数条件だけでは弾けない（止まる前に3回以上観測済みなら回数は満たせて
+//     しまうため）。
+const SHRINK_AUTO_ACCEPT_MIN_COUNT = 3;
+const SHRINK_AUTO_ACCEPT_MAX_GAP_MS = 10 * 60 * 1000;
+
 /**
  * GAS応答の妥当性を検証する（修正3）。ここで甘い判定をすると、将来GAS側で
  * 項目名が変わったときに「members が0件のまま保存されて成功扱いになる」等の
@@ -205,16 +222,20 @@ async function sameHashShrinkRejectStreak(env, currentHash) {
     const logs = res.results || [];
     let count = 0;
     let earliestAt = null; // ハッシュが一致したまま遡れた中で最も古い（＝最初の拒否）at
+    let latestAt = null;   // ハッシュが一致した中で最も新しい（＝今回の直前の拒否）at
+    // ★4回目レビュー修正5: 最低観測回数・直近観測の鮮度も判定できるよう、
+    // count・earliestAtに加えてlatestAtも返す（syncAll側の追加条件で使う）。
     for (const r of logs) {
       const isReject = Number(r.ok) === 0 && String(r.message || '').includes(SHRINK_REJECT_MARKER);
       if (!isReject || r.payload_hash !== currentHash) break;
       count++;
+      if (latestAt === null) latestAt = r.at;
       earliestAt = r.at;
     }
-    return { count, earliestAt };
+    return { count, earliestAt, latestAt };
   } catch (_e) {
     // 履歴が読めなければ「まだ実績なし」として扱う＝これまでどおり拒否を継続する安全側。
-    return { count: 0, earliestAt: null };
+    return { count: 0, earliestAt: null, latestAt: null };
   }
 }
 
@@ -325,21 +346,37 @@ export async function syncAll(env, opts = {}) {
           shrinkNote = `（★${SHRINK_REJECT_MARKER}：${shrunk.join('、')}／force=1が指定されたため強制的に受け入れました）`;
         } else {
           const streak = await sameHashShrinkRejectStreak(env, hash);
-          const elapsedMs = streak.earliestAt ? Date.now() - Date.parse(streak.earliestAt) : 0;
-          const stable = !!streak.earliestAt && Number.isFinite(elapsedMs) && elapsedMs >= SHRINK_AUTO_ACCEPT_MIN_ELAPSED_MS;
+          const now = Date.now();
+          const elapsedMs = streak.earliestAt ? now - Date.parse(streak.earliestAt) : 0;
+          const latestGapMs = streak.latestAt ? now - Date.parse(streak.latestAt) : Infinity;
+          const elapsedOk = !!streak.earliestAt && Number.isFinite(elapsedMs) && elapsedMs >= SHRINK_AUTO_ACCEPT_MIN_ELAPSED_MS;
+          // ★4回目レビュー修正5: 「同一ハッシュの拒否が最初から30分続いた」だけでは、
+          // その30分の間に観測が実質1回（＝最初の拒否と今回の2点）しか無くても成立
+          // してしまう（レビュー指摘: 「31分離れた2点で同じだった」で十分成立する）。
+          // 最低観測回数（countOk）と直近観測の鮮度（freshOk＝観測が途切れていない
+          // こと）も同時に満たすことを要求する。3条件はどれも既存条件を緩めない
+          // （ANDで追加するだけ＝自動受入がこれまでより早まることは無い）。
+          const countOk = streak.count >= SHRINK_AUTO_ACCEPT_MIN_COUNT;
+          const freshOk = Number.isFinite(latestGapMs) && latestGapMs <= SHRINK_AUTO_ACCEPT_MAX_GAP_MS;
+          const stable = elapsedOk && countOk && freshOk;
           if (!stable) {
             const remainMin = streak.earliestAt
               ? Math.max(1, Math.ceil((SHRINK_AUTO_ACCEPT_MIN_ELAPSED_MS - elapsedMs) / 60000))
               : Math.ceil(SHRINK_AUTO_ACCEPT_MIN_ELAPSED_MS / 60000);
+            const reasons = [];
+            if (!elapsedOk) reasons.push(`最初の拒否からまだ約${remainMin}分`);
+            if (!countOk) reasons.push(`観測回数が${streak.count}回（最低${SHRINK_AUTO_ACCEPT_MIN_COUNT}回必要）`);
+            if (!freshOk) reasons.push('直近の観測が古く監視が途切れていた可能性がある');
             const hint = streak.earliestAt
-              ? `同じ内容の拒否が既に${streak.count}回続いています。このままあと約${remainMin}分、同じ内容が続けば自動的に受け入れます。`
-              : `今回が最初の拒否です。同じ内容のまま約${remainMin}分続けば自動的に受け入れます。`;
+              ? `同じ内容の拒否が既に${streak.count}回続いています（${reasons.join('、')}）。条件を満たせば自動的に受け入れます。`
+              : `今回が最初の拒否です。同じ内容のまま約${remainMin}分・最低${SHRINK_AUTO_ACCEPT_MIN_COUNT}回続けば自動的に受け入れます。`;
             const message = `${SHRINK_REJECT_MARKER}：${shrunk.join('、')}。GAS側の異常を疑い、書き込みを中止しました`
               + `（${hint}今すぐ反映したい場合は /api/sync?force=1 を使ってください）`;
             await safeWriteSyncLog(env, { rows: rowCount, ok: 0, message, payloadHash: hash });
             return { ok: false, rows: 0, message };
           }
-          // 同一内容の拒否が30分以上続いた＝自己回復。今回は受け入れて書き込みへ進む。
+          // 同一内容の拒否が、最低観測回数・直近観測の鮮度を満たしたまま30分以上
+          // 続いた＝自己回復。今回は受け入れて書き込みへ進む。
           const elapsedMin = Math.round(elapsedMs / 60000);
           shrinkNote = `（★${SHRINK_REJECT_MARKER}：${shrunk.join('、')}／同一内容の拒否が${elapsedMin}分継続したため自動的に受け入れました）`;
         }

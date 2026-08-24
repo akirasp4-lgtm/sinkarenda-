@@ -1143,6 +1143,11 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 
 </div><!-- /#app -->
 
+<!-- ★4回目レビュー修正1・2・6（テスト追加）: refreshInBackground/loadData/単価判定の
+     ロジックをsync-guard.jsへ切り出した。cf/test/sync-guard.test.jsから同じファイルを
+     requireして直接テストする（実装とテストの乖離を防ぐため）。詳細は同ファイルの
+     コメント参照。file://直開きでも動くよう素の<script src>（非module）にしてある。 -->
+<script src="sync-guard.js"></script>
 <script>
 // ============================================================
 // ★ PINコードはここを変更してください
@@ -1158,12 +1163,15 @@ const GAS_URL='https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3eg
 // ロック待ち最大10秒を含む）より短く、「遅いが成功していた」読み取りが失敗に変わって
 // しまう（レビュー指摘）。D1用とGAS用でタイムアウトを分ける（職人マスタ取得もGAS
 // への読み取りなのでGAS_READ_TIMEOUT_MSを使う）。
+// ★4回目レビュー修正4: 上のコメントが「実測最大56秒」と書きながら、値は45秒の
+// ままだった（矛盾。レビュー指摘）。「遅いが成功していた読み取りを失敗に変えない」
+// という修正6の趣旨に反するため、実測最大56秒に安全マージンを乗せて60秒へ引き上げる。
 // ★3回目レビュー修正6: backend.json自体の読み込みにタイムアウトが無かった。
 // loadData()はbackend.jsonを待ってから候補URL（D1/GAS）へ進むため、ここが無応答だと
 // 上記のどのタイムアウトにも到達できず画面が止まる（レビュー指摘）。短いタイムアウト
 // を設け、失敗したら既定の{backend:'gas'}のまま続行する（安全側）。
 const READ_TIMEOUT_MS=15000;       // D1(Worker)への読み取り用
-const GAS_READ_TIMEOUT_MS=45000;   // GASへの読み取り用（D1より長い猶予を持たせる）
+const GAS_READ_TIMEOUT_MS=60000;   // GASへの読み取り用（実測最大56秒＋安全マージン）
 const SYNC_TIMEOUT_MS=20000;       // /api/sync（Worker）用
 const BACKEND_JSON_TIMEOUT_MS=3000; // backend.json読み込み用
 
@@ -1318,6 +1326,16 @@ function lockScreen(){
 let currentCompany='全社';
 let dataLoadSeq=0;
 let dataLoadOk=false;
+// ★4回目レビュー修正2（強く推奨）: forceGasはrefreshInBackground直後の1回だけしか
+// 効かない引数だった。同期が失敗した後、次に確実な同期成功（Cronは最大5分間隔）が
+// 起きるまでの間に「更新」ボタン・プル更新・会社切替が挟まると、それらが呼ぶ素の
+// loadData()（forceGas無し）がD1（書き込み前の古い内容）を読んでしまう。
+// 対策: 「確実に同期が成功するまでD1を読まない」を一度きりの引数ではなく状態
+// （preferGasTracker＝これがアクティブな間は全てのloadData呼び出しでD1を候補から
+// 外す）として持続させる。呼び出し元が明示的にforceGasを渡さなくても自動的に効く。
+// 判定ロジック本体はsync-guard.js（createPreferGasTracker）参照。会社切替・複数タブ
+// との関係もそちらのコメントに記載。
+const preferGasTracker=createPreferGasTracker();
 let allNippos=[];
 let allMembers=[];
 let allGenbaMaster=[];
@@ -2029,28 +2047,56 @@ function refreshInBackground(after){
   // 日報重複→人工（給料の元数字）の二重計上。
   //
   // 対策: 同期が「確実に成功した」（HTTP 200・JSON.status==='ok'・skippedでない）
-  // とき以外は、直後の1回だけD1を使わずGASから読む（一度きりの
-  // 「今回はGASを優先」フラグ＝forceGas。loadDataの引数）。GASは常に最新なので、
-  // これで「登録したのに消える」が構造的に起きなくなる。
+  // とき以外は、GASを優先する（forceGas）。判定そのものはsync-guard.js
+  // （forceGasWhenBackendUnknown / decideSyncOutcome）に切り出し、Node/vitestからも
+  // 同じ関数をテストできるようにしてある（4回目レビュー: 自動テストが無い指摘への対応）。
+  //
+  // ★4回目レビュー修正1（必須・両レビュアーが独立に一致）: backend.json自体が
+  // 取得できない（fetch失敗・非OK・JSON壊れ）ときは、backendが実際に'd1'かどうか
+  // 「不明」。旧実装はここで無条件にfalse（GASを優先しない）を返しており、
+  // loadData側がbackend.jsonを再取得し直して2回目だけ成功しbackend:'d1'なら、
+  // 今回は同期を一度も実行していないのにD1（書き込み前の古い内容）を読んでしまう
+  // 欠陥があった。旧コメント「backendがd1でなければ関係ない」は、この
+  // 「取得失敗＝不明」のケースを想定していなかった点が誤り。
+  // → 不明なときはforceGasWhenBackendUnknown(null)がtrueを返す（GAS優先に倒す）。
+  // backend.jsonが本当に落ちていればloadData側もどのみちGASへ落ちるだけなので、
+  // trueに倒しても損はない。
+  //
+  // ★4回目レビュー修正2（強く推奨）: 同期が確実成功でなかった場合は
+  // preferGasTracker.mark() でしばらく（5分＝Cron間隔）GAS優先を持続させ、
+  // 確実成功したときだけ .clear() する。これによりforceGas引数を渡さない
+  // 呼び出し（switchCompany・プル更新・「更新」ボタン）も自動的に守られる
+  // （loadData側の対応はloadData関数のコメント参照）。
   // await で待つ必要がある呼び出し元のためPromiseを返す（await refreshInBackground()）。
   const done=(forceGas)=>loadData(forceGas).then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
   return fetch('backend.json?t='+Date.now(),{signal:timeoutSignal(BACKEND_JSON_TIMEOUT_MS)}).then(r=>r.ok?r.json():null).then(cfg=>{
-    if(cfg&&cfg.backend==='d1'&&cfg.workerUrl){
-      // ★修正2: /api/syncの簡易認証。backend.jsonにsyncKeyがあればヘッダへ載せる
-      // （未設定ならヘッダなしで送る＝Worker側もSYNC_KEY未設定なら認証を要求しない）。
-      const headers=cfg.syncKey?{'X-Sync-Key':cfg.syncKey}:{};
-      return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers,signal:timeoutSignal(SYNC_TIMEOUT_MS)}).then(res=>{
-        if(!res.ok)return true;   // HTTPエラー（403・500等）→今回はGASを優先
-        return res.json().then(j=>!(j&&j.status==='ok'&&!j.skipped)).catch(()=>true);
-      }).catch(()=>true);         // 通信失敗・タイムアウト→今回はGASを優先
+    const unknown=forceGasWhenBackendUnknown(cfg);
+    if(unknown!==null){
+      if(unknown)preferGasTracker.mark();
+      return unknown;
     }
-    return false;   // backendがd1でなければloadData側もD1を読みに行かないので関係ない
-  }).catch(()=>false).then(done);
+    // ここに来るのは cfg.backend==='d1' かつ cfg.workerUrl があるときだけ
+    // （forceGasWhenBackendUnknownがnullを返すのはこの場合のみ）。
+    // ★修正2: /api/syncの簡易認証。backend.jsonにsyncKeyがあればヘッダへ載せる
+    // （未設定ならヘッダなしで送る＝Worker側もSYNC_KEY未設定なら認証を要求しない）。
+    const headers=cfg.syncKey?{'X-Sync-Key':cfg.syncKey}:{};
+    return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers,signal:timeoutSignal(SYNC_TIMEOUT_MS)}).then(res=>
+      res.json().then(j=>decideSyncOutcome(res.ok,j)).catch(()=>decideSyncOutcome(res.ok,null))
+    ).catch(()=>decideSyncOutcome(false,null)).then(outcome=>{
+      if(outcome.confirmed)preferGasTracker.clear();else preferGasTracker.mark();
+      return outcome.forceGas;
+    });
+  }).catch(()=>{preferGasTracker.mark();return true;}).then(done);
 }
 
 async function loadData(forceGas){
   const requestSeq=++dataLoadSeq;
   const requestCompany=currentCompany;
+  // ★4回目レビュー修正2: forceGas引数（直後の1回だけの安全弁）に加え、
+  // preferGasTrackerがアクティブな間（＝直近の同期が確実成功と確認できていない間、
+  // 最大5分）も同様にD1を候補から外す。switchCompany・プル更新・「更新」ボタンなど
+  // forceGasを渡さない呼び出しでも自動的に効く（refreshInBackground参照）。
+  const effectiveForceGas=!!forceGas||preferGasTracker.isActive();
   setLoading(true);dataLoadOk=false;
   try{
     const companyParam=requestCompany&&requestCompany!=='全社'?requestCompany:'';
@@ -2068,10 +2114,10 @@ async function loadData(forceGas){
     }catch(e){/* 取れなければGASのまま＝安全側 */}
 
     const tryUrls=[];
-    // ★3回目レビュー修正2: forceGasのときはD1を候補に入れない（refreshInBackground
-    // 参照。直前の/api/syncが「確実に成功した」と確認できなかった場合の一度きりの
-    // 安全弁）。
-    if(cfg.backend==='d1'&&cfg.workerUrl&&!forceGas)
+    // ★3回目レビュー修正2・4回目レビュー修正2: forceGas（またはpreferGasTrackerが
+    // アクティブ）のときはD1を候補に入れない（refreshInBackground参照。直前の
+    // /api/syncが「確実に成功した」と確認できなかった場合の安全弁）。
+    if(cfg.backend==='d1'&&cfg.workerUrl&&!effectiveForceGas)
       tryUrls.push({kind:'d1',url:cfg.workerUrl+'/api/schedule?company='+encodeURIComponent(companyParam)});
     tryUrls.push({kind:'gas',url:GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam)});
     tryUrls.push({kind:'gas',url:GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam)});
@@ -4164,8 +4210,11 @@ async function loadSettingsMembers(){
         // 別途記録し、renderSettingsで氏名の有無だけでなくrateOkも見て編集可否を
         // 決める（空文字・null・undefined・非数値はrateOk:false。0は妥当な数値
         // なのでrateOk:trueのまま扱う＝無給ではなく「未取得」だけを区別する）。
+        // ★4回目レビュー修正6: Number('   ')は0になるため、上記の素朴な判定だと
+        // 空白文字だけのセルが「正当な0円」として受理されてしまっていた（レビュー
+        // 指摘）。trimしてから空文字判定するisRateCellOk（sync-guard.js）に置き換える。
         const raw=r[rateIdx];
-        const rateOk=raw!==''&&raw!==null&&raw!==undefined&&Number.isFinite(Number(raw));
+        const rateOk=isRateCellOk(raw);
         return{
           name:String(r[nameIdx]||''),
           company:String(companyIdx>=0?(r[companyIdx]||''):''),
