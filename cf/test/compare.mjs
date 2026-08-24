@@ -7,14 +7,18 @@
 //   **並び順のまま1行ずつ突き合わせる方式**に変えた。D1側も並び順を保持している。
 //
 // 使い方: node cf/test/compare.mjs <GAS_URL> <WORKER_URL>
-const [gasUrl, workerUrl] = process.argv.slice(2);
+const [gasUrl, workerUrl, companyArg] = process.argv.slice(2);
 if (!gasUrl || !workerUrl) {
-  console.error('使い方: node cf/test/compare.mjs <GAS_URL> <WORKER_URL>');
+  console.error('使い方: node cf/test/compare.mjs <GAS_URL> <WORKER_URL> [会社名]');
+  console.error('  会社名を省略すると全社。実際のアプリは会社を選んだ状態で叩くため、');
+  console.error('  切り替え前には主要な会社名でも1回ずつ実行すること（レビュー指摘）。');
   process.exit(2);
 }
+const company = companyArg || '';
+console.log('=== 対象: ' + (company || '全社') + ' ===');
 
-const g = await (await fetch(gasUrl + '?compact=1&company=&t=' + Date.now())).json();
-const w = await (await fetch(workerUrl + '/api/schedule?company=')).json();
+const g = await (await fetch(gasUrl + '?compact=1&company=' + encodeURIComponent(company) + '&t=' + Date.now())).json();
+const w = await (await fetch(workerUrl + '/api/schedule?company=' + encodeURIComponent(company))).json();
 
 if (g.status !== 'ok') { console.error('GAS側がエラー:', g.message); process.exit(1); }
 if (w.status !== 'ok') { console.error('Worker側がエラー:', w.message); process.exit(1); }
