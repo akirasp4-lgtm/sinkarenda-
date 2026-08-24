@@ -2165,7 +2165,14 @@ function addLocalRows(rows){
   rerenderAll();
 }
 function refreshInBackground(after){
-  loadData().then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
+  // 2026-08-22: 書き込みはGASへ行くので、D1へ取り込ませてから読み直す。
+  // 取り込み(/api/sync)に失敗しても loadData 側がGASへ落ちるので実害はない＝握りつぶして続行。
+  const done=()=>loadData().then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
+  fetch('backend.json?t='+Date.now()).then(r=>r.ok?r.json():null).then(cfg=>{
+    if(cfg&&cfg.backend==='d1'&&cfg.workerUrl){
+      return fetch(cfg.workerUrl+'/api/sync',{method:'POST'}).catch(()=>{});
+    }
+  }).catch(()=>{}).then(done);
 }
 
 async function loadData(){
@@ -2174,21 +2181,37 @@ async function loadData(){
   setLoading(true);dataLoadOk=false;
   try{
     const companyParam=requestCompany&&requestCompany!=='全社'?requestCompany:'';
+    // 2026-08-22: 読み取り先を backend.json で切り替える。
+    // ★書き込みは常にGAS。ここで切り替わるのは「読むだけ」。
+    // ★Workerが失敗したら黙ってGASへ落ちる。利用者にはエラーを見せない。
     // 2026-08-21: GASのWebアプリは混むと HTTP404 やロック時間切れを返す
     // （実測で5回に1回程度）。1回きりだと利用者に即エラーが出るため、黙って
     // 1度だけ取り直す。それでも駄目なら下の catch へ。
-    let json=null,lastErr=null;
-    for(let attempt=0;attempt<2;attempt++){
+    let json=null,lastErr=null,usedBackend='gas';
+    let cfg={backend:'gas'};
+    try{
+      const c=await fetch('backend.json?t='+Date.now());
+      if(c.ok)cfg=await c.json();
+    }catch(e){/* 取れなければGASのまま＝安全側 */}
+
+    const tryUrls=[];
+    if(cfg.backend==='d1'&&cfg.workerUrl)
+      tryUrls.push({kind:'d1',url:cfg.workerUrl+'/api/schedule?company='+encodeURIComponent(companyParam)});
+    tryUrls.push({kind:'gas',url:GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam)});
+    tryUrls.push({kind:'gas',url:GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam)});
+
+    for(const t of tryUrls){
       try{
-        const res=await fetch(GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam));
+        const res=await fetch(t.url);
         const j=await res.json();
         if(j.status!=='ok')throw new Error(j.message||'予定データの取得に失敗しました');
-        json=j;lastErr=null;break;
+        json=j;usedBackend=t.kind;lastErr=null;break;
       }catch(err){lastErr=err;}
     }
     // 会社切替後に古い通信が遅れて返っても、現在の画面を上書きしない。
     if(requestSeq!==dataLoadSeq||requestCompany!==currentCompany)return;
     if(lastErr)throw lastErr;
+    try{console.log('[予定管理] 読み取り元:',usedBackend);}catch(e){}
     allNippos=parseRows(json.compact?expandCompactRows(json.headers,json.rows):json.rows,'');
     // 日付跨ぎ予定の翌日表示用ゴーストを追加
     allNippos=allNippos.concat(generateGhosts(allNippos));

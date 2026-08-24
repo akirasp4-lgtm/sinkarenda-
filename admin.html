@@ -1984,7 +1984,14 @@ function addLocalRows(rows){
   rerenderAll();
 }
 function refreshInBackground(after){
-  loadData().then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
+  // 2026-08-22: 書き込みはGASへ行くので、D1へ取り込ませてから読み直す。
+  // 取り込み(/api/sync)に失敗しても loadData 側がGASへ落ちるので実害はない＝握りつぶして続行。
+  const done=()=>loadData().then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
+  fetch('backend.json?t='+Date.now()).then(r=>r.ok?r.json():null).then(cfg=>{
+    if(cfg&&cfg.backend==='d1'&&cfg.workerUrl){
+      return fetch(cfg.workerUrl+'/api/sync',{method:'POST'}).catch(()=>{});
+    }
+  }).catch(()=>{}).then(done);
 }
 
 async function loadData(){
@@ -1993,21 +2000,37 @@ async function loadData(){
   setLoading(true);dataLoadOk=false;
   try{
     const companyParam=requestCompany&&requestCompany!=='全社'?requestCompany:'';
+    // 2026-08-22: 読み取り先を backend.json で切り替える。
+    // ★書き込みは常にGAS。ここで切り替わるのは「読むだけ」。
+    // ★Workerが失敗したら黙ってGASへ落ちる。利用者にはエラーを見せない。
     // 2026-08-21: GASのWebアプリは混むと HTTP404 やロック時間切れを返す
     // （実測で5回に1回程度）。1回きりだと利用者に即エラーが出るため、黙って
     // 1度だけ取り直す。それでも駄目なら下の catch へ。
-    let json=null,lastErr=null;
-    for(let attempt=0;attempt<2;attempt++){
+    let json=null,lastErr=null,usedBackend='gas';
+    let cfg={backend:'gas'};
+    try{
+      const c=await fetch('backend.json?t='+Date.now());
+      if(c.ok)cfg=await c.json();
+    }catch(e){/* 取れなければGASのまま＝安全側 */}
+
+    const tryUrls=[];
+    if(cfg.backend==='d1'&&cfg.workerUrl)
+      tryUrls.push({kind:'d1',url:cfg.workerUrl+'/api/schedule?company='+encodeURIComponent(companyParam)});
+    tryUrls.push({kind:'gas',url:GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam)});
+    tryUrls.push({kind:'gas',url:GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam)});
+
+    for(const t of tryUrls){
       try{
-        const res=await fetch(GAS_URL+'?t='+Date.now()+'&compact=1&company='+encodeURIComponent(companyParam));
+        const res=await fetch(t.url);
         const j=await res.json();
         if(j.status!=='ok')throw new Error(j.message||'予定データの取得に失敗しました');
-        json=j;lastErr=null;break;
+        json=j;usedBackend=t.kind;lastErr=null;break;
       }catch(err){lastErr=err;}
     }
     // 会社切替後に古い通信が遅れて返っても、現在の画面を上書きしない。
     if(requestSeq!==dataLoadSeq||requestCompany!==currentCompany)return;
     if(lastErr)throw lastErr;
+    try{console.log('[予定管理] 読み取り元:',usedBackend);}catch(e){}
     allNippos=parseRows(json.compact?expandCompactRows(json.headers,json.rows):json.rows,'');
     allNippos=allNippos.concat(generateGhosts(allNippos));
     if(json.members)allMembers=json.members;
@@ -4036,17 +4059,56 @@ function setGenbaValue(p,val){
 }
 
 // ===== 職人管理 =====
-function openSettings(){if(currentCompany==='全社'){alert('会社を選択してから管理してください');return;}renderSettings();document.getElementById('settings-modal').classList.add('active');}
+// 2026-08-22: 職人管理画面（単価＝給料情報を扱う）専用の職人マスタキャッシュ。
+// ★backend（gas/d1）で分岐しない。ここは常にGASから取り直す＝分岐は事故の元。
+// ★Cloudflare(D1)は給料情報を持たない方針のため、単価はここでしか取れない。
+// ★allMembers（予定表示に使う本体・loadDataで backend 切替の影響を受けうる）は上書きしない。
+let settingsMembers=null;   // 取得成功時: [{name,company,division,rate}, ...]
+let settingsMembersOk=false; // false のままなら単価欄は編集不可にする（0で誤上書きを防ぐ）
+
+async function loadSettingsMembers(){
+  settingsMembersOk=false;
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'get_sheet',sheet:'職人マスタ'}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status!=='ok')throw new Error(json.message||'職人マスタの取得に失敗しました');
+    const rows=(json.data||[]).slice(1); // 1行目はヘッダー（氏名,会社,事業部,単価）
+    settingsMembers=rows.map(r=>({name:String(r[0]||''),company:String(r[1]||''),division:String(r[2]||''),rate:Number(r[3])||0}));
+    settingsMembersOk=true;
+  }catch(e){
+    console.error('[職人管理] 職人マスタの取得に失敗:',e);
+    settingsMembers=null;settingsMembersOk=false;
+  }
+}
+
+async function openSettings(){
+  if(currentCompany==='全社'){alert('会社を選択してから管理してください');return;}
+  document.getElementById('settings-modal').classList.add('active');
+  document.getElementById('settings-company-name').textContent=currentCompany;
+  const list=document.getElementById('shokunin-list');
+  if(list)list.innerHTML='<div style="text-align:center;color:#999;padding:20px">読み込み中...</div>';
+  // 単価（給料情報）は常にGASから取り直してから描画する。D1は単価を持たないため。
+  await loadSettingsMembers();
+  renderSettings();
+}
 function closeSettings(){document.getElementById('settings-modal').classList.remove('active');initMemberUI();settingsOpenedForSelect=null;}
 function renderSettings(){
   document.getElementById('settings-company-name').textContent=currentCompany;
   const isGrowise=currentCompany==='グローライズ';
   const divField=document.getElementById('division-field');if(divField)divField.style.display=isGrowise?'':'none';
-  document.getElementById('shokunin-list').innerHTML=getShokunin().map((s,i)=>{
-    const member=allMembers.find(m=>m.name===s&&m.company===currentCompany);const div=(member&&member.division)||'';const rate=(member&&member.rate)||0;
+  const warnHtml=settingsMembersOk?'':'<div style="background:#fef2f2;color:#c00;border:1px solid #fca5a5;border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">⚠️ 単価を取得できませんでした（通信エラー）。保存済みの単価は変わっていません。編集するには一度閉じて開き直してください。</div>';
+  document.getElementById('shokunin-list').innerHTML=warnHtml+getShokunin().map((s,i)=>{
+    // 単価は settingsMembers（GASから取り直した専用キャッシュ）を使う。allMembers は使わない。
+    const member=settingsMembers?settingsMembers.find(m=>m.name===s&&m.company===currentCompany):null;
+    const div=(member&&member.division)||'';
+    const rate=(member&&member.rate)||0;
     const divSelect=isGrowise?`<select onchange="updateMemberDivision('${esc(s)}',this.value)" style="width:auto;margin:0;padding:4px 8px;font-size:12px;border:1px solid #ddd;border-radius:6px;background:#f9f9f9">
       <option value=""${!div?' selected':''}>（なし）</option>${DIVISIONS.map(d=>`<option value="${d}"${d===div?' selected':''}>${d}</option>`).join('')}</select>`:'';
-    const rateInput=`<input type="number" value="${rate||''}" placeholder="単価" onchange="updateMemberRate('${esc(s)}',this.value)" style="width:80px;margin:0;padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:6px">`;
+    // 取得に失敗している間は単価欄を編集不可にする。0や空欄のまま保存できてしまうと
+    // 実際の給料データを0で上書きする恐れがあるため。
+    const rateInput=settingsMembersOk
+      ?`<input type="number" value="${rate||''}" placeholder="単価" onchange="updateMemberRate('${esc(s)}',this.value)" style="width:80px;margin:0;padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:6px">`
+      :`<input type="text" value="取得できませんでした" disabled title="単価を取得できませんでした" style="width:130px;margin:0;padding:4px 6px;font-size:11px;border:1px solid #fca5a5;border-radius:6px;background:#fef2f2;color:#c00;cursor:not-allowed">`;
     return`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee;gap:6px">
       <span style="font-size:15px;flex:1">${esc(s)}</span>
       <div style="display:flex;align-items:center;gap:6px">${divSelect}${rateInput}<button class="btn btn-danger btn-sm" onclick="removeShokunin(${i})">削除</button></div>
@@ -4058,24 +4120,24 @@ async function addShokunin(){
   const isGrowise=currentCompany==='グローライズ';const divSel=document.getElementById('new-shokunin-division');const division=isGrowise&&divSel?divSel.value:'';
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'add_member',name:v,company:currentCompany,division}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status==='ok'){allMembers.push({name:v,company:currentCompany,division});document.getElementById('new-shokunin').value='';if(divSel)divSel.value='';renderSettings();initMemberUI();
+    if(json.status==='ok'){allMembers.push({name:v,company:currentCompany,division});if(settingsMembers)settingsMembers.push({name:v,company:currentCompany,division,rate:0});document.getElementById('new-shokunin').value='';if(divSel)divSel.value='';renderSettings();initMemberUI();
       if(settingsOpenedForSelect){const sel=document.getElementById(settingsOpenedForSelect);if(sel)sel.value=v;if(settingsOpenedForSelect==='s-operator'){currentUsername=v;try{localStorage.setItem('admin-username',v);}catch(e){}updateUsernameDisplay();}settingsOpenedForSelect=null;}
     }else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 async function removeShokunin(i){
   const name=getShokunin()[i];if(!confirm(name+'を削除しますか？'))return;
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'remove_member',name,company:currentCompany}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();if(json.status==='ok'){allMembers=allMembers.filter(m=>!(m.name===name&&m.company===currentCompany));renderSettings();initMemberUI();}
+    const json=await res.json();if(json.status==='ok'){allMembers=allMembers.filter(m=>!(m.name===name&&m.company===currentCompany));if(settingsMembers)settingsMembers=settingsMembers.filter(m=>!(m.name===name&&m.company===currentCompany));renderSettings();initMemberUI();}
     else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 async function updateMemberDivision(name,division){
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_division',name,company:currentCompany,division}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();if(json.status==='ok'){const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.division=division;}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+    const json=await res.json();if(json.status==='ok'){const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.division=division;const sm=settingsMembers&&settingsMembers.find(x=>x.name===name&&x.company===currentCompany);if(sm)sm.division=division;}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 async function updateMemberRate(name,rateStr){
   const rate=Number(rateStr||0);
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_rate',name,company:currentCompany,rate}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();if(json.status==='ok'){const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.rate=rate;}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+    const json=await res.json();if(json.status==='ok'){const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.rate=rate;const sm=settingsMembers&&settingsMembers.find(x=>x.name===name&&x.company===currentCompany);if(sm)sm.rate=rate;}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 
 // ===== 元請管理 =====

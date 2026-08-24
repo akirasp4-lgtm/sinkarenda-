@@ -1,0 +1,1 @@
+{"backend":"gas","workerUrl":"https://yotei-api.miscjigyoubu.workers.dev","note":"backendを d1 にすると読み取りだけWorkerへ切り替わる。戻すときは gas に戻す。書き込みは常にGAS。"}
