@@ -5,7 +5,7 @@ compatibility_date = "2026-08-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "yotei"
-database_id = "PLACEHOLDER_実際のIDはwrangler d1 createの出力で置き換える"
+database_id = "d95d8827-bdf5-4f07-b342-aecd8c87b8f5"
 
 # 5分ごとにスプレッドシートから取り込む
 [triggers]
