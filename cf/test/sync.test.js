@@ -1,389 +1,487 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseGasPayload, fetchWithRetry, syncAll } from '../src/sync.js';
+import { validateGasPayload, sanitizeForStorage, fetchWithRetry, syncAll } from '../src/sync.js';
 
 const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工',
                  'メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両'];
 
-describe('parseGasPayload', () => {
-  it('compact形式の1行をD1の列名へ移し替える', () => {
-    const json = {
-      status: 'ok', compact: 1, headers: HEADERS,
-      rows: [['2026-05-01T04:23:04.000Z','2026-05-02','NGS','大阪','川端（達）','代表',
-              '09:00','18:00',1,'','','グローライズ','abc-1','森','#1D9E75','ICT',
-              'INF-26-041','現場作業','']],
-      members: [], genbaMaster: [], jobsites: []
-    };
-    const out = parseGasPayload(json);
-    expect(out.nippo).toHaveLength(1);
-    expect(out.nippo[0]).toMatchObject({
-      id: 'abc-1', sagyoubi: '2026-05-02', motoukr: 'NGS', genba: '大阪',
-      shimei: '川端（達）', kosu: 1, kaisha: 'グローライズ', kouban: 'INF-26-041'
-    });
+function makeCompactPayload(overrides = {}) {
+  return {
+    status: 'ok', compact: 1, headers: HEADERS,
+    rows: [], members: [], genbaMaster: [], jobsites: [],
+    ...overrides
+  };
+}
+
+// ============================================================
+// validateGasPayload（修正3: 応答の妥当性検証）
+// ============================================================
+describe('validateGasPayload', () => {
+  it('現行の19列・並びと一致するcompact応答は通る', () => {
+    const out = validateGasPayload(makeCompactPayload());
+    expect(out.ok).toBe(true);
   });
 
-  it('職人マスタから単価(rate)を落とす', () => {
-    const json = { status:'ok', compact:1, headers:HEADERS, rows:[],
-      members:[{name:'森',company:'GRHD',division:'ICT',rate:18000}],
-      genbaMaster:[], jobsites:[] };
-    const out = parseGasPayload(json);
-    expect(out.members[0]).toEqual({name:'森',company:'GRHD',division:'ICT'});
-    expect(JSON.stringify(out.members)).not.toContain('18000');
+  it('compactでない応答は拒否する', () => {
+    const out = validateGasPayload({ status: 'ok', rows: [] });
+    expect(out.ok).toBe(false);
+    expect(out.message).toMatch(/compact/);
   });
 
-  it('会社名セルの前後の空白は格納前に落とす（D1のWHERE kaisha=?は完全一致のため）', () => {
-    const row = [...new Array(19).fill('')];
-    row[1] = '2026-05-02';        // 作業日
-    row[4] = '川端（達）';          // 氏名
-    row[8] = 1;                   // 人工
-    row[11] = '  グローライズ　'; // 会社（前後に半角・全角空白が紛れ込んだ想定）
-    row[12] = 'abc-1';            // ID
-    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
-                   members:[], genbaMaster:[], jobsites:[] };
-    const out = parseGasPayload(json);
-    expect(out.nippo).toHaveLength(1);
-    expect(out.nippo[0].kaisha).toBe('グローライズ');
+  it('headersが1列欠けていたら拒否する（将来GAS側で項目が変わる想定）', () => {
+    const out = validateGasPayload(makeCompactPayload({ headers: HEADERS.slice(0, 18) }));
+    expect(out.ok).toBe(false);
+    expect(out.message).toMatch(/headers/);
   });
 
-  it('会社名セルが空・未定義でも落ちない（trim対象がnull/undefinedでも例外にならない）', () => {
-    const row = new Array(19).fill('');
-    row[1] = '2026-05-02'; row[4] = '森'; row[12] = 'abc-2';
-    row[11] = undefined; // 会社が未定義
-    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
-                   members:[], genbaMaster:[], jobsites:[] };
-    const out = parseGasPayload(json);
-    expect(out.nippo[0].kaisha).toBe('');
+  it('headersの並び順が違うだけでも拒否する', () => {
+    const swapped = [...HEADERS];
+    [swapped[0], swapped[1]] = [swapped[1], swapped[0]];
+    const out = validateGasPayload(makeCompactPayload({ headers: swapped }));
+    expect(out.ok).toBe(false);
   });
 
-  it('compactでない応答は受け付けない（形が変わると壊れるため明示的に落とす）', () => {
-    expect(() => parseGasPayload({status:'ok', rows:[{'ID':'x'}]}))
-      .toThrow(/compact/);
+  it('membersが配列でない（欠落してオブジェクト等になっている）と拒否する', () => {
+    const out = validateGasPayload(makeCompactPayload({ members: undefined }));
+    expect(out.ok).toBe(false);
+    expect(out.message).toMatch(/members|配列/);
   });
 
-  // ★2026-08-24 設計変更：以前はここで「IDが空の行は捨てる」としていたが、
-  // これが本番データ突き合わせで14行欠落（車検期限リマインダー行の消失）を
-  // 引き起こした。D1はGAS応答の忠実な写しにする方針へ変更したため、
-  // IDが空でも行は捨てない（下の「行を捨てるフィルタの回帰防止」を参照）。
-  it('IDが空の行も捨てない（連番seqが主キーなので、IDが無くても行を持てる）', () => {
-    const row = new Array(19).fill('');
-    row[1] = '2026-05-02'; row[4] = '森';
-    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
-                   members:[], genbaMaster:[], jobsites:[] };
-    const out = parseGasPayload(json);
-    expect(out.nippo).toHaveLength(1);
-    expect(out.nippo[0].id).toBe('');
+  it('rows/genbaMaster/jobsitesのいずれかが配列でなくても拒否する', () => {
+    expect(validateGasPayload(makeCompactPayload({ rows: {} })).ok).toBe(false);
+    expect(validateGasPayload(makeCompactPayload({ genbaMaster: null })).ok).toBe(false);
+    expect(validateGasPayload(makeCompactPayload({ jobsites: 'x' })).ok).toBe(false);
   });
 });
 
-// --- ここから追加（2026-08-24 設計変更：本番データ突き合わせで見つかった
-// 14行欠落＝車検期限リマインダー行の消失の再発防止）。
-//
-// 原因は parseGasPayload の `if (!rec.sagyoubi || !rec.shimei) continue;` 等、
-// 行を捨てるフィルタだった。GASのdoGetはスプレッドシートの行をそのまま
-// 返すだけで、「氏名が空の行（車両の車検期限だけを置いてある行）」も
-// 「同名・同会社の職人が複数登録されている（元データの重複）」も正当に
-// 存在する。D1はGAS応答の忠実な写しでなければならず、整形・掃除は
-// 移行とは別の作業（利用者の裁定）。
-describe('parseGasPayload（行を捨てるフィルタの回帰防止 = 2026-08-24 本番突き合わせで発覚した14行欠落）', () => {
-  it('氏名が空の行が捨てられずD1へ入ること（車検期限リマインダー行の再現）', () => {
-    // 実例: ID VKEN_なにわ432そ8800 / 作業日 2026-10-16 /
-    // 現場名「ハイエース白 車検期限」/ メモ「車検期限日 なにわ432そ8800」/
-    // 夜勤「予定」/ 更新者「車検期限登録」/ 氏名は空（人が出る予定ではないため）。
-    const row = new Array(19).fill('');
-    row[1] = '2026-10-16';                       // 作業日
-    row[3] = 'ハイエース白 車検期限';               // 現場名
-    row[4] = '';                                  // 氏名（正当に空）
-    row[9] = '車検期限日 なにわ432そ8800';          // メモ
-    row[10] = '予定';                              // 夜勤
-    row[11] = 'グローライズ';                       // 会社
-    row[12] = 'VKEN_なにわ432そ8800';               // ID
-    row[13] = '車検期限登録';                       // 更新者
-    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
-                   members:[], genbaMaster:[], jobsites:[] };
-
-    const out = parseGasPayload(json);
-    expect(out.nippo).toHaveLength(1);
-    expect(out.nippo[0]).toMatchObject({
-      id: 'VKEN_なにわ432そ8800', sagyoubi: '2026-10-16', genba: 'ハイエース白 車検期限',
-      shimei: '', memo: '車検期限日 なにわ432そ8800', yakin: '予定', koushinsha: '車検期限登録'
-    });
+// ============================================================
+// sanitizeForStorage（単価除去 + 忠実な写しの維持）
+// ============================================================
+describe('sanitizeForStorage', () => {
+  it('職人マスタから単価(rate)を落とす', () => {
+    const out = sanitizeForStorage(makeCompactPayload({
+      members: [{ name: '森', company: 'GRHD', division: 'ICT', rate: 18000 }]
+    }));
+    expect(out.members[0]).toEqual({ name: '森', company: 'GRHD', division: 'ICT' });
+    expect(JSON.stringify(out.members)).not.toContain('18000');
   });
 
-  it('作業日が空の行も捨てられないこと（IDと氏名だけの行）', () => {
-    const row = new Array(19).fill('');
-    row[4] = '森'; row[12] = 'id-no-date';
-    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
-                   members:[], genbaMaster:[], jobsites:[] };
-    expect(parseGasPayload(json).nippo).toHaveLength(1);
-  });
-
-  it('同名・同会社の職人が3件あったら3件とも保持されること（元データの重複を畳まない）', () => {
-    const json = {
-      status: 'ok', compact: 1, headers: HEADERS, rows: [],
+  it('同名・同会社の職人が複数あっても畳まない（元データの重複をそのまま保つ）', () => {
+    const out = sanitizeForStorage(makeCompactPayload({
       members: [
         { name: '林電工(りんたろう)', company: '和信カインド', division: '電気', rate: 15000 },
         { name: '林電工(りんたろう)', company: '和信カインド', division: '電気', rate: 15000 },
         { name: '林電工(りんたろう)', company: '和信カインド', division: '電気', rate: 15000 }
-      ],
-      genbaMaster: [], jobsites: []
-    };
-    const out = parseGasPayload(json);
+      ]
+    }));
     expect(out.members).toHaveLength(3);
-    for (const m of out.members) {
-      expect(m).toEqual({ name: '林電工(りんたろう)', company: '和信カインド', division: '電気' });
-    }
   });
 
-  it('並び順が入力順のまま保たれること（重複排除・並び替えをしない）', () => {
-    const rows = [];
-    for (const id of ['c-3', 'a-1', 'b-2', 'a-1']) {  // 意図的に非ソート順＋重複ID
+  it('rowsは中身・順序をそのまま保つ（氏名が空の行=車検期限リマインダー行も捨てない）', () => {
+    const row = new Array(19).fill('');
+    row[1] = '2026-10-16'; row[3] = 'ハイエース白 車検期限'; row[4] = ''; // 氏名は空
+    row[12] = 'VKEN_なにわ432そ8800';
+    const out = sanitizeForStorage(makeCompactPayload({ rows: [row] }));
+    expect(out.rows).toHaveLength(1);
+    expect(out.rows[0][4]).toBe('');
+    expect(out.rows[0][12]).toBe('VKEN_なにわ432そ8800');
+  });
+
+  it('人工(#NUM!のような非数値)や並び順もそのまま保つ（強制変換しない）', () => {
+    const rows = ['c-3', 'a-1', 'b-2', 'a-1'].map(id => {
       const row = new Array(19).fill('');
-      row[1] = '2026-05-02'; row[4] = '森'; row[12] = id;
-      rows.push(row);
-    }
-    const json = { status:'ok', compact:1, headers:HEADERS, rows,
-                   members:[], genbaMaster:[], jobsites:[] };
-    const out = parseGasPayload(json);
-    expect(out.nippo.map(r => r.id)).toEqual(['c-3', 'a-1', 'b-2', 'a-1']);
+      row[1] = '2026-05-02'; row[4] = '森'; row[8] = '#NUM!'; row[12] = id;
+      return row;
+    });
+    const out = sanitizeForStorage(makeCompactPayload({ rows }));
+    expect(out.rows.map(r => r[12])).toEqual(['c-3', 'a-1', 'b-2', 'a-1']);
+    expect(out.rows.every(r => r[8] === '#NUM!')).toBe(true);
   });
 
-  it('会社名(元請)・現場名が空の genba/jobsites 行も捨てられないこと', () => {
-    const json = {
-      status: 'ok', compact: 1, headers: HEADERS, rows: [],
-      members: [], genbaMaster: [{ name: '', company: '' }],
-      jobsites: [{ genba: '', loc: '', jobNo: '', completed: 0, billingMethod: '' }]
-    };
-    const out = parseGasPayload(json);
-    expect(out.genba).toHaveLength(1);
+  it('genbaMaster/jobsitesは名前が空の行もそのまま保つ（読み取り側でGASと同じ条件で弾く設計のため）', () => {
+    const out = sanitizeForStorage(makeCompactPayload({
+      genbaMaster: [{ name: '', company: '' }],
+      jobsites: [{ genba: '', loc: '', jobNo: '', completed: false, billingMethod: '' }]
+    }));
+    expect(out.genbaMaster).toHaveLength(1);
     expect(out.jobsites).toHaveLength(1);
   });
 });
 
-// --- ここから追加（2026-08-24 追加修正：本番データ突き合わせで見つかった
-// 「人工」の値の不一致14件の再発防止）。
-//
-// 原因は `rec.kosu = Number(rec.kosu) || 0;`。スプレッドシート側の「人工」
-// セルが計算エラー（#NUM!）になっている行（車検期限リマインダー行）で、
-// GASは文字列 "#NUM!" をそのまま返すが、この強制変換が一律0へ書き換えて
-// いた。GASから来た値をそのまま渡す（強制変換しない）方針へ修正。
-describe('parseGasPayload（人工(kosu)を強制変換しない = 2026-08-24 本番突き合わせで発覚した値不一致の回帰防止）', () => {
-  it('人工が#NUM!のような数値でない文字列でも、0に変換されずそのまま保持されること', () => {
-    const row = new Array(19).fill('');
-    row[1] = '2026-10-16'; row[3] = 'ハイエース白 車検期限'; row[4] = '';
-    row[8] = '#NUM!';                             // 人工（スプレッドシート側の計算エラー）
-    row[12] = 'VKEN_なにわ432そ8800';
-    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
-                   members:[], genbaMaster:[], jobsites:[] };
-    const out = parseGasPayload(json);
-    expect(out.nippo).toHaveLength(1);
-    expect(out.nippo[0].kosu).toBe('#NUM!');
-  });
-
-  it('通常の数値（1、0.5など）はこれまでどおり数値として扱われること', () => {
-    const rows = [1, 0.5, 0].map(kosu => {
-      const row = new Array(19).fill('');
-      row[1] = '2026-05-02'; row[4] = '森'; row[8] = kosu; row[12] = 'id-' + kosu;
-      return row;
-    });
-    const json = { status:'ok', compact:1, headers:HEADERS, rows,
-                   members:[], genbaMaster:[], jobsites:[] };
-    const out = parseGasPayload(json);
-    expect(out.nippo.map(r => r.kosu)).toEqual([1, 0.5, 0]);
-    for (const r of out.nippo) expect(typeof r.kosu).toBe('number');
-  });
-
-  it('人工セルが空（未入力）のときは空文字のまま保持される（他の列と同じnull→\'\'正規化）', () => {
-    const row = new Array(19).fill('');
-    row[1] = '2026-05-02'; row[4] = '森'; row[12] = 'id-empty-kosu';
-    // row[8]（人工）は fill('') により空文字のまま
-    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
-                   members:[], genbaMaster:[], jobsites:[] };
-    const out = parseGasPayload(json);
-    expect(out.nippo[0].kosu).toBe('');
-  });
-});
-
+// ============================================================
+// fetchWithRetry（修正3: タイムアウト付き）
+// ============================================================
 describe('fetchWithRetry', () => {
   it('1回目が404でも2回目で成功すれば結果を返す（GASは5回に1回404を返す）', async () => {
     const calls = [];
     global.fetch = vi.fn(async (u) => {
       calls.push(u);
-      if (calls.length === 1) return { ok:false, status:404, text: async () => '<html>' };
-      return { ok:true, status:200, json: async () => ({status:'ok'}) };
+      if (calls.length === 1) return { ok: false, status: 404, text: async () => '<html>' };
+      return { ok: true, status: 200, json: async () => ({ status: 'ok' }) };
     });
     const out = await fetchWithRetry('https://example.test/', 3);
-    expect(out).toEqual({status:'ok'});
+    expect(out).toEqual({ status: 'ok' });
     expect(calls).toHaveLength(2);
   });
 
   it('回数を使い切ったら投げる', async () => {
-    global.fetch = vi.fn(async () => ({ ok:false, status:404, text: async () => '<html>' }));
+    global.fetch = vi.fn(async () => ({ ok: false, status: 404, text: async () => '<html>' }));
     await expect(fetchWithRetry('https://example.test/', 2)).rejects.toThrow(/404/);
+  });
+
+  it('毎回のfetchにタイムアウト用のAbortSignalを渡している（無応答で待ち続けない対策）', async () => {
+    let seenSignal = null;
+    global.fetch = vi.fn(async (u, init) => {
+      seenSignal = init && init.signal;
+      return { ok: true, status: 200, json: async () => ({ status: 'ok' }) };
+    });
+    await fetchWithRetry('https://example.test/', 3);
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
   });
 });
 
-// --- ここから追加（計画からの変更点：500文ずつの分割投入とその失敗時の扱い） ---
+// ============================================================
+// syncAll（修正1: スナップショット方式・修正2: 同時実行の抑止）
+// ============================================================
 
-// D1のprepare/bind/run/batchを模した簡易モック。
-// bind()は新しいbindされた文（sql+args）を返し、batch配列にそのまま渡せる形にする。
-function makeMockDB({ failOnBatchCall, failSyncLogWrite, failOnPrepareCall } = {}) {
-  const batchCalls = [];      // batch()に渡された文の配列を、呼び出しごとに記録
-  const syncLogRuns = [];     // sync_logへのINSERTで渡された引数を記録
-  let prepareCallCount = 0;
+// D1のprepare/bind/run/all()を模した簡易・状態保持モック。
+// snapshot / sync_lock / sync_log の3テーブルだけを実装する
+// （sync.jsが実際に発行するクエリはこの3つだけのため）。
+function makeMockDB({ initialLockedAt = null, throwOnSnapshotWrite = false, throwOnLockRead = false } = {}) {
+  const state = { snapshot: null, lockedAt: initialLockedAt, syncLog: [] };
+  const calls = { snapshotWrites: 0, lockWrites: [], syncLogWrites: [] };
 
-  function makeStmt(sql, args = []) {
+  function respond(sql, args) {
     return {
-      sql,
-      args,
-      bind(...newArgs) {
-        return makeStmt(sql, newArgs);
+      async all() {
+        if (throwOnLockRead && /FROM sync_lock/.test(sql)) throw new Error('mock lock read failure');
+        if (/SELECT locked_at FROM sync_lock/.test(sql)) {
+          return { results: state.lockedAt != null ? [{ locked_at: state.lockedAt }] : [] };
+        }
+        if (/SELECT rows, hash FROM snapshot/.test(sql)) {
+          return { results: state.snapshot ? [{ rows: state.snapshot.rows, hash: state.snapshot.hash }] : [] };
+        }
+        if (/SELECT payload FROM snapshot/.test(sql)) {
+          return { results: state.snapshot ? [{ payload: state.snapshot.payload }] : [] };
+        }
+        if (/SELECT rows, bytes, at FROM snapshot/.test(sql)) {
+          return { results: state.snapshot ? [{ rows: state.snapshot.rows, bytes: state.snapshot.bytes, at: state.snapshot.at }] : [] };
+        }
+        if (/FROM sync_log/.test(sql)) {
+          return { results: [...state.syncLog].sort((a, b) => b.at.localeCompare(a.at)) };
+        }
+        return { results: [] };
       },
       async run() {
+        if (/VALUES \(1, NULL\)/.test(sql) && /sync_lock/.test(sql)) {
+          state.lockedAt = null;
+          return { success: true };
+        }
+        if (/INSERT OR REPLACE INTO sync_lock/.test(sql)) {
+          state.lockedAt = args[0];
+          calls.lockWrites.push(args[0]);
+          return { success: true };
+        }
+        if (/INSERT OR REPLACE INTO snapshot/.test(sql)) {
+          if (throwOnSnapshotWrite) throw new Error('mock snapshot write failure');
+          const [payload, hash, rows, bytes, at] = args;
+          state.snapshot = { payload, hash, rows, bytes, at };
+          calls.snapshotWrites++;
+          return { success: true };
+        }
         if (/INSERT OR REPLACE INTO sync_log/.test(sql)) {
-          syncLogRuns.push(args);
-          if (failSyncLogWrite) throw new Error('mock sync_log write failure');
+          const [at, rows, ok, message] = args;
+          state.syncLog.push({ at, rows, ok, message });
+          calls.syncLogWrites.push({ at, rows, ok, message });
+          return { success: true };
         }
         return { success: true };
-      },
+      }
     };
   }
 
   const db = {
     prepare(sql) {
-      prepareCallCount++;
-      // GASが想定外の形を返し、文の組み立て中（bindより前のprepare自体）
-      // で例外が出るケースを模す。
-      if (failOnPrepareCall && prepareCallCount === failOnPrepareCall) {
-        throw new Error('mock prepare failure on call ' + prepareCallCount);
-      }
-      return makeStmt(sql, []);
-    },
-    async batch(stmts) {
-      batchCalls.push(stmts);
-      if (failOnBatchCall && batchCalls.length === failOnBatchCall) {
-        throw new Error('mock batch failure on call ' + batchCalls.length);
-      }
-      return stmts.map(() => ({ success: true }));
-    },
+      return {
+        bind: (...args) => respond(sql, args),
+        all: () => respond(sql, []).all(),
+        run: () => respond(sql, []).run()
+      };
+    }
   };
 
-  return { db, batchCalls, syncLogRuns };
+  return { db, state, calls };
 }
 
-// 有効な日報行を1件作る（id/sagyoubi/shimeiを一意にして主キー重複を避ける）
-function makeRow(i) {
-  const row = new Array(19).fill('');
-  row[1] = '2026-05-02';       // 作業日
-  row[4] = '作業員' + i;        // 氏名
-  row[8] = 1;                  // 人工
-  row[11] = 'グローライズ';      // 会社
-  row[12] = 'id-' + i;         // ID
-  return row;
+function mockFetchOk(payload) {
+  global.fetch = vi.fn(async () => ({
+    ok: true, status: 200, json: async () => payload
+  }));
 }
 
-describe('syncAll（500文ずつの分割投入）', () => {
-  it('500件を超える行数を渡したとき、batchが複数回に分かれて呼ばれること', async () => {
-    const rows = Array.from({ length: 600 }, (_, i) => makeRow(i));
-    global.fetch = vi.fn(async () => ({
-      ok: true, status: 200,
-      json: async () => ({
-        status: 'ok', compact: 1, headers: HEADERS, rows,
-        members: [], genbaMaster: [], jobsites: [],
-      }),
-    }));
+function makeRows(n, extra = {}) {
+  return Array.from({ length: n }, (_, i) => {
+    const row = new Array(19).fill('');
+    row[1] = '2026-05-02'; row[4] = '作業員' + i; row[8] = 1; row[11] = 'グローライズ'; row[12] = 'id-' + i;
+    return row;
+  });
+}
 
-    const { db, batchCalls } = makeMockDB();
+describe('syncAll（正常系）', () => {
+  it('初回同期はsnapshotへの単一のINSERT OR REPLACEだけで完結する（原子性の直接的な証拠）', async () => {
+    mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+    const { db, state, calls } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
 
     const out = await syncAll(env);
 
     expect(out.ok).toBe(true);
     expect(out.rows).toBe(600);
-    // 総文数 = DELETE nippo(1) + insert(600) + DELETE members/genba/jobsites(3) = 604 → 500文ずつで2回
-    expect(batchCalls.length).toBeGreaterThan(1);
-    for (const chunk of batchCalls) {
-      expect(chunk.length).toBeLessThanOrEqual(500);
-    }
+    // ★重大1（原子性）の直接的な証拠: snapshotへの書き込みは1回のrun()だけ。
+    // 旧設計（DELETE+500文ずつのbatch）のように複数の文にまたがらない。
+    expect(calls.snapshotWrites).toBe(1);
+    expect(state.snapshot).toBeTruthy();
+    expect(state.snapshot.rows).toBe(600);
   });
 
-  it('途中のbatchが失敗したとき、例外を投げずにok:falseを返し、sync_logにok=0が記録されること', async () => {
-    const rows = Array.from({ length: 600 }, (_, i) => makeRow(i));
-    global.fetch = vi.fn(async () => ({
-      ok: true, status: 200,
-      json: async () => ({
-        status: 'ok', compact: 1, headers: HEADERS, rows,
-        members: [], genbaMaster: [], jobsites: [],
-      }),
-    }));
+  it('★重大2（費用）の直接的な証拠: 600件の日報でもD1への書き込みはsnapshot 1行+sync_log 1行だけ（旧設計なら600+α行）', async () => {
+    mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+    const { db, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    await syncAll(env);
+    expect(calls.snapshotWrites).toBe(1);
+    expect(calls.syncLogWrites).toHaveLength(1);
+  });
 
-    // 2回目のbatch呼び出しで失敗させる（1回目のDELETE+一部INSERTは通った想定）
-    const { db, syncLogRuns } = makeMockDB({ failOnBatchCall: 2 });
+  it('ロックは同期完了後に解放される（連続呼び出しをブロックしたままにしない）', async () => {
+    mockFetchOk(makeCompactPayload({ rows: makeRows(5) }));
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    await syncAll(env);
+    expect(state.lockedAt).toBeNull();
+  });
+});
+
+describe('syncAll（修正1: 変更が無ければ書かない）', () => {
+  it('2回連続で同じ内容を同期すると、2回目は書き込みをスキップしてok:trueで返す', async () => {
+    const payload = makeCompactPayload({ rows: makeRows(300) });
+    mockFetchOk(payload);
+    const { db, calls } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
 
-    // syncAllは契約上、例外を投げない。戻り値のokで失敗を表す。
+    const first = await syncAll(env);
+    expect(first.ok).toBe(true);
+    expect(calls.snapshotWrites).toBe(1);
+
+    const second = await syncAll(env);
+    expect(second.ok).toBe(true);
+    expect(second.skipped).toBe(true);
+    expect(second.message).toMatch(/変更なし/);
+    // 2回目はsnapshotへの書き込みが増えていない（スキップされた）
+    expect(calls.snapshotWrites).toBe(1);
+  });
+
+  it('内容が変わっていれば2回目も書き込む', async () => {
+    const { db, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(300) }));
+    await syncAll(env);
+    expect(calls.snapshotWrites).toBe(1);
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(301) }));
+    const second = await syncAll(env);
+    expect(second.ok).toBe(true);
+    expect(second.skipped).toBeFalsy();
+    expect(calls.snapshotWrites).toBe(2);
+  });
+});
+
+describe('syncAll（修正1: サイズガード）', () => {
+  it('payloadが1,500,000バイトを超えたら書き込まず失敗として記録する', async () => {
+    // 1行あたり十分に長いmemoを持たせてサイズ上限を超えさせる
+    const bigRow = () => {
+      const row = new Array(19).fill('');
+      row[1] = '2026-05-02'; row[4] = '森'; row[9] = 'x'.repeat(2000); row[12] = 'id';
+      return row;
+    };
+    const rows = Array.from({ length: 1000 }, bigRow); // 概算 1000 * (~2000+α) > 1,500,000
+    mockFetchOk(makeCompactPayload({ rows }));
+    const { db, state, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
     const out = await syncAll(env);
+
+    expect(out.ok).toBe(false);
+    expect(out.message).toMatch(/上限|バイト/);
+    expect(calls.snapshotWrites).toBe(0);
+    expect(state.snapshot).toBeNull();
+    expect(calls.syncLogWrites).toHaveLength(1);
+    expect(calls.syncLogWrites[0].ok).toBe(0);
+  });
+
+  it('サイズ超過で失敗しても、既存の（前回成功した）snapshotは変わらず残る', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(300) }));
+    await syncAll(env);
+    const before = { ...state.snapshot };
+
+    const bigRow = () => {
+      const row = new Array(19).fill('');
+      row[1] = '2026-05-02'; row[4] = '森'; row[9] = 'x'.repeat(2000); row[12] = 'id';
+      return row;
+    };
+    mockFetchOk(makeCompactPayload({ rows: Array.from({ length: 1000 }, bigRow) }));
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(false);
+    expect(state.snapshot).toEqual(before);
+  });
+});
+
+describe('syncAll（修正3: 急激な件数減少ガード）', () => {
+  it('保存済みスナップショットがあり、新しいrowsが半分未満なら書き込まず失敗として記録する', async () => {
+    const { db, state, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+    await syncAll(env);
+    expect(state.snapshot.rows).toBe(600);
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(299) })); // 600の半分(300)未満
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(false);
+    expect(out.message).toMatch(/急減|半分|異常/);
+    // 既存のsnapshotは変わらない（前回の600件のまま）
+    expect(state.snapshot.rows).toBe(600);
+    expect(calls.syncLogWrites.at(-1).ok).toBe(0);
+  });
+
+  it('ちょうど半分は「半分未満」ではないので通す', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+    await syncAll(env);
+
+    mockFetchOk(makeCompactPayload({ rows: makeRows(300) })); // ちょうど半分
+    const out = await syncAll(env);
+    expect(out.ok).toBe(true);
+    expect(state.snapshot.rows).toBe(300);
+  });
+
+  it('初回（保存済みが無い）ときはこの検査を飛ばす（0件近くでも通る）', async () => {
+    mockFetchOk(makeCompactPayload({ rows: makeRows(1) }));
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const out = await syncAll(env);
+    expect(out.ok).toBe(true);
+    expect(state.snapshot.rows).toBe(1);
+  });
+});
+
+describe('syncAll（修正3: 応答の妥当性検証との結線）', () => {
+  it('headersが想定と違う応答は書き込まず失敗として記録する（GAS側の項目名変更を想定）', async () => {
+    mockFetchOk({ status: 'ok', compact: 1, headers: HEADERS.slice(0, 18), rows: [], members: [], genbaMaster: [], jobsites: [] });
+    const { db, state, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(false);
+    expect(state.snapshot).toBeNull();
+    expect(calls.syncLogWrites[0].ok).toBe(0);
+  });
+
+  it('membersが配列でない（欠落）応答は「0件として保存され成功する」ことなく失敗として記録する', async () => {
+    mockFetchOk({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: undefined, genbaMaster: [], jobsites: [] });
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(false);
+    expect(state.snapshot).toBeNull(); // 職人マスタが0件のまま保存されて成功記録されることが無い
+  });
+});
+
+describe('syncAll（修正2: 同時実行の抑止）', () => {
+  it('直近ロックが取得されている（進行中とみなせる）間は、fetchすら行わずスキップする', async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock;
+    const { db } = makeMockDB({ initialLockedAt: String(Date.now() - 1000) }); // 1秒前＝進行中とみなす
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(true);
+    expect(out.skipped).toBe(true);
+    expect(out.message).toMatch(/進行中/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('古いロック（前回が異常終了して解放されなかった想定）は上書きして実行する', async () => {
+    mockFetchOk(makeCompactPayload({ rows: makeRows(5) }));
+    const { db, state } = makeMockDB({ initialLockedAt: String(Date.now() - 999999) }); // 十分に古い
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(true);
+    expect(out.skipped).toBeFalsy();
+    expect(state.snapshot).toBeTruthy();
+  });
+
+  it('ロック機構自体が読めなくても同期は続行する（フェイルオープン。正しさは書き込みの原子性が担保）', async () => {
+    mockFetchOk(makeCompactPayload({ rows: makeRows(5) }));
+    const { db, state } = makeMockDB({ throwOnLockRead: true });
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(true);
+    expect(state.snapshot).toBeTruthy();
+  });
+});
+
+describe('syncAll（例外を投げない契約の維持）', () => {
+  it('fetchが例外を投げても、syncAllは例外を投げずok:falseを返し、sync_logにok=0が記録される', async () => {
+    global.fetch = vi.fn(async () => { throw new Error('mock network failure'); });
+    const { db, calls, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const out = await syncAll(env);
+
     expect(out.ok).toBe(false);
     expect(out.rows).toBe(0);
-    expect(out.message).toMatch(/mock batch failure/);
-
-    expect(syncLogRuns).toHaveLength(1);
-    const [at, loggedRows, ok, message] = syncLogRuns[0];
-    expect(ok).toBe(0);
-    expect(message).toMatch(/mock batch failure/);
-    expect(typeof at).toBe('string');
+    expect(out.message).toMatch(/mock network failure/);
+    expect(state.snapshot).toBeNull();
+    expect(calls.syncLogWrites).toHaveLength(1);
+    expect(calls.syncLogWrites[0].ok).toBe(0);
   });
 
-  it('sync_logへの書き込み自体が失敗しても、返すmessageには元の失敗原因が残ること', async () => {
-    const rows = Array.from({ length: 600 }, (_, i) => makeRow(i));
-    global.fetch = vi.fn(async () => ({
-      ok: true, status: 200,
-      json: async () => ({
-        status: 'ok', compact: 1, headers: HEADERS, rows,
-        members: [], genbaMaster: [], jobsites: [],
-      }),
-    }));
-
-    // batchが2回目で失敗し、かつsync_logへの書き込み自体も失敗する状況。
-    // それでもsyncAllが返すmessageは「元のbatch失敗」のままであること
-    // （ログ書き込み失敗の理由にすり替わらないこと）を確認する。
-    const { db, syncLogRuns } = makeMockDB({ failOnBatchCall: 2, failSyncLogWrite: true });
+  it('snapshotへの書き込み自体が例外を投げても、syncAllは例外を投げずok:falseを返す', async () => {
+    mockFetchOk(makeCompactPayload({ rows: makeRows(5) }));
+    const { db, calls } = makeMockDB({ throwOnSnapshotWrite: true });
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
 
     const out = await syncAll(env);
 
     expect(out.ok).toBe(false);
-    expect(out.message).toMatch(/mock batch failure/);
-    expect(out.message).not.toMatch(/mock sync_log write failure/);
-    // 書き込みは試みられた（そして失敗した）ことは記録から分かる
-    expect(syncLogRuns).toHaveLength(1);
+    expect(out.message).toMatch(/mock snapshot write failure/);
+    expect(calls.syncLogWrites).toHaveLength(1);
+    expect(calls.syncLogWrites[0].ok).toBe(0);
   });
 
-  it('env.DB.prepareが例外を投げても、syncAllは例外を投げずにok:falseを返し、sync_logにok=0が記録されること', async () => {
-    // 文の組み立て中（batch投入より前）に例外が出るケース。
-    // parseGasPayloadはnippoの値を素通しするため、GASが想定外の形
-    // （配列やオブジェクト等）を返すとprepare/bindが例外を投げうる。
-    // この区間が保護されていないと、syncAllの外へ例外がそのまま漏れる。
-    const rows = [makeRow(1)];
-    global.fetch = vi.fn(async () => ({
-      ok: true, status: 200,
-      json: async () => ({
-        status: 'ok', compact: 1, headers: HEADERS, rows,
-        members: [], genbaMaster: [], jobsites: [],
-      }),
-    }));
-
-    // 文の組み立てで最初に呼ばれるprepare（DELETE FROM nippo）で失敗させる。
-    const { db, syncLogRuns } = makeMockDB({ failOnPrepareCall: 1 });
+  it('ロックは例外発生時でも必ず解放される（finally）', async () => {
+    mockFetchOk(makeCompactPayload({ rows: makeRows(5) }));
+    const { db, state } = makeMockDB({ throwOnSnapshotWrite: true });
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
 
-    const out = await syncAll(env);
-
-    expect(out.ok).toBe(false);
-    expect(out.rows).toBe(0);
-    expect(out.message).toMatch(/mock prepare failure/);
-
-    expect(syncLogRuns).toHaveLength(1);
-    const [, , ok, message] = syncLogRuns[0];
-    expect(ok).toBe(0);
-    expect(message).toMatch(/mock prepare failure/);
+    await syncAll(env);
+    expect(state.lockedAt).toBeNull();
   });
 });

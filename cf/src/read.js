@@ -1,76 +1,84 @@
 // 現行GASの doGet と "同じ形" を返す。画面側を書き換えずに差し替えるため、
 // キー名も順番も1つも変えない。
+//
+// ★2026-08-24 最終総合レビューでの設計変更：D1は「行ごとのテーブル」ではなく
+// snapshotテーブルの1行（GAS compact応答をJSON文字列化した忠実な写し）を持つ。
+// 読み取りは1行SELECT→JSON.parseし、会社での絞り込みはWorker内(JS)で行う。
+// 絞り込みの条件は現行GASのdoGet（gas.js の1164行あたり）と完全に同じにする
+// （特に「全社」と空文字の扱い、genbaMasterとjobsitesの絞り込み条件）。
 export const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤',
   '人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両'];
 
-const COL = ['touroku','sagyoubi','motoukr','genba','shimei','yakuwari','shukkin','taikin',
-             'kosu','memo','yakin','kaisha','id','koushinsha','iro','jigyoubu','kouban',
-             'sagyou_kubun','sharyou'];
+/**
+ * 保存済みスナップショット（sanitizeForStorageで保存した形＝
+ * {compact,headers,rows,members,genbaMaster,jobsites}）を、companyで絞り込む。
+ *
+ * gas.js の doGet と完全に同じ条件にすること（レビュー指摘）:
+ *   - filter = company && company !== '全社'（空文字・'全社'は絞り込みなし）
+ *   - nippo(rows): 会社(kaisha)セルを比較のたびにtrimしてから完全一致で比較
+ *     （GASのdoGetも読み取りのたびに requestedCompany と行の会社セルをtrimして比較。
+ *     gas.js:1206「String(row[companyIdx] || '').trim() !== requestedCompany」）
+ *   - members: company の完全一致のみ。genbaMasterと違い「会社が空なら通す」例外は無い
+ *     （gas.js:1240「!filterByCompany || m.company === requestedCompany」）
+ *   - genbaMaster: g.name が真であることを常に要求し、絞り込み時は
+ *     「会社が空 or 一致」なら通す＝共通元請の扱い
+ *     （gas.js:1244「g.name && (!filterByCompany || !g.company || g.company === requestedCompany)」）
+ *   - jobsites: j.genba が真であることを常に要求し、絞り込み時は絞り込み後の
+ *     genbaMasterに現場名(genba)が含まれることを要求する
+ *     （gas.js:1256「j.genba && (!filterByCompany || allowedGenba.has(j.genba))」）
+ */
+export function filterSnapshot(payload, company) {
+  const filter = !!(company && company !== '全社');
+  const headers = payload.headers;
+  const kaishaIdx = headers.indexOf('会社');
 
-export function buildResponse(nippo, members, genba, jobsites) {
+  const rows = filter
+    ? payload.rows.filter(r => String((kaishaIdx >= 0 ? r[kaishaIdx] : '') ?? '').trim() === company)
+    : payload.rows;
+
+  const members = filter
+    ? payload.members.filter(m => m.company === company)
+    : payload.members;
+
+  const genbaMaster = payload.genbaMaster.filter(g =>
+    g.name && (!filter || !g.company || g.company === company));
+  const allowedGenba = new Set(genbaMaster.map(g => g.name));
+  const jobsites = payload.jobsites.filter(j =>
+    j.genba && (!filter || allowedGenba.has(j.genba)));
+
   return {
     status: 'ok',
     compact: 1,
-    headers: HEADERS,
-    rows: nippo.map(r => COL.map(c => (r[c] == null ? '' : r[c]))),
-    members: members.map(m => ({ name: m.name, company: m.company, division: m.division })),
-    genbaMaster: genba.map(g => ({ name: g.name, company: g.company })),
-    jobsites: jobsites.map(j => ({
-      genba: j.genba, loc: j.loc, jobNo: j.jobNo,
-      completed: !!j.completed, billingMethod: j.billingMethod
-    }))
+    headers,
+    rows,
+    members,
+    genbaMaster,
+    jobsites
   };
 }
 
-// ★計画からの裁定（変更1）：取り込み(syncAll)は500文ずつ分割してD1へ投げるため、
-// 「全部DELETEしたあと途中のchunkで失敗した」状態が起こりうる。そのときD1には
-// 一部だけ入った中途半端なデータが残る。これを正常なデータとして画面へ返すと、
-// 利用者には予定が半分消えたように見えてしまう（sync_log自体はTask 2で必ず
-// ok=0を記録する設計になっている＝そちらが本体の安全装置、こちらはそれを読む側）。
-//
-// なので読み取り側は、返す前に必ず sync_log の最新1行を見る：
-//   - 1行も無い（＝まだ一度も取り込んでいない） → エラー扱い
-//   - 最新行の ok が 0（＝直近の取り込みが失敗） → エラー扱い
-// エラーを返せば、画面側は status!=='ok' を見て自動的に既存のGASへ切り替わる
-// ので、利用者にはエラーすら見えない。遅くなるだけで済む。
-// 空のD1を「予定ゼロ件」として返してはいけない。
-async function checkSyncStatus(env) {
-  const last = await env.DB.prepare('SELECT * FROM sync_log ORDER BY at DESC LIMIT 1').all();
-  const row = (last.results && last.results[0]) || null;
-  if (!row) {
-    return { ok: false, message: 'まだ取り込みが行われていません' };
-  }
-  if (!row.ok) {
-    return { ok: false, message: row.message || '直近の取り込みに失敗しています' };
-  }
-  return { ok: true, message: '' };
-}
-
 export async function readSchedule(env, company) {
-  const syncStatus = await checkSyncStatus(env);
-  if (!syncStatus.ok) {
-    // 通常応答（buildResponseの形）ではなく、GASのerror()と同じ形で返す。
-    return { status: 'error', message: syncStatus.message };
+  const res = await env.DB.prepare('SELECT payload FROM snapshot WHERE id = 1').all();
+  const row = (res.results && res.results[0]) || null;
+  if (!row) {
+    // まだ一度も取り込みが成功していない（＝snapshotが書かれたことが無い）。
+    // 空のD1を「予定ゼロ件」として返してはいけないため、GASのerror()と
+    // 同じ形で返す。画面側は status!=='ok' を見て自動的にGASへ切り替わる
+    // ので、利用者にはエラーすら見えない（遅くなるだけで済む）。
+    //
+    // ★スナップショット方式では、失敗した同期はsnapshotを一切書き換えない
+    // （修正1の原子性・ガード類）。そのため「直近の同期が失敗したか」を
+    // sync_logで確認する必要はない：snapshotが存在する時点で、それは常に
+    // 検証済みの内容（最新の成功、または前回成功時点のまま）である。
+    return { status: 'error', message: 'まだ取り込みが行われていません' };
   }
-
-  // ★2026-08-24 設計変更：D1はGAS応答の忠実な写し（重複排除・一意制約なし）
-  // にしたため、並び順そのものが情報を持つ。取り込み順（=GASが返した順）を
-  // seq の昇順で保つよう、すべてのSELECTに ORDER BY seq を付ける。
-  const filter = company && company !== '全社';
-  const nippo = filter
-    ? await env.DB.prepare('SELECT * FROM nippo WHERE kaisha = ? ORDER BY seq').bind(company).all()
-    : await env.DB.prepare('SELECT * FROM nippo ORDER BY seq').all();
-  const members = filter
-    ? await env.DB.prepare('SELECT * FROM members WHERE company = ? ORDER BY seq').bind(company).all()
-    : await env.DB.prepare('SELECT * FROM members ORDER BY seq').all();
-  const genba = await env.DB.prepare('SELECT * FROM genba ORDER BY seq').all();
-  const jobsites = await env.DB.prepare('SELECT * FROM jobsites ORDER BY seq').all();
-
-  const allowed = new Set(genba.results.filter(g => !filter || !g.company || g.company === company)
-                                       .map(g => g.name));
-  return buildResponse(
-    nippo.results, members.results,
-    genba.results.filter(g => !filter || !g.company || g.company === company),
-    jobsites.results.filter(j => !filter || allowed.has(j.genba))
-  );
+  let payload;
+  try {
+    payload = JSON.parse(row.payload);
+  } catch (e) {
+    // 理論上は起こらない（書き込み前にJSON.stringifyしたものしか入らない）が、
+    // 万一壊れていた場合にクラッシュさせず、GASへフォールバックさせる。
+    return { status: 'error', message: '保存済みデータの形式が壊れています' };
+  }
+  return filterSnapshot(payload, company);
 }

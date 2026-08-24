@@ -1,51 +1,81 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import worker from '../src/index.js';
 
-// D1のprepare/bind/all()を模した簡易モック。bind()に渡された引数を記録し、
-// company パラメータが .trim() された値でクエリに渡っているかを検証する。
-function makeMockDB({ syncLogRows = [], nippoRows = [], memberRows = [], genbaRows = [], jobsiteRows = [] } = {}) {
-  const bindCalls = []; // { sql, args } を記録
+const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工',
+                 'メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両'];
 
-  function runQuery(sql, args) {
-    if (/FROM sync_log/.test(sql)) return Promise.resolve({ results: syncLogRows });
-    if (/FROM nippo/.test(sql)) {
-      const rows = /WHERE kaisha/.test(sql) ? nippoRows.filter(r => r.kaisha === args[0]) : nippoRows;
-      return Promise.resolve({ results: rows });
-    }
-    if (/FROM members/.test(sql)) {
-      const rows = /WHERE company/.test(sql) ? memberRows.filter(r => r.company === args[0]) : memberRows;
-      return Promise.resolve({ results: rows });
-    }
-    if (/FROM genba/.test(sql)) return Promise.resolve({ results: genbaRows });
-    if (/FROM jobsites/.test(sql)) return Promise.resolve({ results: jobsiteRows });
-    return Promise.resolve({ results: [] });
+function makeRow(fields) {
+  const row = new Array(19).fill('');
+  for (const [h, v] of Object.entries(fields)) row[HEADERS.indexOf(h)] = v;
+  return row;
+}
+
+// D1のprepare/bind/run/all()を模した簡易・状態保持モック。
+// snapshot / sync_lock / sync_log の3テーブルをカバーする（index.js経由で
+// read.js・sync.jsの両方が発行するクエリをすべて処理できるようにする）。
+function makeMockDB({ snapshot = null } = {}) {
+  const state = { snapshot, lockedAt: null, syncLog: [] };
+
+  function respond(sql, args) {
+    return {
+      async all() {
+        if (/SELECT locked_at FROM sync_lock/.test(sql)) {
+          return { results: state.lockedAt != null ? [{ locked_at: state.lockedAt }] : [] };
+        }
+        if (/SELECT rows, hash FROM snapshot/.test(sql)) {
+          return { results: state.snapshot ? [{ rows: state.snapshot.rows, hash: state.snapshot.hash }] : [] };
+        }
+        if (/SELECT payload FROM snapshot/.test(sql)) {
+          return { results: state.snapshot ? [{ payload: state.snapshot.payload }] : [] };
+        }
+        if (/SELECT rows, bytes, at FROM snapshot/.test(sql)) {
+          return { results: state.snapshot ? [{ rows: state.snapshot.rows, bytes: state.snapshot.bytes, at: state.snapshot.at }] : [] };
+        }
+        if (/FROM sync_log/.test(sql)) {
+          return { results: [...state.syncLog].sort((a, b) => b.at.localeCompare(a.at)) };
+        }
+        return { results: [] };
+      },
+      async run() {
+        if (/VALUES \(1, NULL\)/.test(sql) && /sync_lock/.test(sql)) { state.lockedAt = null; return { success: true }; }
+        if (/INSERT OR REPLACE INTO sync_lock/.test(sql)) { state.lockedAt = args[0]; return { success: true }; }
+        if (/INSERT OR REPLACE INTO snapshot/.test(sql)) {
+          const [payload, hash, rows, bytes, at] = args;
+          state.snapshot = { payload, hash, rows, bytes, at };
+          return { success: true };
+        }
+        if (/INSERT OR REPLACE INTO sync_log/.test(sql)) {
+          const [at, rows, ok, message] = args;
+          state.syncLog.push({ at, rows, ok, message });
+          return { success: true };
+        }
+        return { success: true };
+      }
+    };
   }
 
   const db = {
     prepare(sql) {
-      return {
-        bind(...args) {
-          bindCalls.push({ sql, args });
-          return { all: () => runQuery(sql, args) };
-        },
-        all: () => runQuery(sql, [])
-      };
+      return { bind: (...args) => respond(sql, args), all: () => respond(sql, []).all(), run: () => respond(sql, []).run() };
     }
   };
+  return { db, state };
+}
 
-  return { db, bindCalls };
+function makeSnapshot(rows, members = [], overrides = {}) {
+  const payload = JSON.stringify({ compact: 1, headers: HEADERS, rows, members, genbaMaster: [], jobsites: [] });
+  return { payload, hash: 'fixed-hash-for-test', rows: rows.length, bytes: payload.length, at: '2026-08-24T00:00:00.000Z', ...overrides };
 }
 
 describe('GET /api/schedule のcompanyパラメータのtrim（レビュー指摘: 会社名の前後空白）', () => {
   it('companyパラメータの前後に空白があっても、trimしてからD1へ問い合わせる', async () => {
-    const { db, bindCalls } = makeMockDB({
-      syncLogRows: [{ at: 'x', rows: 1, ok: 1, message: '' }],
-      nippoRows: [{ id: 'a-1', sagyoubi: '2026-05-02', shimei: '森', kaisha: 'グローライズ' }],
-      memberRows: [{ name: '森', company: 'グローライズ', division: 'ICT' }]
-    });
+    const snapshot = makeSnapshot(
+      [makeRow({ ID: 'a-1', 会社: 'グローライズ' })],
+      [{ name: '森', company: 'グローライズ', division: 'ICT' }]
+    );
+    const { db } = makeMockDB({ snapshot });
     const env = { DB: db };
 
-    // URLエンコードされた空白（%20と全角の　）を前後に含むcompanyパラメータ
     const req = new Request('https://worker.test/api/schedule?' +
       'company=' + encodeURIComponent('  グローライズ　'));
     const res = await worker.fetch(req, env, {});
@@ -53,23 +83,16 @@ describe('GET /api/schedule のcompanyパラメータのtrim（レビュー指�
 
     expect(res.status).toBe(200);
     expect(body.status).toBe('ok');
-    // trimされた会社名で絞り込まれ、該当行が正しく返っていること
     expect(body.rows).toHaveLength(1);
     expect(body.members).toHaveLength(1);
-
-    // D1へ渡された実際のbind引数もtrim済みであることを確認
-    const nippoCall = bindCalls.find(c => /FROM nippo WHERE kaisha/.test(c.sql));
-    const memberCall = bindCalls.find(c => /FROM members WHERE company/.test(c.sql));
-    expect(nippoCall.args[0]).toBe('グローライズ');
-    expect(memberCall.args[0]).toBe('グローライズ');
   });
 
   it('companyパラメータに空白が無い通常ケースでも従来どおり動く（回帰確認）', async () => {
-    const { db } = makeMockDB({
-      syncLogRows: [{ at: 'x', rows: 1, ok: 1, message: '' }],
-      nippoRows: [{ id: 'a-1', sagyoubi: '2026-05-02', shimei: '森', kaisha: 'グローライズ' }],
-      memberRows: [{ name: '森', company: 'グローライズ', division: 'ICT' }]
-    });
+    const snapshot = makeSnapshot(
+      [makeRow({ ID: 'a-1', 会社: 'グローライズ' })],
+      [{ name: '森', company: 'グローライズ', division: 'ICT' }]
+    );
+    const { db } = makeMockDB({ snapshot });
     const env = { DB: db };
 
     const req = new Request('https://worker.test/api/schedule?company=' + encodeURIComponent('グローライズ'));
@@ -78,5 +101,115 @@ describe('GET /api/schedule のcompanyパラメータのtrim（レビュー指�
 
     expect(body.status).toBe('ok');
     expect(body.rows).toHaveLength(1);
+  });
+
+  it('snapshotが無ければstatus:errorを返す（画面はGASへ自動フォールバックする）', async () => {
+    const { db } = makeMockDB({ snapshot: null });
+    const env = { DB: db };
+    const res = await worker.fetch(new Request('https://worker.test/api/schedule'), env, {});
+    const body = await res.json();
+    expect(body.status).toBe('error');
+  });
+});
+
+describe('POST /api/sync（修正2: 共有秘密による簡易認証）', () => {
+  it('SYNC_KEYが未設定なら、認証ヘッダ無しでも実行される', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
+    }));
+    const { db } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' }; // SYNC_KEY未設定
+
+    const res = await worker.fetch(new Request('https://worker.test/api/sync', { method: 'POST' }), env, {});
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe('ok');
+  });
+
+  it('SYNC_KEYが設定されているのにヘッダが無いと403で拒否し、同期は実行されない', async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock;
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec', SYNC_KEY: 'himitsu-123' };
+
+    const res = await worker.fetch(new Request('https://worker.test/api/sync', { method: 'POST' }), env, {});
+    const body = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(body.status).toBe('error');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(state.snapshot).toBeNull();
+  });
+
+  it('SYNC_KEYが設定されていて、ヘッダの値が一致しないと403で拒否する', async () => {
+    global.fetch = vi.fn();
+    const { db } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec', SYNC_KEY: 'himitsu-123' };
+
+    const req = new Request('https://worker.test/api/sync', { method: 'POST', headers: { 'X-Sync-Key': 'chigau-key' } });
+    const res = await worker.fetch(req, env, {});
+    expect(res.status).toBe(403);
+  });
+
+  it('SYNC_KEYが設定されていて、ヘッダの値が一致すれば実行される', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
+    }));
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec', SYNC_KEY: 'himitsu-123' };
+
+    const req = new Request('https://worker.test/api/sync', { method: 'POST', headers: { 'X-Sync-Key': 'himitsu-123' } });
+    const res = await worker.fetch(req, env, {});
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe('ok');
+    expect(state.snapshot).toBeTruthy();
+  });
+});
+
+describe('POST /api/sync（修正2: 同時実行の抑止）', () => {
+  it('直近に同期が進行中なら、実行せず「進行中」を伝えて200で返す', async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock;
+    // ロック中の状態を直接注入する（500ミリ秒前に取得＝進行中とみなす範囲内）
+    const locked = makeMockDB();
+    locked.state.lockedAt = String(Date.now() - 500);
+    const env = { DB: locked.db, GAS_URL: 'https://example.test/exec' };
+
+    const res = await worker.fetch(new Request('https://worker.test/api/sync', { method: 'POST' }), env, {});
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe('ok');
+    expect(body.skipped).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/health', () => {
+  it('snapshotとsync_logの最新状態を返す', async () => {
+    const snapshot = makeSnapshot([makeRow({ ID: 'a-1' })]);
+    const { db, state } = makeMockDB({ snapshot });
+    state.syncLog.push({ at: '2026-08-24T00:00:00.000Z', rows: 1, ok: 1, message: '' });
+    const env = { DB: db };
+
+    const res = await worker.fetch(new Request('https://worker.test/api/health'), env, {});
+    const body = await res.json();
+
+    expect(body.status).toBe('ok');
+    expect(body.rows).toBe(1);
+    expect(body.lastSync).toBeTruthy();
+    expect(body.lastSync.ok).toBe(1);
+  });
+
+  it('DBアクセスが失敗してもJSONでエラーを返す（素の500にしない）', async () => {
+    const env = { DB: { prepare() { return { all: async () => { throw new Error('mock db down'); } }; } } };
+    const res = await worker.fetch(new Request('https://worker.test/api/health'), env, {});
+    const body = await res.json();
+    expect(body.status).toBe('error');
   });
 });

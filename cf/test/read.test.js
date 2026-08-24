@@ -1,127 +1,192 @@
 import { describe, it, expect } from 'vitest';
-import { buildResponse, HEADERS, readSchedule } from '../src/read.js';
+import { HEADERS, filterSnapshot, readSchedule } from '../src/read.js';
 
-describe('buildResponse', () => {
-  const row = {
-    touroku:'2026-05-01T04:23:04.000Z', sagyoubi:'2026-05-02', motoukr:'NGS', genba:'大阪',
-    shimei:'川端（達）', yakuwari:'代表', shukkin:'09:00', taikin:'18:00', kosu:1, memo:'',
-    yakin:'', kaisha:'グローライズ', id:'abc-1', koushinsha:'森', iro:'#1D9E75',
-    jigyoubu:'ICT', kouban:'INF-26-041', sagyou_kubun:'現場作業', sharyou:''
+// ============================================================
+// filterSnapshot（gas.js の doGet と完全に同じ絞り込み条件であること）
+// ============================================================
+function makePayload(overrides = {}) {
+  return {
+    headers: HEADERS,
+    rows: [],
+    members: [],
+    genbaMaster: [],
+    jobsites: [],
+    ...overrides
   };
+}
 
-  it('GASと同じ19個のヘッダを同じ順で返す', () => {
+function makeRow(fields) {
+  const row = new Array(19).fill('');
+  for (const [h, v] of Object.entries(fields)) row[HEADERS.indexOf(h)] = v;
+  return row;
+}
+
+describe('filterSnapshot（HEADERS）', () => {
+  it('GASと同じ19個のヘッダを同じ順で持つ', () => {
     expect(HEADERS).toEqual(['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤',
       '人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両']);
   });
+});
 
-  it('rowsはヘッダの順に並んだ値の配列になる', () => {
-    const out = buildResponse([row], [], [], []);
+describe('filterSnapshot（company未指定・全社は絞り込みなし）', () => {
+  it('companyが空文字なら全件そのまま返る', () => {
+    const payload = makePayload({
+      rows: [makeRow({ 会社: 'グローライズ' }), makeRow({ 会社: '和信カインド' })],
+      members: [{ name: '森', company: 'グローライズ', division: '' }, { name: '田中', company: '和信カインド', division: '' }],
+      genbaMaster: [{ name: 'A現場', company: 'グローライズ' }, { name: 'B現場', company: '' }],
+      jobsites: [{ genba: 'A現場', loc: 'x', jobNo: '', completed: true, billingMethod: '応援' }]
+    });
+    const out = filterSnapshot(payload, '');
     expect(out.status).toBe('ok');
     expect(out.compact).toBe(1);
-    expect(out.rows[0][HEADERS.indexOf('作業日')]).toBe('2026-05-02');
-    expect(out.rows[0][HEADERS.indexOf('ID')]).toBe('abc-1');
-    expect(out.rows[0][HEADERS.indexOf('工番')]).toBe('INF-26-041');
-    expect(out.rows[0]).toHaveLength(19);
+    expect(out.rows).toHaveLength(2);
+    expect(out.members).toHaveLength(2);
+    expect(out.genbaMaster).toHaveLength(2);
+    expect(out.jobsites).toHaveLength(1);
   });
 
-  it('職人マスタには単価を含めない', () => {
-    const out = buildResponse([], [{name:'森',company:'GRHD',division:'ICT'}], [], []);
-    expect(out.members[0]).toEqual({name:'森',company:'GRHD',division:'ICT'});
+  it('companyが「全社」でも絞り込みなし扱い（gas.jsと同じ）', () => {
+    const payload = makePayload({
+      rows: [makeRow({ 会社: 'グローライズ' })],
+      members: [{ name: '森', company: 'グローライズ', division: '' }]
+    });
+    const out = filterSnapshot(payload, '全社');
+    expect(out.rows).toHaveLength(1);
+    expect(out.members).toHaveLength(1);
+  });
+});
+
+describe('filterSnapshot（日報rowsの会社絞り込み）', () => {
+  it('会社セルをtrimしてから比較する（会社名に前後空白が紛れても一致させる）', () => {
+    const payload = makePayload({
+      rows: [makeRow({ 会社: '  グローライズ　', ID: 'a-1' }), makeRow({ 会社: '和信カインド', ID: 'b-1' })]
+    });
+    const out = filterSnapshot(payload, 'グローライズ');
+    expect(out.rows).toHaveLength(1);
+    expect(out.rows[0][HEADERS.indexOf('ID')]).toBe('a-1');
   });
 
-  it('現場マスタのcompletedは真偽値に戻す（画面が真偽値で判定するため）', () => {
-    const out = buildResponse([], [], [], [{genba:'A',loc:'B',jobNo:'',completed:1,billingMethod:'応援'}]);
+  it('一致しない会社は除外される', () => {
+    const payload = makePayload({ rows: [makeRow({ 会社: '和信カインド' })] });
+    const out = filterSnapshot(payload, 'グローライズ');
+    expect(out.rows).toHaveLength(0);
+  });
+});
+
+describe('filterSnapshot（membersの会社絞り込み = gas.js:1240 と同条件）', () => {
+  it('会社の完全一致のみで絞り込む（genbaMasterと違い「会社が空なら通す」例外は無い）', () => {
+    const payload = makePayload({
+      members: [
+        { name: '森', company: 'グローライズ', division: '' },
+        { name: '空会社太郎', company: '', division: '' }
+      ]
+    });
+    const out = filterSnapshot(payload, 'グローライズ');
+    expect(out.members).toHaveLength(1);
+    expect(out.members[0].name).toBe('森');
+  });
+
+  it('職人マスタに単価は含まれない（元々sanitizeForStorageで除去済みの前提。ここでは型を変えないことを確認）', () => {
+    const payload = makePayload({ members: [{ name: '森', company: 'GRHD', division: 'ICT' }] });
+    const out = filterSnapshot(payload, '');
+    expect(out.members[0]).toEqual({ name: '森', company: 'GRHD', division: 'ICT' });
+    expect('rate' in out.members[0]).toBe(false);
+  });
+});
+
+describe('filterSnapshot（genbaMasterの絞り込み = gas.js:1244 と同条件）', () => {
+  it('name が空の行は絞り込みの有無に関わらず常に除外する', () => {
+    const payload = makePayload({ genbaMaster: [{ name: '', company: '' }, { name: 'A現場', company: '' }] });
+    expect(filterSnapshot(payload, '').genbaMaster).toHaveLength(1);
+    expect(filterSnapshot(payload, 'グローライズ').genbaMaster).toHaveLength(1);
+  });
+
+  it('絞り込み時、companyが空（共通元請）なら通す', () => {
+    const payload = makePayload({ genbaMaster: [{ name: '共通現場', company: '' }] });
+    const out = filterSnapshot(payload, 'グローライズ');
+    expect(out.genbaMaster).toHaveLength(1);
+  });
+
+  it('絞り込み時、companyが一致すれば通す・不一致なら除外する', () => {
+    const payload = makePayload({
+      genbaMaster: [{ name: 'G現場', company: 'グローライズ' }, { name: 'W現場', company: '和信カインド' }]
+    });
+    const out = filterSnapshot(payload, 'グローライズ');
+    expect(out.genbaMaster.map(g => g.name)).toEqual(['G現場']);
+  });
+});
+
+describe('filterSnapshot（jobsitesの絞り込み = gas.js:1256 と同条件）', () => {
+  it('genba が空の行は常に除外する', () => {
+    const payload = makePayload({ jobsites: [{ genba: '', loc: '', jobNo: '', completed: false, billingMethod: '' }] });
+    expect(filterSnapshot(payload, '').jobsites).toHaveLength(0);
+  });
+
+  it('絞り込み時は、絞り込み後のgenbaMasterに含まれるgenbaのjobsitesだけ通す', () => {
+    const payload = makePayload({
+      genbaMaster: [{ name: 'G現場', company: 'グローライズ' }, { name: 'W現場', company: '和信カインド' }],
+      jobsites: [
+        { genba: 'G現場', loc: 'a', jobNo: '', completed: false, billingMethod: '応援' },
+        { genba: 'W現場', loc: 'b', jobNo: '', completed: false, billingMethod: '応援' }
+      ]
+    });
+    const out = filterSnapshot(payload, 'グローライズ');
+    expect(out.jobsites.map(j => j.genba)).toEqual(['G現場']);
+  });
+
+  it('completed は真偽値のまま返る（画面が真偽値で判定するため）', () => {
+    const payload = makePayload({
+      genbaMaster: [{ name: 'A', company: '' }],
+      jobsites: [{ genba: 'A', loc: 'b', jobNo: '', completed: true, billingMethod: '応援' }]
+    });
+    const out = filterSnapshot(payload, '');
     expect(out.jobsites[0].completed).toBe(true);
   });
 });
 
-// --- ここから追加（計画からの変更点1：sync_logの最新行を見て取り込み失敗/未取り込みをエラー扱いにする） ---
-
-// D1のprepare/bind/all()を模した簡易モック。SQL文の中身で対象テーブルを見分け、
-// あらかじめ渡した固定データを返す。readScheduleが投げるクエリの種類
-// （sync_log / nippo(絞込あり・なし) / members(絞込あり・なし) / genba / jobsites）
-// をすべてカバーする。
-function makeMockDB({
-  syncLogRows = [], nippoRows = [], memberRows = [], genbaRows = [], jobsiteRows = []
-} = {}) {
-  function runQuery(sql, args) {
-    if (/FROM sync_log/.test(sql)) {
-      return Promise.resolve({ results: syncLogRows });
-    }
-    if (/FROM nippo/.test(sql)) {
-      const rows = /WHERE kaisha/.test(sql)
-        ? nippoRows.filter(r => r.kaisha === args[0])
-        : nippoRows;
-      return Promise.resolve({ results: rows });
-    }
-    if (/FROM members/.test(sql)) {
-      const rows = /WHERE company/.test(sql)
-        ? memberRows.filter(r => r.company === args[0])
-        : memberRows;
-      return Promise.resolve({ results: rows });
-    }
-    if (/FROM genba/.test(sql)) {
-      return Promise.resolve({ results: genbaRows });
-    }
-    if (/FROM jobsites/.test(sql)) {
-      return Promise.resolve({ results: jobsiteRows });
-    }
-    return Promise.resolve({ results: [] });
-  }
-
-  return {
+// ============================================================
+// readSchedule（D1アクセスを含む結線）
+// ============================================================
+function makeMockDB({ snapshotPayload = null } = {}) {
+  const db = {
     prepare(sql) {
       return {
-        bind(...args) {
-          return { all: () => runQuery(sql, args) };
-        },
-        all: () => runQuery(sql, [])
+        all: async () => {
+          if (/SELECT payload FROM snapshot/.test(sql)) {
+            return { results: snapshotPayload != null ? [{ payload: snapshotPayload }] : [] };
+          }
+          return { results: [] };
+        }
       };
     }
   };
+  return db;
 }
 
-describe('readSchedule（sync_logの状態による安全装置）', () => {
-  it('sync_logの最新行がok=0のとき、通常応答ではなくエラーを返す（一部だけ入った中途半端なデータを見せない）', async () => {
-    const db = makeMockDB({
-      syncLogRows: [{ at: '2026-08-22T00:00:00.000Z', rows: 0, ok: 0, message: 'mock batch failure' }],
-      // 中途半端に入ったデータがあっても、それが返らないことを確認するために用意しておく
-      nippoRows: [{ id: 'x-1', sagyoubi: '2026-05-02', shimei: '森', kaisha: 'グローライズ' }]
-    });
-    const env = { DB: db };
-
+describe('readSchedule（snapshotが無い/壊れている場合の安全装置）', () => {
+  it('snapshotが1行も無い（まだ一度も取り込みが成功していない）ときはエラーを返す', async () => {
+    const env = { DB: makeMockDB({ snapshotPayload: null }) };
     const out = await readSchedule(env, '');
-
-    expect(out.status).toBe('error');
-    expect(out.rows).toBeUndefined();
-    expect(out.compact).toBeUndefined();
-  });
-
-  it('sync_logが空（まだ一度も取り込んでいない）のときもエラーを返す（空のD1を「予定ゼロ件」として返さない）', async () => {
-    const db = makeMockDB({ syncLogRows: [] });
-    const env = { DB: db };
-
-    const out = await readSchedule(env, '');
-
     expect(out.status).toBe('error');
     expect(out.rows).toBeUndefined();
   });
 
-  it('sync_logの最新行がok=1のときは通常どおりGASと同じ形の応答を返す', async () => {
-    const db = makeMockDB({
-      syncLogRows: [{ at: '2026-08-22T00:00:00.000Z', rows: 1, ok: 1, message: '' }],
-      nippoRows: [{
-        touroku: '2026-05-01T04:23:04.000Z', sagyoubi: '2026-05-02', motoukr: 'NGS', genba: '大阪',
-        shimei: '川端（達）', yakuwari: '代表', shukkin: '09:00', taikin: '18:00', kosu: 1, memo: '',
-        yakin: '', kaisha: 'グローライズ', id: 'abc-1', koushinsha: '森', iro: '#1D9E75',
-        jigyoubu: 'ICT', kouban: 'INF-26-041', sagyou_kubun: '現場作業', sharyou: ''
-      }],
-      memberRows: [{ name: '森', company: 'グローライズ', division: 'ICT' }],
-      genbaRows: [{ name: '大阪', company: '' }],
-      jobsiteRows: [{ genba: '大阪', loc: '本社', jobNo: '', completed: 0, billingMethod: '応援' }]
-    });
-    const env = { DB: db };
+  it('保存済みpayloadのJSONが壊れていてもクラッシュせずエラーを返す', async () => {
+    const env = { DB: makeMockDB({ snapshotPayload: '{not valid json' }) };
+    const out = await readSchedule(env, '');
+    expect(out.status).toBe('error');
+  });
+});
 
+describe('readSchedule（正常系）', () => {
+  it('保存済みsnapshotをJSON.parseし、gas.jsと同じ形で返す', async () => {
+    const payload = JSON.stringify(makePayload({
+      rows: [makeRow({ ID: 'abc-1', 会社: 'グローライズ' })],
+      members: [{ name: '森', company: 'グローライズ', division: 'ICT' }],
+      genbaMaster: [{ name: '大阪', company: '' }],
+      jobsites: [{ genba: '大阪', loc: '本社', jobNo: '', completed: false, billingMethod: '応援' }]
+    }));
+    const env = { DB: makeMockDB({ snapshotPayload: payload }) };
     const out = await readSchedule(env, '');
 
     expect(out.status).toBe('ok');
@@ -132,22 +197,15 @@ describe('readSchedule（sync_logの状態による安全装置）', () => {
     expect(out.jobsites[0].completed).toBe(false);
   });
 
-  it('sync_logがok=1でも、会社を指定すればnippoとmembersだけその会社で絞り込まれる', async () => {
-    const db = makeMockDB({
-      syncLogRows: [{ at: '2026-08-22T00:00:00.000Z', rows: 2, ok: 1, message: '' }],
-      nippoRows: [
-        { id: 'a-1', sagyoubi: '2026-05-02', shimei: '森', kaisha: 'グローライズ' },
-        { id: 'b-1', sagyoubi: '2026-05-02', shimei: '田中', kaisha: '和信カインド' }
-      ],
-      memberRows: [
+  it('company指定で絞り込まれる', async () => {
+    const payload = JSON.stringify(makePayload({
+      rows: [makeRow({ ID: 'a-1', 会社: 'グローライズ' }), makeRow({ ID: 'b-1', 会社: '和信カインド' })],
+      members: [
         { name: '森', company: 'グローライズ', division: 'ICT' },
         { name: '田中', company: '和信カインド', division: '' }
-      ],
-      genbaRows: [{ name: '大阪', company: 'グローライズ' }],
-      jobsiteRows: [{ genba: '大阪', loc: '本社', jobNo: '', completed: 0, billingMethod: '応援' }]
-    });
-    const env = { DB: db };
-
+      ]
+    }));
+    const env = { DB: makeMockDB({ snapshotPayload: payload }) };
     const out = await readSchedule(env, 'グローライズ');
 
     expect(out.status).toBe('ok');

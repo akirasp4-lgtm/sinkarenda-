@@ -1,1 +1,1 @@
-{"backend":"gas","workerUrl":"https://yotei-api.miscjigyoubu.workers.dev","note":"backendを d1 にすると読み取りだけWorkerへ切り替わる。戻すときは gas に戻す。書き込みは常にGAS。"}
+{"backend":"gas","workerUrl":"https://yotei-api.miscjigyoubu.workers.dev","syncKey":"","note":"backendを d1 にすると読み取りだけWorkerへ切り替わる。戻すときは gas に戻す。書き込みは常にGAS。syncKeyはWorker側のSYNC_KEY(wrangler.toml [vars])と同じ値にすると/api/syncの簡易認証が有効になる（空のままなら認証なし＝現状維持）。このファイルはGitHub Pagesで公開されるため、syncKeyは『第三者の連打を防ぐ簡易な抑止』であって秘匿ではない点に注意。"}

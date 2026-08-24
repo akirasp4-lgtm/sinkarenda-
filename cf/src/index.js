@@ -4,7 +4,8 @@ import { syncAll } from './sync.js';
 const CORS = {
   'Access-Control-Allow-Origin': 'https://akirasp4-lgtm.github.io',
   'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type'
+  // ★修正2: 画面側が /api/sync の簡易認証ヘッダ(X-Sync-Key)を送れるよう許可する。
+  'Access-Control-Allow-Headers': 'Content-Type, X-Sync-Key'
 };
 
 const json = (obj, status = 200) =>
@@ -20,11 +21,10 @@ export default {
     if (url.pathname === '/api/schedule') {
       try {
         // readScheduleは失敗を投げず {status:'error', message} を返すこともある
-        // （sync_logが未取り込み/失敗のとき。計画からの変更1）。
-        // どちらの形もそのままjson化して返せばよい。
-        // ★companyパラメータは.trim()してから渡す。D1側は完全一致（WHERE kaisha = ?）
-        // で絞り込むため、URLにたまたま前後の空白が付いても一致しない事故を防ぐ
-        // （gas.jsのdoGetもrequestedCompanyを.trim()してから比較している。レビュー指摘）。
+        // （snapshotが未取り込みのとき）。どちらの形もそのままjson化して返せばよい。
+        // ★companyパラメータは.trim()してから渡す。D1側は完全一致で絞り込むため、
+        // URLにたまたま前後の空白が付いても一致しない事故を防ぐ
+        // （gas.jsのdoGetもrequestedCompanyを.trim()してから比較している）。
         const company = (url.searchParams.get('company') || '').trim();
         return json(await readSchedule(env, company));
       } catch (e) {
@@ -34,20 +34,43 @@ export default {
     }
 
     // 書き込み直後に画面から呼ぶ。取り込んでから返す。
-    // ★計画からの変更2：syncAllは例外を投げない契約（Task 2で確定）なので、
-    // try/catchではなく戻り値のokをそのまま見る。
     if (url.pathname === '/api/sync' && request.method === 'POST') {
+      // ★修正2（/api/syncが誰でも叩ける問題）: 共有秘密による簡易認証。
+      // Worker URLもbackend.jsonも公開されているため、これは「第三者・連打による
+      // 無差別な同期起動」を減らすための簡易な抑止であり、堅牢な秘匿ではない
+      // （backend.jsonにも同じ鍵を書く必要があるため、鍵自体は公開情報になる）。
+      // SYNC_KEYが未設定の間（移行期間中の初期状態）は認証を要求しない。
+      // ただしその場合はログに残す。
+      const requiredKey = env.SYNC_KEY || '';
+      if (requiredKey) {
+        const provided = request.headers.get('X-Sync-Key') || '';
+        if (provided !== requiredKey) {
+          return json({ status: 'error', message: '認証に失敗しました' }, 403);
+        }
+      } else {
+        console.log('[sync] SYNC_KEY未設定のため、認証なしで /api/sync を許可しています（移行期間中の暫定運用）');
+      }
+
+      // ★syncAllは例外を投げない契約。同時実行中は{ok:true, skipped:true}で
+      // 返る（修正2の同時実行抑止）ので、try/catchではなく戻り値のokを見る。
       const r = await syncAll(env);
-      return json({ status: r.ok ? 'ok' : 'error', rows: r.rows, message: r.message });
+      return json({ status: r.ok ? 'ok' : 'error', rows: r.rows, message: r.message, skipped: !!r.skipped });
     }
 
     if (url.pathname === '/api/health') {
-      // ★計画からの変更3：DBが落ちているときこそhealthを見たいので、
-      // ここも失敗したら素の500ではなくJSONでエラーを返す。
+      // DBが落ちているときこそhealthを見たいので、ここも失敗したら
+      // 素の500ではなくJSONでエラーを返す。
       try {
+        const snap = await env.DB.prepare('SELECT rows, bytes, at FROM snapshot WHERE id = 1').all();
         const last = await env.DB.prepare('SELECT * FROM sync_log ORDER BY at DESC LIMIT 1').all();
-        const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM nippo').all();
-        return json({ status: 'ok', rows: cnt.results[0].c, lastSync: last.results[0] || null });
+        const snapRow = snap.results && snap.results[0];
+        return json({
+          status: 'ok',
+          rows: snapRow ? snapRow.rows : 0,
+          bytes: snapRow ? snapRow.bytes : 0,
+          snapshotAt: snapRow ? snapRow.at : null,
+          lastSync: (last.results && last.results[0]) || null
+        });
       } catch (e) {
         return json({ status: 'error', message: String(e.message || e) }, 500);
       }

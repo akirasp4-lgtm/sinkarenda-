@@ -13,3 +13,8 @@ crons = ["*/5 * * * *"]
 
 [vars]
 GAS_URL = "https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3egJrKdWmXRK2AVnFrmBm4iO1QHCk-FZEH5LFFv7OloqcjQ/exec"
+# ★修正2（/api/syncの簡易認証）: 空のままなら認証は要求しない（移行期間中の暫定運用）。
+# 有効にするときは、ここに秘密の文字列を設定し、backend.json の syncKey にも
+# 同じ値を設定する（画面側はそこから読んでヘッダ X-Sync-Key に載せて送る）。
+# 値は自分（利用者）が後で設定する。ここにベタ書きしない。
+SYNC_KEY = ""

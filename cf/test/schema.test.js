@@ -4,46 +4,49 @@ import { readFileSync } from 'node:fs';
 describe('schema.sql', () => {
   const sql = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8');
 
-  it('日報テーブルに19列そろっている', () => {
-    const cols = ['id','touroku','sagyoubi','motoukr','genba','shimei','yakuwari',
-                  'shukkin','taikin','kosu','memo','yakin','kaisha','koushinsha',
-                  'iro','jigyoubu','kouban','sagyou_kubun','sharyou'];
-    for (const c of cols) expect(sql).toContain(c);
+  // --- 2026-08-24 最終総合レビュー（Fable 5 / Codex）で「切り替え不可」の判定を
+  // 受け、D1の持ち方を「行ごとのテーブル」から「スナップショット1行」へ変更した。
+  // 理由: (1)原子性 全件DELETE+分割INSERTでは途中状態が読めてしまう、
+  //       (2)費用 1回の同期=5,765行×288回/日=166万行/日で無料枠(10万行/日)を超過。
+
+  it('snapshotテーブルが必要な列（id/payload/hash/rows/bytes/at）を持つ', () => {
+    const m = sql.match(/CREATE TABLE IF NOT EXISTS\s+snapshot\s*\([\s\S]*?\n\);/i);
+    expect(m, 'snapshotのCREATE TABLE文が見つからない').toBeTruthy();
+    for (const col of ['id', 'payload', 'hash', 'rows', 'bytes', 'at']) {
+      expect(m[0]).toMatch(new RegExp('\\b' + col + '\\b'));
+    }
   });
 
-  it('作業日に索引がある（期間検索を速くするため）', () => {
-    expect(sql).toMatch(/CREATE INDEX .*nippo.*sagyoubi/i);
+  it('snapshotのidは常に1固定（CHECK制約で複数行を防ぐ）', () => {
+    const m = sql.match(/CREATE TABLE IF NOT EXISTS\s+snapshot\s*\([\s\S]*?\n\);/i);
+    expect(m[0]).toMatch(/CHECK\s*\(\s*id\s*=\s*1\s*\)/i);
   });
 
   it('単価(rate)は保存しない（給料情報をD1へ持ち込まない）', () => {
     expect(sql).not.toMatch(/\brate\b/i);
   });
 
-  // --- ここから追加（2026-08-24 設計変更の回帰防止：本番データ突き合わせで
-  // 14行欠落＝車検期限リマインダー行の消失が発覚。原因は複合主キー
-  // (id, sagyoubi, shimei) が氏名の空を許さなかったこと。D1はGAS応答の
-  // 忠実な写しにする方針へ変更し、4テーブルすべてを連番seq主キーへ変えた）
+  it('sync_logテーブルを維持している（Cronの障害調査用）', () => {
+    const m = sql.match(/CREATE TABLE IF NOT EXISTS\s+sync_log\s*\([\s\S]*?\n\);/i);
+    expect(m, 'sync_logのCREATE TABLE文が見つからない').toBeTruthy();
+    for (const col of ['at', 'rows', 'ok', 'message']) expect(m[0]).toMatch(new RegExp('\\b' + col + '\\b'));
+  });
 
-  it('nippo/members/genba/jobsitesは連番seqをAUTOINCREMENTの主キーにしている', () => {
-    // ★table名を直接カラム名(例: nippoの中のgenba列)と取り違えないよう、
-    // "CREATE TABLE IF NOT EXISTS <table>" に直接続く定義だけを切り出す。
+  it('sync_lockテーブルがある（修正2: 同時実行の抑止用）', () => {
+    const m = sql.match(/CREATE TABLE IF NOT EXISTS\s+sync_lock\s*\([\s\S]*?\n\);/i);
+    expect(m, 'sync_lockのCREATE TABLE文が見つからない').toBeTruthy();
+    expect(m[0]).toMatch(/locked_at/i);
+  });
+
+  it('旧設計（行ごとのテーブル: nippo/members/genba/jobsites）は明示的にDROPしている', () => {
     for (const table of ['nippo', 'members', 'genba', 'jobsites']) {
-      const m = sql.match(new RegExp(
-        'CREATE TABLE IF NOT EXISTS\\s+' + table + '\\s*\\([\\s\\S]*?\\n\\);', 'i'));
-      expect(m, table + 'のCREATE TABLE文が見つからない').toBeTruthy();
-      expect(m[0]).toMatch(/seq\s+INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT/i);
+      expect(sql).toMatch(new RegExp('DROP TABLE IF EXISTS\\s+' + table, 'i'));
     }
   });
 
-  it('nippo/members/genba/jobsitesは複合主キー(PRIMARY KEY (...))を持たない（重複排除しないため）', () => {
-    expect(sql).not.toMatch(/PRIMARY KEY\s*\(/i);
-  });
-
-  it('氏名(shimei)・作業日(sagyoubi)・IDにNOT NULL制約が無い（空が正当なデータのため。車検期限リマインダー行は氏名が空）', () => {
-    for (const col of ['shimei', 'sagyoubi', 'id']) {
-      const m = sql.match(new RegExp('^\\s*' + col + '\\s+TEXT.*$', 'im'));
-      expect(m, col + '列の定義行が見つからない').toBeTruthy();
-      expect(m[0]).not.toMatch(/NOT NULL/i);
+  it('旧設計のCREATE TABLE文はもう残っていない', () => {
+    for (const table of ['nippo', 'members', 'genba', 'jobsites']) {
+      expect(sql).not.toMatch(new RegExp('CREATE TABLE IF NOT EXISTS\\s+' + table + '\\s*\\(', 'i'));
     }
   });
 });
