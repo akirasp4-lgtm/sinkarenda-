@@ -420,14 +420,24 @@ describe('syncAll（修正3: 急激な件数減少ガード）', () => {
   it('ちょうど半分は「半分未満」ではないので通す', async () => {
     const { db, state } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    // ★5回目レビュー修正作業中に発見（既存の潜在的な不具合。今回のfix範囲外だが
+    // ついでに直した）: このテストはDate.now()を進めずに2回syncAll()を呼んでいた
+    // ため、実行が速い環境では2回とも同一ミリ秒のfetch_started_atになり、世代逆転
+    // 防止のWHERE条件（`>`。3回目レビュー修正4）に阻まれて2回目の書き込みが
+    // まれに失敗する（テストがまれに揺れる）不具合があった。他の同種テストと
+    // 同じくstubIncreasingClock()で時計を単調増加させる。
+    const clock = stubIncreasingClock();
+    try {
+      mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+      await syncAll(env);
 
-    mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
-    await syncAll(env);
-
-    mockFetchOk(makeCompactPayload({ rows: makeRows(300) })); // ちょうど半分
-    const out = await syncAll(env);
-    expect(out.ok).toBe(true);
-    expect(state.snapshot.rows).toBe(300);
+      mockFetchOk(makeCompactPayload({ rows: makeRows(300) })); // ちょうど半分
+      const out = await syncAll(env);
+      expect(out.ok).toBe(true);
+      expect(state.snapshot.rows).toBe(300);
+    } finally {
+      clock.stop();
+    }
   });
 
   it('初回（保存済みが無い）ときはこの検査を飛ばす（0件近くでも通る）', async () => {
@@ -770,7 +780,68 @@ describe('syncAll（4回目レビュー修正5: 自己回復は「同一内容�
     }
   });
 
-  it('観測回数・経過時間を満たしていても、直近観測が古く監視に空白期間があれば自己回復しない。その後、間隔を空けずに観測が続けば自己回復する', async () => {
+  it('観測に空白期間があると、その前の観測実績は今回の判定に持ち越さない（空白の後から改めて最低観測回数・経過時間を満たす必要がある）', async () => {
+    // ★5回目レビュー修正3（Codexの再指摘）: 旧実装は「直前の1件と今回の間」しか
+    // 見ておらず、この直後のテスト（旧版）は「最初の拒否から30分・観測3件」を
+    // 満たしていれば、途中に25分の空白があっても「直近観測が新しくなった1回」だけで
+    // 自動受理されてしまうことを許していた（＝Codexが指摘した穴そのもの）。
+    // 新実装は「隣接する観測間隔が10分を超えた時点で、それより古い観測を今回の
+    // 判定に含めない」ため、空白の後は最低観測回数・経過時間をゼロから積み直す
+    // 必要があることをここで確認する。
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    const CRON_INTERVAL_MS = 5 * 60 * 1000;
+
+    let t = 1_700_000_000_000;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(t);
+      mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+      await syncAll(env);
+
+      mockFetchOk(makeCompactPayload({ rows: makeRows(100) })); // 以後ずっと同一内容
+      // 0分・5分・10分に拒否（観測3件）。
+      for (let i = 0; i < 3; i++) {
+        t += CRON_INTERVAL_MS; vi.setSystemTime(t);
+        const r = await syncAll(env);
+        expect(r.ok).toBe(false);
+      }
+      expect(state.snapshot.rows).toBe(600);
+
+      // ここでCronが25分止まる（10分時点の観測から25分後＝35分時点で再開）。
+      // 「最初の拒否(5分時点)から30分」という経過時間だけを見れば満たしてしまう
+      // 局面だが、直前の観測(10分時点)からの間隔が25分あり規定(10分)を超えるため、
+      // 新実装はここで遡るのを打ち切る＝空白より前の3件の実績は一切カウントされず、
+      // count=0からやり直しになる。
+      t += 25 * 60 * 1000; vi.setSystemTime(t);
+      const afterGap = await syncAll(env);
+      expect(afterGap.ok).toBe(false);
+      expect(state.snapshot.rows).toBe(600);
+
+      // 空白の後、あらためて5分間隔で観測を続ける。空白直後の1回（afterGap）を
+      // 起点として、そこからさらに5回（合計6回・25分）ではまだ30分に届かないため
+      // 拒否が続くことを確認する（＝空白前の3件の実績を使い回して早く自動受理される
+      // ことは無い）。
+      const results = [];
+      for (let i = 0; i < 5; i++) {
+        t += CRON_INTERVAL_MS; vi.setSystemTime(t);
+        results.push(await syncAll(env));
+      }
+      expect(results.every(r => r.ok === false)).toBe(true);
+      expect(state.snapshot.rows).toBe(600);
+
+      // 空白直後の観測（afterGap）からちょうど30分後。ここで初めて自動的に受け入れる。
+      t += CRON_INTERVAL_MS; vi.setSystemTime(t);
+      const accepted = await syncAll(env);
+      expect(accepted.ok).toBe(true);
+      expect(accepted.message).toMatch(/自動的に受け入れ/);
+      expect(state.snapshot.rows).toBe(100);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('Codexが5回目レビューで再現した具体例（0分・1分・2分に拒否→27分の空白→29分・30分に再拒否）では自動受理されない', async () => {
     const { db, state } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
 
@@ -782,33 +853,174 @@ describe('syncAll（4回目レビュー修正5: 自己回復は「同一内容�
       await syncAll(env);
 
       mockFetchOk(makeCompactPayload({ rows: makeRows(100) })); // 以後ずっと同一内容
-      // 0分・5分・10分に拒否（観測3件・最低観測回数は満たす）。
-      for (let i = 0; i < 3; i++) {
-        t += 5 * 60 * 1000; vi.setSystemTime(t);
+
+      // 0分・1分・2分に拒否（観測3件・最低観測回数は満たす）。
+      for (const deltaMin of [1, 1, 1]) {
+        t += deltaMin * 60 * 1000; vi.setSystemTime(t);
         const r = await syncAll(env);
         expect(r.ok).toBe(false);
       }
-      expect(state.snapshot.rows).toBe(600);
 
-      // ここでCronが25分止まる（10分時点の観測から25分後＝35分時点で再開）。
-      // 経過時間（最初の拒否=5分時点から35分時点までで30分）・観測回数（3件）は
-      // 満たすが、直近観測（10分時点）からの間隔が25分あり、鮮度条件（10分以内）を
-      // 満たさない。旧実装（経過時間のみ）なら自動受入されていたはずの局面。
-      t += 25 * 60 * 1000; vi.setSystemTime(t);
-      const stillBlocked = await syncAll(env);
-      expect(stillBlocked.ok).toBe(false);
-      expect(state.snapshot.rows).toBe(600);
+      // 27分の空白（Cronが止まっていた想定）。
+      t += 27 * 60 * 1000; vi.setSystemTime(t);
+      const at29 = await syncAll(env); // 最初の拒否(0分)から29分後
+      expect(at29.ok).toBe(false);
 
-      // 間隔を空けずに（5分後）もう一度観測する。これで直近観測が新しくなり、
-      // 経過時間・観測回数・鮮度の3条件が揃うため、自己回復して受け入れる。
-      t += 5 * 60 * 1000; vi.setSystemTime(t);
-      const accepted = await syncAll(env);
-      expect(accepted.ok).toBe(true);
-      expect(accepted.message).toMatch(/自動的に受け入れ/);
-      expect(state.snapshot.rows).toBe(100);
+      // さらに1分後（最初の拒否から30分後）。旧実装（直前1件とのみ比較）だと
+      // 「最古から30分・件数5件・直近1分」を満たして自動受理されてしまっていた。
+      t += 1 * 60 * 1000; vi.setSystemTime(t);
+      const at30 = await syncAll(env);
+      expect(at30.ok).toBe(false); // 27分の空白で実績が打ち切られているため、まだ受理されない
+      expect(state.snapshot.rows).toBe(600); // 事故（不完全なデータの受理）は起きない
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('syncAll（5回目レビュー修正5: forceはマスタ半減には効かない・force自体にも頻度制限）', () => {
+  it('日報のみが急減している場合はforce:trueで即座に受け入れる（マスタは急減していないので従来どおり）', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    const clock = stubIncreasingClock();
+    try {
+      mockFetchOk(makeCompactPayload({
+        rows: makeRows(600),
+        members: [{ name: '森', company: 'G', division: '' }],
+        genbaMaster: [{ name: 'A', company: '' }],
+        jobsites: [{ genba: 'A', loc: 'x', jobNo: '', completed: false, billingMethod: '応援' }]
+      }));
+      await syncAll(env);
+
+      mockFetchOk(makeCompactPayload({
+        rows: makeRows(100), // 日報だけ急減
+        members: [{ name: '森', company: 'G', division: '' }],
+        genbaMaster: [{ name: 'A', company: '' }],
+        jobsites: [{ genba: 'A', loc: 'x', jobNo: '', completed: false, billingMethod: '応援' }]
+      }));
+      const out = await syncAll(env, { force: true });
+
+      expect(out.ok).toBe(true);
+      expect(out.message).toMatch(/force=1/);
+      expect(state.snapshot.rows).toBe(100);
+    } finally {
+      clock.stop();
+    }
+  });
+
+  it('マスタ（職人・元請・現場）が1つでも急減している場合はforce:trueを指定しても即座には受け入れない', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    mockFetchOk(makeCompactPayload({
+      rows: makeRows(600),
+      members: [
+        { name: '森', company: 'G', division: '' }, { name: '田中', company: 'G', division: '' },
+        { name: '佐藤', company: 'G', division: '' }, { name: '鈴木', company: 'G', division: '' }
+      ]
+    }));
+    await syncAll(env);
+
+    // 日報は変わらないが職人マスタだけ半減（4→1。force=1が指定されていても即時受理しない）。
+    mockFetchOk(makeCompactPayload({
+      rows: makeRows(600),
+      members: [{ name: '森', company: 'G', division: '' }]
+    }));
+    const out = await syncAll(env, { force: true });
+
+    expect(out.ok).toBe(false);
+    expect(out.message).toMatch(/職人マスタ/);
+    expect(out.message).toMatch(/force/); // forceが効かない旨の案内を含む
+    expect(state.snapshot.membersCount).toBe(4); // 変わっていない
+  });
+
+  it('日報・マスタが同時に急減している場合もforce:trueは無効（マスタ急減が1つでも含まれれば全体としてforceは効かない）', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    mockFetchOk(makeCompactPayload({
+      rows: makeRows(600),
+      members: [
+        { name: '森', company: 'G', division: '' }, { name: '田中', company: 'G', division: '' },
+        { name: '佐藤', company: 'G', division: '' }, { name: '鈴木', company: 'G', division: '' }
+      ]
+    }));
+    await syncAll(env);
+
+    mockFetchOk(makeCompactPayload({
+      rows: makeRows(100), // 日報も急減
+      members: [{ name: '森', company: 'G', division: '' }] // 職人マスタも急減（4→1）
+    }));
+    const out = await syncAll(env, { force: true });
+
+    expect(out.ok).toBe(false);
+    expect(state.snapshot.rows).toBe(600);
+    expect(state.snapshot.membersCount).toBe(4);
+  });
+
+  it('force:trueでも応答形式検証・サイズ上限は無条件のまま維持される（マスタ半減が絡まないケースでの回帰確認）', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    mockFetchOk({ status: 'ok', compact: 1, headers: HEADERS.slice(0, 18), rows: [], members: [], genbaMaster: [], jobsites: [] });
+
+    const out = await syncAll(env, { force: true });
+    expect(out.ok).toBe(false);
+    expect(state.snapshot).toBeNull();
+  });
+
+  it('forceによる即時受理は直近30分に1回まで（force連打・毎回異なるタイミングを狙った悪用の緩和）', async () => {
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    let t = 1_700_000_000_000;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(t);
+      mockFetchOk(makeCompactPayload({ rows: makeRows(600) }));
+      await syncAll(env);
+
+      // ★世代逆転防止のWHERE条件（fetch_started_at比較）が同一ミリ秒での上書きを
+      // 許さないため、次の呼び出し前に時計を進める（他のテストのstubIncreasingClock
+      // と同じ理由。sync.test.jsのコメント参照）。
+      t += 1000; vi.setSystemTime(t);
+      // 1回目のforce（日報のみ急減）: 受理される。
+      mockFetchOk(makeCompactPayload({ rows: makeRows(100) }));
+      const first = await syncAll(env, { force: true });
+      expect(first.ok).toBe(true);
+      expect(state.snapshot.rows).toBe(100);
+
+      // 5分後、再び日報が急減した別の状況でforce=1を使おうとしても、
+      // 直近30分以内に既にforceで受理済みのため無効化される。
+      t += 5 * 60 * 1000; vi.setSystemTime(t);
+      mockFetchOk(makeCompactPayload({ rows: makeRows(10) }));
+      const second = await syncAll(env, { force: true });
+      expect(second.ok).toBe(false);
+      expect(second.message).toMatch(/頻度制限|force/);
+      expect(state.snapshot.rows).toBe(100); // 変わっていない
+
+      // 30分経過後は、再びforceが使えるようになる。
+      t += 26 * 60 * 1000; vi.setSystemTime(t); // 1回目のforceからちょうど31分後
+      mockFetchOk(makeCompactPayload({ rows: makeRows(10) }));
+      const third = await syncAll(env, { force: true });
+      expect(third.ok).toBe(true);
+      expect(state.snapshot.rows).toBe(10);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('syncAll（5回目レビュー修正6: Worker側のGAS取得タイムアウト）', () => {
+  it('GASへの取得が常に失敗するとき、fetchは2回だけ試行される（60秒×2に短縮。従来は20秒×3）', async () => {
+    let calls = 0;
+    global.fetch = vi.fn(async () => { calls++; throw new Error('network down'); });
+    const { db } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const out = await syncAll(env);
+
+    expect(out.ok).toBe(false);
+    expect(calls).toBe(2);
   });
 });
 

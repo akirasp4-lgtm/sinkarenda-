@@ -1149,6 +1149,38 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
      コメント参照。file://直開きでも動くよう素の<script src>（非module）にしてある。 -->
 <script src="sync-guard.js"></script>
 <script>
+// ★5回目レビュー修正4（高・Codex）: sync-guard.jsが何らかの理由（配置漏れ・部分配布・
+// オフラインキャッシュ不足・版ずれ等）で読み込めなかったとき、旧実装は
+// createPreferGasTracker等が未定義のまま下のメイン<script>内で参照され、例外が発生して
+// アプリ全体が起動できなくなっていた（Codexの指摘: loadDataのtracker参照は自身のtryより
+// 前にあるため、通常のエラー表示にもキャッシュ表示にも落ちない）。
+// ここで「sync-guard.jsが読めなかったときだけ」最小限のフォールバックを定義する。
+// 安全側＝常にGAS優先（D1を一切候補に入れない）実装にしてあるため、外部ファイルが
+// 読めなくても従来どおりGAS経由で動く（D1による高速化の恩恵を失うだけで、
+// アプリとしては壊れない）。
+if(typeof createPreferGasTracker==='undefined'){
+  try{console.error('[予定管理-admin] sync-guard.jsの読み込みに失敗しました。安全側（常時GAS優先）のフォールバックで動作します');}catch(e){}
+  window.createPreferGasTracker=function(){
+    return{
+      beginAttempt:function(now){return typeof now==='number'?now:Date.now();},
+      mark:function(){},
+      clear:function(){return true;},
+      status:function(){return 'block';},
+      isActive:function(){return true;},
+      resolveWithHealthEvidence:function(){return false;},
+      markedAtValue:function(){return null;},
+      capMsValue:function(){return 0;}
+    };
+  };
+  window.decideSyncOutcome=function(){return{forceGas:true,confirmed:false};};
+  window.forceGasWhenBackendUnknown=function(){return true;};
+  window.isRateCellOk=function(raw){
+    var v=typeof raw==='string'?raw.trim():raw;
+    return v!==''&&v!==null&&v!==undefined&&Number.isFinite(Number(v));
+  };
+}
+</script>
+<script>
 // ============================================================
 // ★ PINコードはここを変更してください
 const ADMIN_PIN = '8800';
@@ -1331,10 +1363,12 @@ let dataLoadOk=false;
 // 起きるまでの間に「更新」ボタン・プル更新・会社切替が挟まると、それらが呼ぶ素の
 // loadData()（forceGas無し）がD1（書き込み前の古い内容）を読んでしまう。
 // 対策: 「確実に同期が成功するまでD1を読まない」を一度きりの引数ではなく状態
-// （preferGasTracker＝これがアクティブな間は全てのloadData呼び出しでD1を候補から
+// （preferGasTracker＝これがブロック中は全てのloadData呼び出しでD1を候補から
 // 外す）として持続させる。呼び出し元が明示的にforceGasを渡さなくても自動的に効く。
-// 判定ロジック本体はsync-guard.js（createPreferGasTracker）参照。会社切替・複数タブ
-// との関係もそちらのコメントに記載。
+// ★5回目レビュー修正1・2・7: 「時間だけでは解除しない」「localStorageで永続化・
+// タブ間共有」「並行refreshで古い成功が新しいmarkを消さない」の3点を直した
+// （旧実装はいずれも欠陥があった。両レビュアーが独立に指摘）。
+// 判定ロジック本体はsync-guard.js（createPreferGasTracker）参照。
 const preferGasTracker=createPreferGasTracker();
 let allNippos=[];
 let allMembers=[];
@@ -2063,10 +2097,21 @@ function refreshInBackground(after){
   // trueに倒しても損はない。
   //
   // ★4回目レビュー修正2（強く推奨）: 同期が確実成功でなかった場合は
-  // preferGasTracker.mark() でしばらく（5分＝Cron間隔）GAS優先を持続させ、
-  // 確実成功したときだけ .clear() する。これによりforceGas引数を渡さない
-  // 呼び出し（switchCompany・プル更新・「更新」ボタン）も自動的に守られる
-  // （loadData側の対応はloadData関数のコメント参照）。
+  // preferGasTracker.mark() でGAS優先を持続させ、確実成功したときだけ .clear() する。
+  // これによりforceGas引数を渡さない呼び出し（switchCompany・プル更新・「更新」ボタン）
+  // も自動的に守られる（loadData側の対応はloadData関数のコメント参照）。
+  //
+  // ★5回目レビュー修正1（重大・両者一致）: 旧実装はmark()が「時間で勝手に切れる」
+  // sticky（5分）を置くだけで、同期の確実成功を一度も確認せずに失効していた。
+  // 今のtracker（sync-guard.js）は時間だけでは解除されない。解除は必ずclear()
+  // （確実成功を観測したとき）を経由する。詳細はsync-guard.js冒頭のコメント参照。
+  // ★5回目レビュー修正7（中・Codex）: 並行して複数のrefreshInBackgroundが走ると
+  // （例: 連続した登録操作でそれぞれが自分の同期を走らせる）、開始が遅い方の結果が
+  // 先に返ってmarkし、その後開始が早い方の「確実成功」が遅れて返ってそのmarkを
+  // 消してしまう事故がありえた。beginAttempt()で「この呼び出しが開始した時刻」を
+  // 取得しておき、clear()にはその時刻を渡す＝自分より後に開始した呼び出しのmarkは
+  // 消せない（sync-guard.jsのclear()参照）。
+  const attemptStartedAt=preferGasTracker.beginAttempt();
   // await で待つ必要がある呼び出し元のためPromiseを返す（await refreshInBackground()）。
   const done=(forceGas)=>loadData(forceGas).then(()=>{if(typeof after==='function'){try{after();}catch(e){}}}).catch(()=>{});
   return fetch('backend.json?t='+Date.now(),{signal:timeoutSignal(BACKEND_JSON_TIMEOUT_MS)}).then(r=>r.ok?r.json():null).then(cfg=>{
@@ -2083,7 +2128,7 @@ function refreshInBackground(after){
     return fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers,signal:timeoutSignal(SYNC_TIMEOUT_MS)}).then(res=>
       res.json().then(j=>decideSyncOutcome(res.ok,j)).catch(()=>decideSyncOutcome(res.ok,null))
     ).catch(()=>decideSyncOutcome(false,null)).then(outcome=>{
-      if(outcome.confirmed)preferGasTracker.clear();else preferGasTracker.mark();
+      if(outcome.confirmed)preferGasTracker.clear(attemptStartedAt);else preferGasTracker.mark();
       return outcome.forceGas;
     });
   }).catch(()=>{preferGasTracker.mark();return true;}).then(done);
@@ -2092,11 +2137,6 @@ function refreshInBackground(after){
 async function loadData(forceGas){
   const requestSeq=++dataLoadSeq;
   const requestCompany=currentCompany;
-  // ★4回目レビュー修正2: forceGas引数（直後の1回だけの安全弁）に加え、
-  // preferGasTrackerがアクティブな間（＝直近の同期が確実成功と確認できていない間、
-  // 最大5分）も同様にD1を候補から外す。switchCompany・プル更新・「更新」ボタンなど
-  // forceGasを渡さない呼び出しでも自動的に効く（refreshInBackground参照）。
-  const effectiveForceGas=!!forceGas||preferGasTracker.isActive();
   setLoading(true);dataLoadOk=false;
   try{
     const companyParam=requestCompany&&requestCompany!=='全社'?requestCompany:'';
@@ -2106,6 +2146,10 @@ async function loadData(forceGas){
     // 2026-08-21: GASのWebアプリは混むと HTTP404 やロック時間切れを返す
     // （実測で5回に1回程度）。1回きりだと利用者に即エラーが出るため、黙って
     // 1度だけ取り直す。それでも駄目なら下の catch へ。
+    // ★5回目レビュー修正1: preferGasTrackerが「cap（15分）に達したがまだ確実成功を
+    // 観測していない」状態（status()==='recheck'）のときにcfg.workerUrlが要るため、
+    // backend.jsonの取得をeffectiveForceGasの判定より前に行うよう順序を変えた
+    // （挙動そのものは従来と同じ。単なる並べ替え）。
     let json=null,lastErr=null,usedBackend='gas';
     let cfg={backend:'gas'};
     try{
@@ -2113,9 +2157,43 @@ async function loadData(forceGas){
       if(c.ok)cfg=await c.json();
     }catch(e){/* 取れなければGASのまま＝安全側 */}
 
+    // ★4回目レビュー修正2: forceGas引数（直後の1回だけの安全弁）に加え、
+    // preferGasTrackerがブロック中の間も同様にD1を候補から外す。switchCompany・
+    // プル更新・「更新」ボタンなどforceGasを渡さない呼び出しでも自動的に効く
+    // （refreshInBackground参照）。
+    // ★5回目レビュー修正1（重大・両者一致）: 旧実装はここで単純にisActive()（＝
+    // 5分経てば自動でfalseになる）を見ていた。今はtrackerが時間だけで解除しない
+    // ため、status()が'recheck'（cap=15分に達したがまだ確実成功を確認できていない）
+    // のときは、無条件に諦めてブロックし続けるのではなく、/api/healthを見て
+    // 「markした時刻より後に確実な書き込み（snapshotAtの更新）があったか」を
+    // 確認してから解除する（要件どおり「成功を確認せずに解除しない」）。
+    // 確認できなければ引き続きGASを優先する＝安全側のデフォルト。
+    let effectiveForceGas=!!forceGas;
+    if(!effectiveForceGas){
+      const trackerStatus=preferGasTracker.status();
+      if(trackerStatus==='block'){
+        effectiveForceGas=true;
+      }else if(trackerStatus==='recheck'){
+        effectiveForceGas=true; // 既定は継続（確認できるまで安全側）
+        if(cfg.backend==='d1'&&cfg.workerUrl){
+          try{
+            const hRes=await fetch(cfg.workerUrl+'/api/health',{signal:timeoutSignal(READ_TIMEOUT_MS)});
+            const h=await hRes.json();
+            // snapshotAtは「実際に中身が変わって書き込まれた」ときだけ進む値
+            // （cf/src/sync.jsのsyncAllは変更が無ければ書かない）。これがmarkした
+            // 時刻より後なら「mark後に確実な取り込みが実際にあった」ことの強い
+            // 証拠になる。
+            const evidenceAt=h&&h.snapshotAt?Date.parse(h.snapshotAt):NaN;
+            const evidenceOk=!!(hRes.ok&&h&&h.status==='ok'&&Number.isFinite(evidenceAt));
+            if(preferGasTracker.resolveWithHealthEvidence(evidenceOk,evidenceAt))effectiveForceGas=false;
+          }catch(e){/* 確認できなければブロック継続＝安全側 */}
+        }
+      }
+    }
+
     const tryUrls=[];
     // ★3回目レビュー修正2・4回目レビュー修正2: forceGas（またはpreferGasTrackerが
-    // アクティブ）のときはD1を候補に入れない（refreshInBackground参照。直前の
+    // ブロック中）のときはD1を候補に入れない（refreshInBackground参照。直前の
     // /api/syncが「確実に成功した」と確認できなかった場合の安全弁）。
     if(cfg.backend==='d1'&&cfg.workerUrl&&!effectiveForceGas)
       tryUrls.push({kind:'d1',url:cfg.workerUrl+'/api/schedule?company='+encodeURIComponent(companyParam)});

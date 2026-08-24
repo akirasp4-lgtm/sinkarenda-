@@ -42,8 +42,22 @@ const SIZE_LIMIT_BYTES = 1_500_000;
 
 // Workerからのfetchが無応答のまま待ち続けるとGASへフォールバックする機会を失う
 // ため、1回あたりのタイムアウトを設ける（修正3）。GASの応答時間は実測で
-// 3.9〜56秒とばらつくため、20秒で打ち切ってリトライに回す。
-const FETCH_TIMEOUT_MS = 20_000;
+// 3.9〜56秒とばらつく。
+// ★5回目レビュー修正6（中・Codex）: 「GAS読みタイムアウトを60秒に延ばした」という
+// 前回の報告は誤りだった。延ばしたのはブラウザ側（index.html/admin.htmlの
+// GAS_READ_TIMEOUT_MS）だけで、Worker内のここ（FETCH_TIMEOUT_MS）は20秒のまま
+// だった。「3回リトライで合計60秒待てる」ことと「1回56秒の応答を待てる」ことは
+// 別物で、GASが毎回20秒を超える混雑状態だと56秒以内に正常応答できてもWorker側の
+// 取得は3回とも20秒で打ち切られて全滅してしまう（レビュー指摘）。
+// → 1回あたりを実測最大56秒＋安全マージンの60秒へ引き上げる。ただし
+// fetchWithRetry(url, tries)のtriesを3のままにすると最悪60秒×3=180秒待つことになり、
+// Cloudflare Workersの実行時間上限（プラン・設定に依存。cronのscheduled()は
+// wrangler.tomlで明示的に延長しない限りデフォルトの上限に収まる保証がない）に
+// 抵触しかねない。「超える設定にするくらいならリトライ回数を減らして1回あたりを
+// 長くする」という指摘どおり、下のsyncAll呼び出し側でtriesを3→2に減らす
+// （最悪60秒×2=120秒。無応答での待ち時間はCPU時間ではなくI/O待ちだが、念のため
+// 総待ち時間を抑える方向にした）。
+const FETCH_TIMEOUT_MS = 60_000;
 
 // 同時実行の抑止（修正2）。fetchの最大リトライ(3回×20秒)を踏まえても収まるよう
 // 余裕を持たせてある。これより古いロックは「前回が例外的に解放されないまま
@@ -85,6 +99,23 @@ const SHRINK_LOG_SCAN_LIMIT = 500;
 //     しまうため）。
 const SHRINK_AUTO_ACCEPT_MIN_COUNT = 3;
 const SHRINK_AUTO_ACCEPT_MAX_GAP_MS = 10 * 60 * 1000;
+
+// ★5回目レビュー修正3（高・Codex）: 上記②「直近観測の鮮度」は、実装では
+// 「直前の1件と“今回”の間が10分以内か」しか見ていなかった。30分の履歴全体で
+// 隣接する観測間隔がすべて10分以内かは確認していなかった（＝途中に長い空白が
+// あっても、最後の1区間さえ短ければfreshOkが成立してしまっていた）。
+// Codexの再現例: 0分・1分・2分に3回拒否→27分の空白（Cron停止）→29分・30分に
+// 再度拒否、という履歴でも「最古から30分・件数5件・直近1分」を満たして自動受理
+// されてしまう。
+// → sameHashShrinkRejectStreakを「新しい順に遡りながら、隣接する観測（一番新しい
+// 観測については“今回”）との間隔がSHRINK_AUTO_ACCEPT_MAX_GAP_MSを超えた時点で
+// 遡るのを打ち切る」方式に作り直した。これにより返ってくるcount/earliestAtは
+// 常に「今回から遡って、隙間なく続いている観測の連なり」だけを表す＝
+// 「隣接するすべての観測間隔が規定内」であることを判定ロジック自身が保証する。
+// 空白（例: 27分間Cronが止まる）があれば、その時点で遡るのを止めるため、空白より
+// 前の観測実績は今回の判定に一切持ち越されない（＝空白の後、あらためて最低観測
+// 回数・経過時間をゼロから積み直す必要がある。空白前の実績を使い回して早期に
+// 自動受理されることは無い）。
 
 /**
  * GAS応答の妥当性を検証する（修正3）。ここで甘い判定をすると、将来GAS側で
@@ -214,28 +245,80 @@ async function releaseLock(env) {
 // 別の欠損を起こしても、4回目に“3回連続拒否”の条件を満たして自動受入されてしまう」
 // ことを再現された。ハッシュを条件に加えることで、内容が変わるたびにこの判定は
 // リセットされる＝異なる欠損を連続させても自動受入には辿り着けない。
-async function sameHashShrinkRejectStreak(env, currentHash) {
+async function sameHashShrinkRejectStreak(env, currentHash, now) {
+  const nowMs = typeof now === 'number' ? now : Date.now();
   try {
     const res = await env.DB.prepare(
       'SELECT at, ok, message, payload_hash FROM sync_log ORDER BY at DESC LIMIT ?'
     ).bind(SHRINK_LOG_SCAN_LIMIT).all();
     const logs = res.results || [];
     let count = 0;
-    let earliestAt = null; // ハッシュが一致したまま遡れた中で最も古い（＝最初の拒否）at
-    let latestAt = null;   // ハッシュが一致した中で最も新しい（＝今回の直前の拒否）at
+    let earliestAt = null; // 遡れた範囲で最も古い（＝この連続監視の起点）at
+    let latestAt = null;   // 遡れた範囲で最も新しい（＝今回の直前の拒否）at
     // ★4回目レビュー修正5: 最低観測回数・直近観測の鮮度も判定できるよう、
     // count・earliestAtに加えてlatestAtも返す（syncAll側の追加条件で使う）。
+    // ★5回目レビュー修正3: 新しい順に遡りながら、隣接する観測（最初はnow＝今回）との
+    // 間隔がSHRINK_AUTO_ACCEPT_MAX_GAP_MSを超えた時点で遡るのを打ち切る。これにより
+    // 返り値は常に「今回から隙間なく続いている観測の連なり」だけを表す。
+    let prevAtMs = nowMs;
     for (const r of logs) {
       const isReject = Number(r.ok) === 0 && String(r.message || '').includes(SHRINK_REJECT_MARKER);
-      if (!isReject || r.payload_hash !== currentHash) break;
+      if (!isReject || r.payload_hash !== currentHash) break; // 内容が変わった／拒否でない→打ち切り
+      const atMs = Date.parse(r.at);
+      if (!Number.isFinite(atMs)) break; // 時刻が読めない行は安全側で打ち切り
+      if (prevAtMs - atMs > SHRINK_AUTO_ACCEPT_MAX_GAP_MS) break; // 空白が規定を超えた→ここで打ち切り（それより古い実績は持ち越さない）
       count++;
       if (latestAt === null) latestAt = r.at;
       earliestAt = r.at;
+      prevAtMs = atMs;
     }
     return { count, earliestAt, latestAt };
   } catch (_e) {
     // 履歴が読めなければ「まだ実績なし」として扱う＝これまでどおり拒否を継続する安全側。
     return { count: 0, earliestAt: null, latestAt: null };
+  }
+}
+
+// ★5回目レビュー修正5（高・Codex）: 「Origin検証を通過した後にしかforce=1へ
+// 到達しない」はブラウザ相手には正しいが、curl等のHTTPクライアントはOriginヘッダを
+// 自由に書き換えられるため、「第三者はforceを使えない」とは言えない（前回の結論は
+// 言い過ぎだった。cf/src/index.jsのisAllowedOriginのコメント参照）。
+// そこで force そのものの実害を2方向で小さくする：
+//   (a) forceが即時受理に効くのは「日報(nippo)だけが急減していて、マスタ
+//       （職人・元請・現場）は急減していない」ときに限る。マスタが1つでも
+//       急減していればforceは一切効かず、通常の自己回復（同一内容が続けば
+//       時間で解除）にのみ委ねる。サイズ上限・応答形式検証はもともと無条件。
+//   (b) forceによる即時受理そのものにも専用の頻度制限を課す。一般のレート制限
+//       （cf/src/index.jsのisSyncRateLimited・直近1分12回）は「連打」対策であり、
+//       GASが一瞬だけ半欠損を返した瞬間を狙った一度きりのforce=1は防げない
+//       （＝「最初の1回」を防げていない、という指摘への対応）。直近
+//       FORCE_ACCEPT_COOLDOWN_MS以内にforceで受理した実績があれば、今回はforceを
+//       無効化し通常の自己回復に委ねる。
+// ★正直な限界: これでも「一度も過去にforceで受理されたことがない、初めての
+// force=1」自体は止められない（count-basedの仕組み全般に共通する限界）。
+// あくまで「実害を小さくする」緩和策であり、force=1を完全に無害化するものではない。
+const FORCE_ACCEPT_MARKER = 'force=1が指定されたため強制的に受け入れました';
+const FORCE_ACCEPT_COOLDOWN_MS = 30 * 60 * 1000;
+
+async function recentForceAcceptCount(env, now, windowMs) {
+  try {
+    const res = await env.DB.prepare(
+      'SELECT at, ok, message, payload_hash FROM sync_log ORDER BY at DESC LIMIT ?'
+    ).bind(SHRINK_LOG_SCAN_LIMIT).all();
+    const logs = res.results || [];
+    const cutoffMs = now - windowMs;
+    let count = 0;
+    for (const r of logs) {
+      const atMs = Date.parse(r.at);
+      if (!Number.isFinite(atMs) || atMs < cutoffMs) break; // 新しい順なので範囲外に出たら終了
+      if (String(r.message || '').includes(FORCE_ACCEPT_MARKER)) count++;
+    }
+    return count;
+  } catch (_e) {
+    // 判定できなければ「実績なし」として扱う（フェイルオープン。他の安全装置と
+    // 方針を揃える。誤判定の実害は「forceが本来より使いやすくなる」程度で、
+    // 他の無条件の検証＝サイズ上限・応答形式・マスタ半減には影響しない）。
+    return 0;
   }
 }
 
@@ -260,9 +343,14 @@ async function sameHashShrinkRejectStreak(env, currentHash) {
  * Cronが5分ごと(288回/日)に走っても最大288行/日で、無料枠10万行/日の0.3%。
  *
  * @param {object} env
- * @param {{force?: boolean}} [opts] force:true のとき、件数急減ガード（修正3/修正7）
- *   のみを無条件で通過させる（他の検証＝応答形式・サイズ上限は無条件のまま維持する）。
+ * @param {{force?: boolean}} [opts] force:true のとき、件数急減ガード（修正3/修正7）を
+ *   条件付きで通過させる（他の検証＝応答形式・サイズ上限は常に無条件のまま維持する）。
  *   利用者が管理画面等から明示的に「今すぐ反映したい」場合の脱出口（修正7）。
+ *   ★5回目レビュー修正5: forceが実際に効くのは「日報(nippo)だけが急減していて、
+ *   マスタ（職人・元請・現場）は急減していない」ときに限る（マスタ急減が1つでも
+ *   あればforceは無効。通常の自己回復のみに委ねる）。さらに直近30分以内に一度
+ *   forceで受理していれば、今回のforceは無効化される（force連打の頻度制限）。
+ *   詳細はsyncAll内のforceEligible周りのコメント参照。
  *
  * 返り値: { ok, rows, message, skipped? }
  *   - skipped: true のときは「進行中のためスキップ」「変更なしのためスキップ」
@@ -284,7 +372,9 @@ export async function syncAll(env, opts = {}) {
     // 取得の結果が常に先に始まった取得の結果より「新しい」と正しく判定できる）。
     const fetchStartedAt = Date.now();
     const url = env.GAS_URL + '?compact=1&company=&t=' + fetchStartedAt;
-    const raw = await fetchWithRetry(url, 3);
+    // ★5回目レビュー修正6: FETCH_TIMEOUT_MSを60秒に延ばした分、リトライ回数は
+    // 3→2に減らす（上のFETCH_TIMEOUT_MSのコメント参照。最悪でも60秒×2=120秒に収める）。
+    const raw = await fetchWithRetry(url, 2);
 
     // ★修正3: 応答の妥当性検証。おかしければ書き込まず失敗として記録する
     // （→ 読み取り側は既存のsnapshotをそのまま返し続け、利用者には見えない）。
@@ -327,11 +417,17 @@ export async function syncAll(env, opts = {}) {
     // 初回（保存済みが無い）ときはこの検査を飛ばす。
     let shrinkNote = '';
     if (existing) {
+      const rowsShrunk = rowCount < existing.rows / 2;
+      const memberShrunk = memberCount < existing.members_count / 2;
+      const genbaShrunk = genbaCount < existing.genba_count / 2;
+      const jobsitesShrunk = jobsitesCount < existing.jobsites_count / 2;
+      const masterShrunk = memberShrunk || genbaShrunk || jobsitesShrunk;
+
       const shrunk = [];
-      if (rowCount < existing.rows / 2) shrunk.push(`日報(${existing.rows}→${rowCount})`);
-      if (memberCount < existing.members_count / 2) shrunk.push(`職人マスタ(${existing.members_count}→${memberCount})`);
-      if (genbaCount < existing.genba_count / 2) shrunk.push(`元請マスタ(${existing.genba_count}→${genbaCount})`);
-      if (jobsitesCount < existing.jobsites_count / 2) shrunk.push(`現場マスタ(${existing.jobsites_count}→${jobsitesCount})`);
+      if (rowsShrunk) shrunk.push(`日報(${existing.rows}→${rowCount})`);
+      if (memberShrunk) shrunk.push(`職人マスタ(${existing.members_count}→${memberCount})`);
+      if (genbaShrunk) shrunk.push(`元請マスタ(${existing.genba_count}→${genbaCount})`);
+      if (jobsitesShrunk) shrunk.push(`現場マスタ(${existing.jobsites_count}→${jobsitesCount})`);
 
       if (shrunk.length > 0) {
         // ★修正7（急減ガードの自己回復）: アーカイブ等の正当な操作でも件数は
@@ -342,41 +438,65 @@ export async function syncAll(env, opts = {}) {
         // 拒否が最初の拒否から何分続いているか」で判定する。Codexが「毎回違う内容の
         // 欠損を連発しても3回で自動受入されてしまう」ことを再現したため、回数だけの
         // 判定は廃止した。詳細は sameHashShrinkRejectStreak のコメント参照。
-        if (force) {
-          shrinkNote = `（★${SHRINK_REJECT_MARKER}：${shrunk.join('、')}／force=1が指定されたため強制的に受け入れました）`;
+        //
+        // ★5回目レビュー修正5（force実害の低減その1）: forceが即時受理として効くのは
+        // 「日報だけが急減していて、マスタ（職人・元請・現場）は急減していない」ときに
+        // 限る。日報のアーカイブ等は正当な運用でありうるが、マスタが半分以下に消える
+        // ことは通常ありえず、これをforceで押し切ると職人・元請・現場のデータが
+        // 本当に壊れる。マスタ急減を1つでも含む場合は、force=1が指定されていても
+        // 下のelse（通常の自己回復のみ）へ進む（force実質無効）。
+        const now = Date.now();
+        const forceEligible = force && !masterShrunk;
+
+        if (forceEligible) {
+          // ★5回目レビュー修正5（force実害の低減その2）: forceによる即時受理そのものに
+          // 専用の頻度制限を課す（recentForceAcceptCountのコメント参照）。
+          const recentForceAccepts = await recentForceAcceptCount(env, now, FORCE_ACCEPT_COOLDOWN_MS);
+          if (recentForceAccepts > 0) {
+            const cooldownMin = Math.round(FORCE_ACCEPT_COOLDOWN_MS / 60000);
+            const message = `${SHRINK_REJECT_MARKER}：${shrunk.join('、')}。force=1が指定されましたが、直近${cooldownMin}分以内に既にforceで受理済みのため、`
+              + `今回は無効化しました（forceの連続使用を防ぐための頻度制限）。GAS側の異常を疑い、書き込みを中止しました`;
+            await safeWriteSyncLog(env, { rows: rowCount, ok: 0, message, payloadHash: hash });
+            return { ok: false, rows: 0, message };
+          }
+          shrinkNote = `（★${SHRINK_REJECT_MARKER}：${shrunk.join('、')}／${FORCE_ACCEPT_MARKER}）`;
         } else {
-          const streak = await sameHashShrinkRejectStreak(env, hash);
-          const now = Date.now();
+          const streak = await sameHashShrinkRejectStreak(env, hash, now);
           const elapsedMs = streak.earliestAt ? now - Date.parse(streak.earliestAt) : 0;
-          const latestGapMs = streak.latestAt ? now - Date.parse(streak.latestAt) : Infinity;
           const elapsedOk = !!streak.earliestAt && Number.isFinite(elapsedMs) && elapsedMs >= SHRINK_AUTO_ACCEPT_MIN_ELAPSED_MS;
           // ★4回目レビュー修正5: 「同一ハッシュの拒否が最初から30分続いた」だけでは、
           // その30分の間に観測が実質1回（＝最初の拒否と今回の2点）しか無くても成立
           // してしまう（レビュー指摘: 「31分離れた2点で同じだった」で十分成立する）。
-          // 最低観測回数（countOk）と直近観測の鮮度（freshOk＝観測が途切れていない
-          // こと）も同時に満たすことを要求する。3条件はどれも既存条件を緩めない
-          // （ANDで追加するだけ＝自動受入がこれまでより早まることは無い）。
+          // 最低観測回数（countOk）も同時に満たすことを要求する。
           const countOk = streak.count >= SHRINK_AUTO_ACCEPT_MIN_COUNT;
-          const freshOk = Number.isFinite(latestGapMs) && latestGapMs <= SHRINK_AUTO_ACCEPT_MAX_GAP_MS;
-          const stable = elapsedOk && countOk && freshOk;
+          // ★5回目レビュー修正3: 「直近の観測が途切れていないか」は、
+          // sameHashShrinkRejectStreak自身が「隣接する観測間隔が規定（10分）を超えた
+          // 時点で遡るのを打ち切る」ことで保証している（count・earliestAtは常に
+          // “今回”から隙間なく続く観測の連なりだけを表す）。そのためelapsedOk・countOk
+          // の2条件だけで「30分間、隙間なく監視できていた」ことを表せる（旧実装の
+          // freshOkのような別チェックは不要。打ち切りの仕組みそのものがfreshOkを
+          // 兼ねている）。
+          const stable = elapsedOk && countOk;
           if (!stable) {
             const remainMin = streak.earliestAt
               ? Math.max(1, Math.ceil((SHRINK_AUTO_ACCEPT_MIN_ELAPSED_MS - elapsedMs) / 60000))
               : Math.ceil(SHRINK_AUTO_ACCEPT_MIN_ELAPSED_MS / 60000);
             const reasons = [];
-            if (!elapsedOk) reasons.push(`最初の拒否からまだ約${remainMin}分`);
-            if (!countOk) reasons.push(`観測回数が${streak.count}回（最低${SHRINK_AUTO_ACCEPT_MIN_COUNT}回必要）`);
-            if (!freshOk) reasons.push('直近の観測が古く監視が途切れていた可能性がある');
+            if (!elapsedOk) reasons.push(`最初の拒否からまだ約${remainMin}分（監視に空白期間があった場合は、空白の後から数え直します）`);
+            if (!countOk) reasons.push(`観測回数が${streak.count}回（最低${SHRINK_AUTO_ACCEPT_MIN_COUNT}回必要。監視に空白期間があった場合は空白の後の分だけを数えます）`);
             const hint = streak.earliestAt
               ? `同じ内容の拒否が既に${streak.count}回続いています（${reasons.join('、')}）。条件を満たせば自動的に受け入れます。`
               : `今回が最初の拒否です。同じ内容のまま約${remainMin}分・最低${SHRINK_AUTO_ACCEPT_MIN_COUNT}回続けば自動的に受け入れます。`;
+            const forceHint = masterShrunk
+              ? '（マスタ（職人・元請・現場）の半減を含むため、/api/sync?force=1 は無効です。同一内容が続けば自動的に受け入れます）'
+              : '今すぐ反映したい場合は /api/sync?force=1 を使ってください（直近30分以内に一度forceで受理していない場合のみ有効）';
             const message = `${SHRINK_REJECT_MARKER}：${shrunk.join('、')}。GAS側の異常を疑い、書き込みを中止しました`
-              + `（${hint}今すぐ反映したい場合は /api/sync?force=1 を使ってください）`;
+              + `（${hint}${forceHint}）`;
             await safeWriteSyncLog(env, { rows: rowCount, ok: 0, message, payloadHash: hash });
             return { ok: false, rows: 0, message };
           }
-          // 同一内容の拒否が、最低観測回数・直近観測の鮮度を満たしたまま30分以上
-          // 続いた＝自己回復。今回は受け入れて書き込みへ進む。
+          // 同一内容の拒否が、最低観測回数・観測の連続性（途中に空白が無いこと）を
+          // 満たしたまま30分以上続いた＝自己回復。今回は受け入れて書き込みへ進む。
           const elapsedMin = Math.round(elapsedMs / 60000);
           shrinkNote = `（★${SHRINK_REJECT_MARKER}：${shrunk.join('、')}／同一内容の拒否が${elapsedMin}分継続したため自動的に受け入れました）`;
         }
