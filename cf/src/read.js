@@ -53,15 +53,18 @@ export async function readSchedule(env, company) {
     return { status: 'error', message: syncStatus.message };
   }
 
+  // ★2026-08-24 設計変更：D1はGAS応答の忠実な写し（重複排除・一意制約なし）
+  // にしたため、並び順そのものが情報を持つ。取り込み順（=GASが返した順）を
+  // seq の昇順で保つよう、すべてのSELECTに ORDER BY seq を付ける。
   const filter = company && company !== '全社';
   const nippo = filter
-    ? await env.DB.prepare('SELECT * FROM nippo WHERE kaisha = ?').bind(company).all()
-    : await env.DB.prepare('SELECT * FROM nippo').all();
+    ? await env.DB.prepare('SELECT * FROM nippo WHERE kaisha = ? ORDER BY seq').bind(company).all()
+    : await env.DB.prepare('SELECT * FROM nippo ORDER BY seq').all();
   const members = filter
-    ? await env.DB.prepare('SELECT * FROM members WHERE company = ?').bind(company).all()
-    : await env.DB.prepare('SELECT * FROM members').all();
-  const genba = await env.DB.prepare('SELECT * FROM genba').all();
-  const jobsites = await env.DB.prepare('SELECT * FROM jobsites').all();
+    ? await env.DB.prepare('SELECT * FROM members WHERE company = ? ORDER BY seq').bind(company).all()
+    : await env.DB.prepare('SELECT * FROM members ORDER BY seq').all();
+  const genba = await env.DB.prepare('SELECT * FROM genba ORDER BY seq').all();
+  const jobsites = await env.DB.prepare('SELECT * FROM jobsites ORDER BY seq').all();
 
   const allowed = new Set(genba.results.filter(g => !filter || !g.company || g.company === company)
                                        .map(g => g.name));

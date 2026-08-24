@@ -59,12 +59,102 @@ describe('parseGasPayload', () => {
       .toThrow(/compact/);
   });
 
-  it('IDが空の行は捨てる（主キーにできないため）', () => {
+  // ★2026-08-24 設計変更：以前はここで「IDが空の行は捨てる」としていたが、
+  // これが本番データ突き合わせで14行欠落（車検期限リマインダー行の消失）を
+  // 引き起こした。D1はGAS応答の忠実な写しにする方針へ変更したため、
+  // IDが空でも行は捨てない（下の「行を捨てるフィルタの回帰防止」を参照）。
+  it('IDが空の行も捨てない（連番seqが主キーなので、IDが無くても行を持てる）', () => {
     const row = new Array(19).fill('');
     row[1] = '2026-05-02'; row[4] = '森';
     const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
                    members:[], genbaMaster:[], jobsites:[] };
-    expect(parseGasPayload(json).nippo).toHaveLength(0);
+    const out = parseGasPayload(json);
+    expect(out.nippo).toHaveLength(1);
+    expect(out.nippo[0].id).toBe('');
+  });
+});
+
+// --- ここから追加（2026-08-24 設計変更：本番データ突き合わせで見つかった
+// 14行欠落＝車検期限リマインダー行の消失の再発防止）。
+//
+// 原因は parseGasPayload の `if (!rec.sagyoubi || !rec.shimei) continue;` 等、
+// 行を捨てるフィルタだった。GASのdoGetはスプレッドシートの行をそのまま
+// 返すだけで、「氏名が空の行（車両の車検期限だけを置いてある行）」も
+// 「同名・同会社の職人が複数登録されている（元データの重複）」も正当に
+// 存在する。D1はGAS応答の忠実な写しでなければならず、整形・掃除は
+// 移行とは別の作業（利用者の裁定）。
+describe('parseGasPayload（行を捨てるフィルタの回帰防止 = 2026-08-24 本番突き合わせで発覚した14行欠落）', () => {
+  it('氏名が空の行が捨てられずD1へ入ること（車検期限リマインダー行の再現）', () => {
+    // 実例: ID VKEN_なにわ432そ8800 / 作業日 2026-10-16 /
+    // 現場名「ハイエース白 車検期限」/ メモ「車検期限日 なにわ432そ8800」/
+    // 夜勤「予定」/ 更新者「車検期限登録」/ 氏名は空（人が出る予定ではないため）。
+    const row = new Array(19).fill('');
+    row[1] = '2026-10-16';                       // 作業日
+    row[3] = 'ハイエース白 車検期限';               // 現場名
+    row[4] = '';                                  // 氏名（正当に空）
+    row[9] = '車検期限日 なにわ432そ8800';          // メモ
+    row[10] = '予定';                              // 夜勤
+    row[11] = 'グローライズ';                       // 会社
+    row[12] = 'VKEN_なにわ432そ8800';               // ID
+    row[13] = '車検期限登録';                       // 更新者
+    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
+                   members:[], genbaMaster:[], jobsites:[] };
+
+    const out = parseGasPayload(json);
+    expect(out.nippo).toHaveLength(1);
+    expect(out.nippo[0]).toMatchObject({
+      id: 'VKEN_なにわ432そ8800', sagyoubi: '2026-10-16', genba: 'ハイエース白 車検期限',
+      shimei: '', memo: '車検期限日 なにわ432そ8800', yakin: '予定', koushinsha: '車検期限登録'
+    });
+  });
+
+  it('作業日が空の行も捨てられないこと（IDと氏名だけの行）', () => {
+    const row = new Array(19).fill('');
+    row[4] = '森'; row[12] = 'id-no-date';
+    const json = { status:'ok', compact:1, headers:HEADERS, rows:[row],
+                   members:[], genbaMaster:[], jobsites:[] };
+    expect(parseGasPayload(json).nippo).toHaveLength(1);
+  });
+
+  it('同名・同会社の職人が3件あったら3件とも保持されること（元データの重複を畳まない）', () => {
+    const json = {
+      status: 'ok', compact: 1, headers: HEADERS, rows: [],
+      members: [
+        { name: '林電工(りんたろう)', company: '和信カインド', division: '電気', rate: 15000 },
+        { name: '林電工(りんたろう)', company: '和信カインド', division: '電気', rate: 15000 },
+        { name: '林電工(りんたろう)', company: '和信カインド', division: '電気', rate: 15000 }
+      ],
+      genbaMaster: [], jobsites: []
+    };
+    const out = parseGasPayload(json);
+    expect(out.members).toHaveLength(3);
+    for (const m of out.members) {
+      expect(m).toEqual({ name: '林電工(りんたろう)', company: '和信カインド', division: '電気' });
+    }
+  });
+
+  it('並び順が入力順のまま保たれること（重複排除・並び替えをしない）', () => {
+    const rows = [];
+    for (const id of ['c-3', 'a-1', 'b-2', 'a-1']) {  // 意図的に非ソート順＋重複ID
+      const row = new Array(19).fill('');
+      row[1] = '2026-05-02'; row[4] = '森'; row[12] = id;
+      rows.push(row);
+    }
+    const json = { status:'ok', compact:1, headers:HEADERS, rows,
+                   members:[], genbaMaster:[], jobsites:[] };
+    const out = parseGasPayload(json);
+    expect(out.nippo.map(r => r.id)).toEqual(['c-3', 'a-1', 'b-2', 'a-1']);
+  });
+
+  it('会社名(元請)・現場名が空の genba/jobsites 行も捨てられないこと', () => {
+    const json = {
+      status: 'ok', compact: 1, headers: HEADERS, rows: [],
+      members: [], genbaMaster: [{ name: '', company: '' }],
+      jobsites: [{ genba: '', loc: '', jobNo: '', completed: 0, billingMethod: '' }]
+    };
+    const out = parseGasPayload(json);
+    expect(out.genba).toHaveLength(1);
+    expect(out.jobsites).toHaveLength(1);
   });
 });
 

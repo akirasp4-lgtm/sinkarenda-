@@ -20,12 +20,15 @@ export function parseGasPayload(json) {
   const pos = {};
   json.headers.forEach((h, i) => { pos[h] = i; });
 
+  // ★2026-08-24 設計変更：行を捨てるフィルタは全部やめる。スプレッドシートは
+  // 「行を一意に識別できる列」を持たない、ただの記録の羅列。氏名やIDが空の
+  // 行（車検期限リマインダー等、人が出る予定ではなく車両の期限を置いてある
+  // だけの行）も正当なデータであり、GASが返した行は1行残らず、返ってきた
+  // 順のままD1へ入れる（本番データ突き合わせで14行欠落が発覚した反省）。
   const nippo = [];
   for (const row of (json.rows || [])) {
     const rec = {};
     H.forEach((h, i) => { rec[COL[i]] = row[pos[h]]; });
-    if (!rec.id) continue;                       // 主キーにできない行は捨てる
-    if (!rec.sagyoubi || !rec.shimei) continue;  // 同上
     rec.kosu = Number(rec.kosu) || 0;
     // ★D1側の絞り込み（WHERE kaisha = ?）は完全一致のため、会社名セルに
     // 紛れ込んだ前後の空白をここ（格納時）で落としておく。GASのdoGetは
@@ -38,18 +41,20 @@ export function parseGasPayload(json) {
   }
 
   // ★単価(rate)は落とす。給料情報をD1へ持ち込まない（2026-06-11の方針）。
+  // ★重複排除・空値フィルタはしない。同名・同会社の重複行（元データの重複）
+  // も、GASが返す順のままそのまま保持する。
   const members = (json.members || []).map(m => ({
     name: String(m.name || ''), company: String(m.company || ''), division: String(m.division || '')
-  })).filter(m => m.name);
+  }));
 
   const genba = (json.genbaMaster || []).map(g => ({
     name: String(g.name || ''), company: String(g.company || '')
-  })).filter(g => g.name);
+  }));
 
   const jobsites = (json.jobsites || []).map(j => ({
     genba: String(j.genba || ''), loc: String(j.loc || ''), jobNo: String(j.jobNo || ''),
     completed: j.completed ? 1 : 0, billingMethod: String(j.billingMethod || '')
-  })).filter(j => j.genba && j.loc);
+  }));
 
   return { nippo, members, genba, jobsites };
 }
@@ -108,25 +113,30 @@ export async function syncAll(env) {
     const url = env.GAS_URL + '?compact=1&company=&t=' + Date.now();
     const parsed = parseGasPayload(await fetchWithRetry(url, 3));
 
+    // ★2026-08-24 設計変更：nippo/members/genba/jobsitesは複合主キーを
+    // やめ、連番(seq)だけが主キーになった。行同士がぶつかって上書きされる
+    // ことは起きなくなったため、"OR REPLACE" は意味を持たない（=ここでの
+    // INSERTは常に新規行として入る）。重複排除はしない設計であることを
+    // コードの意図として明確にするため、素の INSERT にしている。
     const stmts = [];
     // 全件入れ替え。日報は削除も起きるため差分ではなく総入れ替えにする。
     stmts.push(env.DB.prepare('DELETE FROM nippo'));
     const ins = env.DB.prepare(
-      `INSERT OR REPLACE INTO nippo (${COL.join(',')}) VALUES (${COL.map(() => '?').join(',')})`
+      `INSERT INTO nippo (${COL.join(',')}) VALUES (${COL.map(() => '?').join(',')})`
     );
     for (const r of parsed.nippo) stmts.push(ins.bind(...COL.map(c => r[c])));
 
     stmts.push(env.DB.prepare('DELETE FROM members'));
-    const im = env.DB.prepare('INSERT OR REPLACE INTO members (name,company,division) VALUES (?,?,?)');
+    const im = env.DB.prepare('INSERT INTO members (name,company,division) VALUES (?,?,?)');
     for (const m of parsed.members) stmts.push(im.bind(m.name, m.company, m.division));
 
     stmts.push(env.DB.prepare('DELETE FROM genba'));
-    const ig = env.DB.prepare('INSERT OR REPLACE INTO genba (name,company) VALUES (?,?)');
+    const ig = env.DB.prepare('INSERT INTO genba (name,company) VALUES (?,?)');
     for (const g of parsed.genba) stmts.push(ig.bind(g.name, g.company));
 
     stmts.push(env.DB.prepare('DELETE FROM jobsites'));
     const ij = env.DB.prepare(
-      'INSERT OR REPLACE INTO jobsites (genba,loc,jobNo,completed,billingMethod) VALUES (?,?,?,?,?)');
+      'INSERT INTO jobsites (genba,loc,jobNo,completed,billingMethod) VALUES (?,?,?,?,?)');
     for (const j of parsed.jobsites) stmts.push(ij.bind(j.genba, j.loc, j.jobNo, j.completed, j.billingMethod));
 
     // ★500文ずつに分割して投げる（D1のbatch上限対策）。
