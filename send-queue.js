@@ -140,6 +140,32 @@
       });
     }
 
+    function findItem(st, id) {
+      for (var i = 0; i < st.items.length; i++) {
+        if (st.items[i].id === String(id)) return st.items[i];
+      }
+      return null;
+    }
+
+    // tokenは「どのタブの、何回目の試行か」。これが一致しない限り
+    // markSent/markFailed は反映しない（古い試行が新しい試行の状態を
+    // 上書きするのを防ぐ。sync-guard.jsの5回目レビュー修正7と同じ考え方）。
+    function tokenOf(item) { return item.owner + ':' + item.attempts; }
+
+    // 今この項目を拾ってよいか。
+    function isDue(it, now) {
+      if (it.gaveUp) return false;
+      if ((it.nextAt || 0) > now) return false;
+      // 誰かが送信中（リース有効）なら、その持ち主以外は拾わない
+      if (it.claimedAt && (it.claimedAt + leaseMs) > now && it.owner !== tabId) return false;
+      // ★初回送信は enqueue したタブだけが行う（設計書D2(a)）。
+      // 他タブはリース経過後にしか拾わない＝そのときは必ず wasRetry になり、
+      // 存在確認（画面側）が働くため二重登録にならない。
+      if ((it.attempts || 0) === 0 && it.owner && it.owner !== tabId
+          && (now - (it.createdAt || 0)) < leaseMs) return false;
+      return true;
+    }
+
     return {
       isStorageUsable: function () { return usable; },
 
@@ -173,6 +199,85 @@
           cloneRows(it.rows || []).forEach(function (r) { out.push(r); });
         });
         return out;
+      },
+
+      nextDue: function (now) {
+        var n = typeof now === 'number' ? now : 0;
+        var st = readState();
+        for (var i = 0; i < st.items.length; i++) {
+          if (isDue(st.items[i], n)) return copyItems([st.items[i]])[0];
+        }
+        return null;
+      },
+
+      // ★fetchの前に attempts を +1 して永続化する（設計書D9）。
+      // Task 1で導入した mutate() を通す＝「直前に読み直してから変更して書く」ため、
+      // 別タブが後から入れた未送信を巻き込まずに済む（fnの中でawaitは挟まない）。
+      // 永続化できなければ null を返して送らせない（記録が残らない以上、
+      // 次回に再送扱いへ倒せず、二重登録の危険が残るため。mutate().ok で判定する）。
+      beginSend: function (id, now) {
+        var n = typeof now === 'number' ? now : 0;
+        var found = false;
+        var token = null;
+        var wasRetry = false;
+        var m = mutate(function (st) {
+          var it = findItem(st, id);
+          if (!it || !isDue(it, n)) return;
+          found = true;
+          wasRetry = (it.attempts || 0) >= 1;
+          it.attempts = (it.attempts || 0) + 1;
+          it.owner = tabId;
+          it.claimedAt = n;
+          token = tokenOf(it);
+        });
+        if (!found || !m.ok) return null;
+        return { token: token, wasRetry: wasRetry };
+      },
+
+      markSent: function (id, token) {
+        var found = false;
+        mutate(function (st) {
+          var it = findItem(st, id);
+          if (!it || tokenOf(it) !== String(token)) return;
+          found = true;
+          st.items = st.items.filter(function (x) { return x !== it; });
+        });
+        return found;
+      },
+
+      markFailed: function (id, token, message, now) {
+        var n = typeof now === 'number' ? now : 0;
+        var found = false;
+        mutate(function (st) {
+          var it = findItem(st, id);
+          if (!it || tokenOf(it) !== String(token)) return;
+          found = true;
+          var idx = Math.min(Math.max((it.attempts || 1) - 1, 0), backoffMs.length - 1);
+          it.nextAt = n + backoffMs[idx];
+          it.lastError = String(message || '');
+          it.claimedAt = 0;
+          if ((it.attempts || 0) >= giveUpAfter) it.gaveUp = true;
+        });
+        return found;
+      },
+
+      retryNow: function (id, now) {
+        var n = typeof now === 'number' ? now : 0;
+        var found = false;
+        mutate(function (st) {
+          var it = findItem(st, id);
+          if (!it) return;
+          found = true;
+          it.gaveUp = false;
+          it.nextAt = 0;
+          it.claimedAt = 0;
+          it.owner = tabId;
+        });
+        return found;
+      },
+
+      gaveUpCount: function () {
+        return readState().items.filter(function (it) { return !!it.gaveUp; }).length;
       },
 
       // ★Task 2以降（beginSend/markSent/markFailed/retryNow等）が同じ入口を

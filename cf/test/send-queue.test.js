@@ -174,3 +174,133 @@ describe('send-queue.js Task1: 箱（永続化・投入・一覧）', () => {
     expect(q.pendingRows().length).toBe(3);
   });
 });
+
+describe('send-queue.js Task2: 送信権・バックオフ・諦め', () => {
+  it('enqueue した直後は nextDue で取れる', () => {
+    const q = SQ.createSendQueue({ storage: makeStorage(), tabId: 'tab-a' });
+    q.enqueue(ITEM, 1000);
+    expect(q.nextDue(1000).id).toBe('ID-1');
+  });
+
+  it('beginSend は fetch の前に attempts を +1 して永続化する（D9の本体）', () => {
+    const st = makeStorage();
+    const q = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    q.enqueue(ITEM, 1000);
+    const r = q.beginSend('ID-1', 1000);
+    expect(r).not.toBeNull();
+    expect(r.wasRetry).toBe(false);
+    // 別インスタンス＝storageから読み直しても attempts が1になっている
+    const other = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
+    expect(other.list()[0].attempts).toBe(1);
+  });
+
+  it('★送信中に落ちて失敗の記録が残らなくても、次は再送扱い（wasRetry:true）になる', () => {
+    const st = makeStorage();
+    const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    a.enqueue(ITEM, 1000);
+    a.beginSend('ID-1', 1000);   // ここでタブが落ちた想定（markSent も markFailed も呼ばれない）
+    const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
+    const r = b.beginSend('ID-1', 1000 + 31000); // リース切れ後に別タブが拾う
+    expect(r).not.toBeNull();
+    expect(r.wasRetry).toBe(true); // ← ここが false だと二重登録になる
+  });
+
+  it('attempts の永続化に失敗したら beginSend は null を返す（記録できないなら送らない）', () => {
+    const st = makeStorage();
+    const q = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    q.enqueue(ITEM, 1000);
+    st.failSet = true;
+    expect(q.beginSend('ID-1', 1000)).toBeNull();
+  });
+
+  it('2つのタブが同時に beginSend しても、送信権を取れるのは片方だけ', () => {
+    const st = makeStorage();
+    const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
+    a.enqueue(ITEM, 1000);
+    const ra = a.beginSend('ID-1', 1000);
+    const rb = b.beginSend('ID-1', 1000);
+    expect(ra).not.toBeNull();
+    expect(rb).toBeNull();
+  });
+
+  it('初回送信は enqueue したタブだけが行う（他タブはリース経過まで拾わない）', () => {
+    const st = makeStorage();
+    const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    a.enqueue(ITEM, 1000);
+    const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
+    expect(b.nextDue(1000)).toBeNull();             // まだ拾わない
+    expect(b.nextDue(1000 + 31000)).not.toBeNull(); // リース経過後は拾う
+  });
+
+  it('markSent は箱から消す。token が違えば消さない（古い試行が新しい試行を消せない）', () => {
+    const q = SQ.createSendQueue({ storage: makeStorage(), tabId: 'tab-a' });
+    q.enqueue(ITEM, 1000);
+    const r = q.beginSend('ID-1', 1000);
+    expect(q.markSent('ID-1', 'ちがうtoken')).toBe(false);
+    expect(q.count()).toBe(1);
+    expect(q.markSent('ID-1', r.token)).toBe(true);
+    expect(q.count()).toBe(0);
+  });
+
+  it('markFailed でバックオフが 5秒→15秒→45秒→2分→5分 と伸び、5分で頭打ちになる', () => {
+    // ★時刻を進めながら回すこと。markFailed が nextAt を未来に置くため、
+    // now を進めずに beginSend を呼ぶと isDue が false になり null が返る。
+    const q = SQ.createSendQueue({ storage: makeStorage(), tabId: 'tab-a', giveUpAfter: 99 });
+    q.enqueue(ITEM, 0);
+    const waits = [];
+    let now = 0;
+    for (let i = 0; i < 7; i++) {
+      const r = q.beginSend('ID-1', now);
+      expect(r).not.toBeNull();
+      q.markFailed('ID-1', r.token, 'えらー', now);
+      const nextAt = q.list()[0].nextAt;
+      waits.push(nextAt - now);
+      now = nextAt;   // バックオフ明けまで進める
+    }
+    expect(waits).toEqual([5000, 15000, 45000, 120000, 300000, 300000, 300000]);
+  });
+
+  it('バックオフ中は nextDue に出てこない', () => {
+    const q = SQ.createSendQueue({ storage: makeStorage(), tabId: 'tab-a' });
+    q.enqueue(ITEM, 0);
+    const r = q.beginSend('ID-1', 0);
+    q.markFailed('ID-1', r.token, 'えらー', 0);
+    expect(q.nextDue(4999)).toBeNull();
+    expect(q.nextDue(5000)).not.toBeNull();
+  });
+
+  it('giveUpAfter 回失敗したら自動再送を止める（勝手に捨てない・件数は残る）', () => {
+    const q = SQ.createSendQueue({ storage: makeStorage(), tabId: 'tab-a', giveUpAfter: 3 });
+    q.enqueue(ITEM, 0);
+    let now = 0;
+    for (let i = 0; i < 3; i++) {
+      const r = q.beginSend('ID-1', now);   // ★バックオフ明けまで now を進める
+      expect(r).not.toBeNull();
+      q.markFailed('ID-1', r.token, 'えらー', now);
+      now = q.list()[0].nextAt;
+    }
+    expect(q.list()[0].gaveUp).toBe(true);
+    expect(q.gaveUpCount()).toBe(1);
+    expect(q.count()).toBe(1);                    // 捨てていない
+    expect(q.nextDue(999999999)).toBeNull();      // 自動では拾わない
+  });
+
+  it('retryNow で諦めた項目を手動で送り直せる', () => {
+    const q = SQ.createSendQueue({ storage: makeStorage(), tabId: 'tab-a', giveUpAfter: 1 });
+    q.enqueue(ITEM, 0);
+    const r = q.beginSend('ID-1', 0);
+    q.markFailed('ID-1', r.token, 'えらー', 0);
+    expect(q.nextDue(999999999)).toBeNull();
+    expect(q.retryNow('ID-1', 0)).toBe(true);
+    expect(q.nextDue(0)).not.toBeNull();
+  });
+
+  it('存在しないIDへの操作は false / null を返して落ちない', () => {
+    const q = SQ.createSendQueue({ storage: makeStorage(), tabId: 'tab-a' });
+    expect(q.beginSend('ない', 0)).toBeNull();
+    expect(q.markSent('ない', 't')).toBe(false);
+    expect(q.markFailed('ない', 't', 'e', 0)).toBe(false);
+    expect(q.retryNow('ない', 0)).toBe(false);
+  });
+});
