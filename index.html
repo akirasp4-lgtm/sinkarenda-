@@ -3154,6 +3154,9 @@ function getDisplayedGroups(){
 async function deleteGroup(idx){
   const groups=getDisplayedGroups();
   const g=groups[idx];if(!g)return;
+  // ★レビュー修正ラウンド2・Critical C-1: 現在のUIから到達不能な関数だが、
+  // action:'delete'を送る全箇所を機械的に洗い出した結果として防御的に統一。
+  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから削除してください');return;}
   if(!confirm('この日報を削除しますか？'))return;
   const ids=[...new Set(g.ids)];
   setLoading(true);
@@ -3198,9 +3201,13 @@ function onEditDateChange(){
 }
 
 function openEditModal(idx,groupsOverride){
-  bulkEditMode=false;
   const groups=groupsOverride!==null?groupsOverride:getDisplayedGroups();
   const g=groups[idx];if(!g)return;
+  // ★レビュー修正ラウンド2・Critical C-1: 単一編集の入口（詳細画面の編集・
+  // 現場管理タブの編集ボタン）を一元的に塞ぐ。取りこぼしても最終的にsaveEdit側の
+  // ガードで止まるが、ここで止めれば編集モーダルすら開かないぶん体験が良い。
+  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+  bulkEditMode=false;
   editIds=[...new Set(g.ids)];editDate=g.date;
   window._editIds=editIds;window._editDates=[editDate];
   // 単一編集時は作業日フィールドを表示・入力可能に
@@ -3234,6 +3241,12 @@ async function saveEdit(){
   const btn=document.getElementById('save-edit-btn');
   if(btn.disabled)return;
   if(!dataLoadOk){showAlert('最新データを読み込めていないため保存できません。「更新」を押してください','err');return;}
+  // ★レビュー修正ラウンド2・Critical C-1: action:'update'を送る箇所は本関数の
+  // 1箇所のみ（openEditModal/openBulkEditModalのどちらから開かれても、保存は
+  // 必ずここを通る）。取りこぼしを防ぐ唯一の場所として、ここで最終的に塞ぐ
+  // （openEditModal/openBulkEditModal側にも早期ガードを入れて開かせない
+  // ようにするが、それらは利便性のためであり、正しさの根拠はここにある）。
+  if(isGroupPending({ids:editIds})){alert('チェックした（または開いた）予定の中に、まだ送信中のものが含まれています。送信が終わってから保存してください');return;}
   const genba=getGenbaValue('e');
   const loc=document.getElementById('e-location').value.trim();
   const start=document.getElementById('e-start').value;
@@ -3467,6 +3480,9 @@ function openBulkEditModal(){
   if(checked.length===0)return;
   const targets=checked.map(c=>groups[Number(c.dataset.idx)]).filter(Boolean);
   if(targets.length===0)return;
+  // ★レビュー修正ラウンド2・Critical C-1: 一括編集はopenEditModalを経由しない
+  // 別経路（機械的な洗い出しで判明）。ここにも同じガードが要る。
+  if(targets.some(isGroupPending)){alert('チェックした中に、まだ送信中の予定が含まれています。送信が終わってから編集してください');return;}
   bulkEditMode=true;
   editIds=[...new Set(targets.flatMap(g=>g.ids))];
   editDates=[...new Set(targets.map(g=>g.date))];
@@ -3502,6 +3518,11 @@ async function deleteGmChecked(){
   const checked=[...document.querySelectorAll('.gm-day-check:checked')];
   if(checked.length===0)return;
   const targets=checked.map(c=>groups[Number(c.dataset.idx)]).filter(Boolean);
+  // ★レビュー修正ラウンド2・Critical C-1: 現場管理タブ（元請/人で探す/ピン留めの
+  // どのモードもrenderGmList経由でこのボタンを共有する）はfilteredNippos()ベースで
+  // 未送信を除外していないため、未送信の日も普通にチェック対象へ出てくる。
+  // チェックした中に未送信が1件でも含まれていたら、確認ダイアログの前に弾く。
+  if(targets.some(isGroupPending)){alert('チェックした中に、まだ送信中の予定が含まれています。送信が終わってから削除してください');return;}
   const dateList=targets.map(g=>formatDate(g.date)).join('、');
   if(!confirm(`以下の日程を削除します。\n${dateList}\n\nよろしいですか？`))return;
   const ids=[...new Set(targets.flatMap(g=>g.ids))];
