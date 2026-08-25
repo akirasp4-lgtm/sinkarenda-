@@ -12,6 +12,10 @@
 
 ## Global Constraints
 
+- **計画書に書いてある行番号は「元のファイル」の位置であり、目安でしかない。**
+  Task 3 が `index.html` に行を挿入するため、Task 4 以降では実際の行番号がずれる。
+  **必ず引用してあるコードの中身で場所を特定すること**（行番号で探して当てない）
+
 - **`gas.js` を1行も変更しない。** Cloudflare（`cf/src/`）・D1・`backend.json` も変更しない
 - 触ってよいのは `send-queue.js`（新規）/ `index.html` / `admin.html` / `cf/test/send-queue.test.js`（新規）のみ
 - **`index.html` と `admin.html` の変更は1文字も差があってはならない**（過去のレビューで両画面の乖離が繰り返し重大指摘になっている。行番号だけが違う）
@@ -116,6 +120,33 @@ describe('send-queue.js Task1: 箱（永続化・投入・一覧）', () => {
     expect(b.count()).toBe(1);
   });
 
+  it('★既に読み込み済みのqueueでも、別タブが後から入れた項目が見える（メモリに抱え込まない）', () => {
+    const st = makeStorage();
+    const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    expect(a.count()).toBe(0);        // ここで一度読ませる
+    const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
+    b.enqueue(ITEM, 1000);            // 別タブが後から入れる
+    expect(a.count()).toBe(1);        // ← 0 のままだと下のテストで消える
+  });
+
+  it('★別タブが後から入れた項目を、先に開いていたタブの書き込みが消さない（未送信の消失防止）', () => {
+    const st = makeStorage();
+    const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    expect(a.count()).toBe(0);        // 先に開いていたタブが一度読む
+    const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
+    b.enqueue({ id: 'B-1', rows: [ROW], company: 'X' }, 1000);
+    a.enqueue({ id: 'A-1', rows: [ROW], company: 'X' }, 2000);
+    const ids = SQ.createSendQueue({ storage: st, tabId: 'tab-c' }).list().map(x => x.id);
+    expect(ids.sort()).toEqual(['A-1', 'B-1']);   // どちらも残っていること
+  });
+
+  it('storageが使えないときはメモリで動く（このタブの中では送信を続けられる）', () => {
+    const q = SQ.createSendQueue({ storage: makeStorage({ failSet: true }), tabId: 'tab-a' });
+    expect(q.isStorageUsable()).toBe(false);
+    expect(q.enqueue(ITEM, 1000)).toBe(true);
+    expect(q.count()).toBe(1);
+  });
+
   it('maxItems を超えたら enqueue が false を返す（呼び出し側は従来どおり同期送信に倒す）', () => {
     const q = SQ.createSendQueue({ storage: makeStorage(), tabId: 'tab-a', maxItems: 2 });
     expect(q.enqueue({ id: 'A', rows: [ROW], company: 'X' }, 1)).toBe(true);
@@ -199,14 +230,20 @@ Expected: FAIL（`Cannot find module '../../send-queue.js'`）
       } catch (e) { usable = false; }
     }
 
-    // メモリ側にも常に持つ。storageが途中で書けなくなっても、このタブの中では
-    // 送信を続けられるようにするため（ただしusableはfalseに落とす）。
+    // storageが使えなくなったときだけ使う控え。usableな間はこれを読まない。
     var memory = null;
 
+    // ★着手前スキャンで発見した欠陥（2026-08-25）:
+    // 「一度読んだらメモリに抱えて二度とstorageを読み直さない」実装にすると、
+    // 別タブが後から入れた未送信を、先に開いていたタブが見失う。さらに
+    // writeStateは状態を丸ごと書き戻すため、先に開いていたタブが次に何か
+    // 書いた時点で **別タブの未送信が消える**（登録が黙って失われる＝
+    // このアプリで一番防ぎたい事故）。
+    // → storageが使える間は毎回storageから読み直す。localStorageの読み取りは
+    //   小さなJSONのparseなので、この頻度では速度上の問題にならない。
     function readState() {
-      if (memory) return memory;
-      var st = { v: 1, items: [] };
-      if (storage) {
+      if (storage && usable) {
+        var st = { v: 1, items: [] };
         try {
           var raw = storage.getItem(storageKey);
           if (raw) {
@@ -214,9 +251,11 @@ Expected: FAIL（`Cannot find module '../../send-queue.js'`）
             if (parsed && Array.isArray(parsed.items)) st = { v: 1, items: parsed.items };
           }
         } catch (e) { /* 壊れていたら空として扱う */ }
+        memory = st;
+        return st;
       }
-      memory = st;
-      return st;
+      if (!memory) memory = { v: 1, items: [] };
+      return memory;
     }
 
     function writeState(st) {
@@ -295,7 +334,7 @@ Expected: FAIL（`Cannot find module '../../send-queue.js'`）
 - [ ] **Step 4: テストが通ることを確認**
 
 Run: `cd cf && npx vitest run`
-Expected: PASS（既存153件＋新規10件＝163件）
+Expected: PASS（既存153件＋新規14件＝167件）
 
 - [ ] **Step 5: コミット**
 
@@ -571,7 +610,7 @@ Expected: FAIL（`q.nextDue is not a function`）
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `cd cf && npx vitest run`
-Expected: PASS（既存153件＋Task1の10件＋Task2の12件＝175件）
+Expected: PASS（既存153件＋Task1の14件＋Task2の12件＝179件）
 
 - [ ] **Step 6: コミット**
 
@@ -739,7 +778,7 @@ try{
 node --check send-queue.js
 cd cf && npx vitest run
 ```
-Expected: エラー無し／175件 PASS
+Expected: エラー無し／179件 PASS
 
 - [ ] **Step 7: 見た目が変わっていないことを確認**
 
@@ -916,7 +955,7 @@ function renderPendingUi(){
 - [ ] **Step 7: テスト**
 
 Run: `cd cf && npx vitest run`
-Expected: 175件 PASS（既存を1件も壊していないこと）
+Expected: 179件 PASS（既存を1件も壊していないこと）
 
 - [ ] **Step 8: コミット**
 
@@ -973,7 +1012,7 @@ Expected: 2つの数が一致
 - [ ] **Step 4: テスト**
 
 Run: `cd cf && npx vitest run`
-Expected: 175件 PASS
+Expected: 179件 PASS
 
 - [ ] **Step 5: コミット**
 
@@ -992,7 +1031,7 @@ git commit -m "feat(admin.html): index.htmlと同一の楽観的保存を反映"
 - [ ] **Step 1: 自動テストの全件確認**
 
 Run: `cd cf && npx vitest run`
-Expected: 175件 PASS。**4回連続で実行し、不安定なテストが無いことを確認する。**
+Expected: 179件 PASS。**4回連続で実行し、不安定なテストが無いことを確認する。**
 
 - [ ] **Step 2: 手で確かめる項目を洗い出して記録する**
 
