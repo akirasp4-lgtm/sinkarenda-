@@ -188,6 +188,11 @@
         var id = String(item.id || '');
         var rows = Array.isArray(item.rows) ? item.rows : [];
         if (!id || rows.length === 0) return false;
+        // ★修正ラウンド3: 同一idの再投入を拒否する。受け入れると attempts が
+        // 0に巻き戻り、送信開始済みの項目が「初回」扱いで再送されて予定が
+        // 二重になる。呼び出し側は id を毎回新規採番する契約（submitNippo の
+        // uuid()）だが、「到達しない前提」に頼らず構造で閉じる。
+        if (readItem(id)) return false;
         if (listAllItems().length >= maxItems) return false;
         writeItem({
           id: id, rows: cloneRows(rows), company: String(item.company || ''),

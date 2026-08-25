@@ -492,4 +492,25 @@ describe('send-queue.js Task2: 送信権・バックオフ・諦め', () => {
     expect(after.lastError).toBe(before.lastError);
     expect(after.gaveUp).toBe(before.gaveUp);
   });
+
+  // ★修正ラウンド3: 同一idの再enqueueを受け入れると attempts が0に巻き戻り、
+  // 送信開始済みの項目が「初回」扱いで拾い直されてしまう（wasRetry:falseに
+  // なる＝二重登録に至る類型）。呼び出し側はidを毎回新規採番する契約だが、
+  // 「到達しない前提」に頼らず構造で閉じる。
+  it('★修正ラウンド3: beginSend済みの項目と同じidでenqueueしても拒否され、attemptsが巻き戻らない（拾い直しがwasRetry:falseにならない）', () => {
+    const st = makeStorage();
+    const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    a.enqueue(ITEM, 1000);
+    const r = a.beginSend('ID-1', 1000); // attempts=1
+    expect(r).not.toBeNull();
+
+    expect(a.enqueue(ITEM, 2000)).toBe(false); // 同一idの再投入は拒否
+    expect(a.list()[0].attempts).toBe(1);      // 巻き戻っていない
+    expect(a.count()).toBe(1);                 // 増えてもいない
+
+    const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
+    const r2 = b.beginSend('ID-1', 1000 + 31000); // リース経過後に拾い直す
+    expect(r2).not.toBeNull();
+    expect(r2.wasRetry).toBe(true); // ← ここが false だと二重登録になる
+  });
 });
