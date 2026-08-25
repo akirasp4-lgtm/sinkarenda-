@@ -102,6 +102,27 @@ describe('send-queue.js Task1: 箱（永続化・投入・一覧）', () => {
     expect(q.count()).toBe(1);
   });
 
+  // ★修正ラウンド1・Important-2（レビュー指摘・再現済み）: 生成時のプローブは
+  // 成功する（isStorageUsable()===true）が、直後にquotaが満杯になり、まさに
+  // このenqueue自身の書き込みで初めて失敗するケース。従来はwriteItemの成否を
+  // 見ずにtrueを返していたため、呼び出し側に「箱に入った」と伝わるのに実際は
+  // localStorageに書かれておらず、usableがfalseに落ちて以後beginSendが常にnull
+  // ＝タブを閉じた瞬間に未送信が消える事故になっていた。
+  // 上の「storageが使えないときはメモリで動く」テスト（プローブの時点で既に
+  // 使えない）とは区別する: あちらは意図的な既存の縮退運転（Task1由来）なので
+  // 壊さない。こちらは「使える前提で受理したのに、その場で壊れた」場合であり、
+  // falseを返して呼び出し側を同期送信へ倒すのが正しい。
+  it('★Important-2: プローブは成功するがenqueue自身のsetItemが失敗する場合、enqueueはfalseを返しcount()も増えない', () => {
+    const st = makeStorage(); // プローブは成功する
+    const q = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    expect(q.isStorageUsable()).toBe(true);
+    st.failSet = true; // このタイミングでquotaが満杯になったと仮定
+    expect(q.enqueue(ITEM, 1000)).toBe(false);
+    expect(q.count()).toBe(0);
+    expect(q.list()).toEqual([]);
+    expect(q.isStorageUsable()).toBe(false); // 書き込み失敗でusableも落ちる
+  });
+
   it('maxItems を超えたら enqueue が false を返す（呼び出し側は従来どおり同期送信に倒す）', () => {
     const q = SQ.createSendQueue({ storage: makeStorage(), tabId: 'tab-a', maxItems: 2 });
     expect(q.enqueue({ id: 'A', rows: [ROW], company: 'X' }, 1)).toBe(true);

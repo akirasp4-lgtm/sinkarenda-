@@ -173,8 +173,17 @@
       // 誰かが送信中（リース有効）なら、その持ち主以外は拾わない
       if (it.claimedAt && (it.claimedAt + leaseMs) > now && it.owner !== tabId) return false;
       // ★初回送信は enqueue したタブだけが行う（設計書D2(a)）。
-      // 他タブはリース経過後にしか拾わない＝そのときは必ず wasRetry になり、
-      // 存在確認（画面側）が働くため二重登録にならない。
+      // 他タブが拾えるのはリース経過後（(now-createdAt)>=leaseMs）。attempts>=1
+      // （＝enqueueしたタブが少なくとも1回は送信を試みている）で拾った場合は
+      // wasRetryになり、存在確認（画面側のcheckAlreadyLanded）が働くため
+      // 二重登録にならない。
+      // ★修正ラウンド1・Minor-3: 「他タブはリース経過後にしか拾わない＝そのときは
+      // 必ずwasRetryになる」という以前のコメントは不正確だった。attempts=0のまま
+      // （＝enqueueしたタブがbeginSendを一度も呼べておらず、ネットワークには一度も
+      // 出ていない）リースだけが経過したケースでは、拾った側もattempts=0からの
+      // 開始になりwasRetryにならない。ただしこの場合は元のタブが一度も送信して
+      // いないので「初回送信」がここで初めて行われるだけであり、動作としては
+      // 安全（二重にはならない）。
       if ((it.attempts || 0) === 0 && it.owner && it.owner !== tabId
           && (now - (it.createdAt || 0)) < leaseMs) return false;
       return true;
@@ -194,12 +203,29 @@
         // uuid()）だが、「到達しない前提」に頼らず構造で閉じる。
         if (readItem(id)) return false;
         if (listAllItems().length >= maxItems) return false;
-        writeItem({
+        // ★修正ラウンド1・Important-2: 生成時のプローブ（usable判定）を通っていても、
+        // この項目自身の書き込みでquota満杯等により初めて失敗することがある。
+        // 従来はwriteItemの成否を見ずに常にtrueを返していたため、呼び出し側には
+        // 「箱に入った」と伝わるのに実際はlocalStorageに書かれておらず、usableが
+        // falseに落ちて以後beginSendが常にnullを返す＝タブを閉じた瞬間にこの
+        // 未送信が消える事故になっていた（レビュー指摘・再現済み）。
+        // usableが「この呼び出しの直前まではtrueだった」のに書き込みが失敗した
+        // 場合だけ、この項目を受理しなかったことにする（memoryからも消して
+        // falseを返す。残すとdrainQueueが後から拾って実体の無い送信を試みる）。
+        // 呼び出し側（submitNippo）はfalseを見て従来どおり同期送信に倒れる。
+        // ★一方、usableが最初（コンストラクタのプローブ）からfalseだったタブは
+        // 従来どおりメモリ運転で受理してtrueを返す（Task1由来の既存動作を維持。
+        // 実運用ではTask4のsubmitNippoがisStorageUsable()を先に見てそもそも
+        // enqueueを呼ばない設計だが、直接呼び出す既存テスト・呼び出し側の
+        // 後方互換のため残す）。
+        var wasUsable = usable;
+        var ok = writeItem({
           id: id, rows: cloneRows(rows), company: String(item.company || ''),
           createdAt: typeof now === 'number' ? now : 0,
           attempts: 0, nextAt: 0, lastError: '', gaveUp: false,
           owner: tabId, claimedAt: 0
         });
+        if (!ok && wasUsable) { memory.delete(id); return false; }
         return true;
       },
 

@@ -2295,7 +2295,16 @@ async function checkAlreadyLanded(item){
   if(!json||json.status!=='ok')throw new Error('確認のための読み取りに失敗しました');
   const rows=json.compact?expandCompactRows(json.headers,json.rows):json.rows;
   const seen=new Set((rows||[]).map(r=>String((r&&(r.ID!==undefined?r.ID:r.id))||'')));
-  return (item.rows||[]).some(r=>seen.has(String(r.id||'')));
+  // ★修正ラウンド1・Important-1: 空文字は「一致」と見なさない。事務がシートを
+  // 直接編集してID空欄の行を作ることがあり、seenに''が入りうる。キュー側の
+  // item.rowsのidが（本来無いはずだが）空だった場合にseen.has('')へ誤一致すると、
+  // 送っていないのに「着地済み」と判定してmarkSentで消してしまい、職人の予定が
+  // 無言で消える。空文字はどちらの集合からも除外して一致対象から外す。
+  seen.delete('');
+  return (item.rows||[]).some(r=>{
+    const k=String(r.id||'');
+    return k!==''&&seen.has(k);
+  });
 }
 
 async function drainQueue(){
@@ -2344,7 +2353,12 @@ async function drainQueue(){
     // 修正済み）ので、次にページを開いたタブが正常に送信できる＝未送信は失われない。
     try{
       if(sendQueue.isStorageUsable()){
-        if(sendQueue.count()>0)scheduleDrain(5000);
+        // ★修正ラウンド1・Minor-1: count()はgaveUp（諦め）項目も数える。諦めた
+        // 項目しか残っていないのに再スケジュールし続けると、二度と送れないのに
+        // 5秒おきにタイマーが永久に回り続ける（スマホの電池の無駄）。バックオフ
+        // 待ち中の項目はgaveUpではないのでこの条件を満たし、引き続き再スケジュール
+        // される。
+        if(sendQueue.count()>sendQueue.gaveUpCount())scheduleDrain(5000);
       }else{
         renderPendingUi();
       }
@@ -4204,9 +4218,12 @@ if(needsCompanyPicker)showCompanyPicker();
 else{if(hydrateFromSnapshot(currentCompany))setStaleBadge(true);loadData();}
 
 // ★案A: 前回送れなかった登録を、アプリを開いたときと電波が戻ったときに送る
+// ★修正ラウンド1・Minor-2: 固定1000msだと、PWA復元等で複数タブが同時に開いたとき
+// 送信係の発火時刻が揃いやすい。beginSendの「書いて読み直す確認」は原子的ではない
+// （Task1・2で受容済みの残余競合）ため、乱数で少しずらして重なる窓をさらに狭める。
 try{
-  if(sendQueue.count()>0){renderPendingUi();scheduleDrain(1000);}
-  window.addEventListener('online',()=>scheduleDrain(1000));
+  if(sendQueue.count()>0){renderPendingUi();scheduleDrain(1000+Math.floor(Math.random()*2000));}
+  window.addEventListener('online',()=>scheduleDrain(1000+Math.floor(Math.random()*2000)));
 }catch(e){}
 
 // 管理者モード以外では事務タブを非表示
