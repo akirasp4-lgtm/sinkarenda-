@@ -2103,6 +2103,40 @@ async function submitNippo(){
     members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company:currentCompany,id:dayId,updatedBy:operator,color,jobNoDivision,workType,vehicle});});
   });
   const btn=document.getElementById('submit-btn');
+  const clearForm=()=>{
+    document.getElementById('s-genba').value='';document.getElementById('s-genba-select').value='';document.getElementById('s-genba').style.display='none';document.getElementById('s-location').value='';
+    document.getElementById('s-memo').value='';document.getElementById('s-leader').value='';
+    document.getElementById('s-date-end').value='';
+    const _v=document.getElementById('s-vehicle');if(_v)_v.value='';
+    refreshVehicleSelect('s');
+    const _wt=document.getElementById('s-work-type');if(_wt)_wt.value='';
+    applyWorkTypeLock('s');
+    const _ls=document.getElementById('s-location-select');if(_ls)_ls.value='';
+    const _li=document.getElementById('s-location');if(_li){_li.value='';_li.style.display='none';}
+    const _lse=document.getElementById('s-location-search');if(_lse)_lse.value='';
+    const _lsim=document.getElementById('s-loc-similar');if(_lsim){_lsim.style.display='none';_lsim.innerHTML='';}
+    document.getElementById('s-jobno-hint').style.display='none';
+    document.getElementById('s-jobno-div-wrap').style.display='none';
+    const _jnSel=document.getElementById('s-jobno-division');if(_jnSel){delete _jnSel.dataset.userSet;_jnSel.value='ICT';}
+    applyMode('s','');selectedMembers=[];renderMemberChips('member-selector',selectedMembers,toggleMember);
+  };
+
+  // ★案A: 箱が使えるときだけ楽観化する。使えないとき（localStorage不可・
+  // 上限超過・send-queue.js未読込）は従来どおり同期送信で待たせる＝安全側。
+  const canQueue=sendQueue.isStorageUsable()
+    &&sendQueue.enqueue({id:rows[0].id,rows:rows,company:currentCompany},Date.now());
+
+  if(canQueue){
+    hapticSuccess();
+    showAlert(`✓ ${dates.length}日×${members.length}人分を登録しました！（${currentCompany}）`,'ok');
+    clearForm();
+    addLocalRows(rows,{pending:true});
+    renderPendingUi();
+    drainQueue();               // awaitしない＝ここで待たせない
+    isSubmitting=false;btn.textContent='登録する';btn.disabled=(currentCompany==='全社');
+    return;
+  }
+
   isSubmitting=true;btn.textContent=`送信中（${dates.length}日分）...`;btn.disabled=true;
   try{
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'add',rows}),headers:{'Content-Type':'text/plain'}});
@@ -2110,21 +2144,7 @@ async function submitNippo(){
     if(json.status==='ok'){
       hapticSuccess();
       showAlert(`✓ ${dates.length}日×${members.length}人分を登録しました！（${currentCompany}）`,'ok');
-      document.getElementById('s-genba').value='';document.getElementById('s-genba-select').value='';document.getElementById('s-genba').style.display='none';document.getElementById('s-location').value='';
-      document.getElementById('s-memo').value='';document.getElementById('s-leader').value='';
-      document.getElementById('s-date-end').value='';
-      const _v=document.getElementById('s-vehicle');if(_v)_v.value='';
-      refreshVehicleSelect('s');
-      const _wt=document.getElementById('s-work-type');if(_wt)_wt.value='';
-      applyWorkTypeLock('s');
-      const _ls=document.getElementById('s-location-select');if(_ls)_ls.value='';
-      const _li=document.getElementById('s-location');if(_li){_li.value='';_li.style.display='none';}
-      const _lse=document.getElementById('s-location-search');if(_lse)_lse.value='';
-      const _lsim=document.getElementById('s-loc-similar');if(_lsim){_lsim.style.display='none';_lsim.innerHTML='';}
-      document.getElementById('s-jobno-hint').style.display='none';
-      document.getElementById('s-jobno-div-wrap').style.display='none';
-      const _jnSel=document.getElementById('s-jobno-division');if(_jnSel){delete _jnSel.dataset.userSet;_jnSel.value='ICT';}
-      applyMode('s','');selectedMembers=[];renderMemberChips('member-selector',selectedMembers,toggleMember);
+      clearForm();
       addLocalRows(rows);refreshInBackground();
     }else showAlert('エラー：'+json.message,'err');
   }catch(err){showAlert('送信エラー：'+err.message,'err');}
@@ -2181,13 +2201,47 @@ function hydrateFromSnapshot(company){
     const base=parseRows(s.compact?expandCompactRows(s.headers,s.rows):s.rows,'');
     if(!base.length)return false;
     allNippos=base.concat(generateGhosts(base));
+    applyPendingRows();
     allMembers=s.members||[];allGenbaMaster=s.genbaMaster||[];allJobsites=s.jobsites||[];
     rerenderAll();
     return true;
   }catch(e){console.error(e);return false;}
 }
-// ★案A: 未送信の帯と印。中身はTask4で実装する（ここでは何もしない）。
-function renderPendingUi(){}
+// ★案A: 未送信の帯。件数は全社分を出す（会社を切り替えていても
+// 見落とさないため・設計書D6）。タップで諦めた分も含めて手動再送する。
+// ★Task4で追加した判断（ブリーフに無い最適化・タスク指示(4)）: drainQueueは
+// 未送信を1件処理するたびにrenderPendingUiを呼ぶため、ブリーフのコードのまま
+// 毎回rerenderAll()すると、未送信が10件あれば10回カレンダー・一覧・事務タブ等の
+// 重い再描画が走ってしまう。カードの見た目に効くのは件数（isPendingの付いた
+// 行の集合）であり、件数（n）が前回の呼び出しから変わっていなければ
+// rerenderAll()を省略する（帯自体のDOM更新は毎回行う＝表示の鮮度は変わらない）。
+let _pendingUiLastN=-1;
+function renderPendingUi(){
+  let n=0,gave=0;
+  try{n=sendQueue.count();gave=sendQueue.gaveUpCount();}catch(e){return;}
+  let el=document.getElementById('cal-pending-badge');
+  if(n===0){
+    if(el)el.remove();
+    if(_pendingUiLastN!==0)rerenderAll();
+    _pendingUiLastN=0;
+    return;
+  }
+  if(!el){
+    el=document.createElement('div');el.id='cal-pending-badge';
+    el.style.cssText='position:sticky;top:0;z-index:60;padding:8px 12px;font-size:13px;text-align:center;cursor:pointer';
+    document.body.insertBefore(el,document.body.firstChild);
+    el.onclick=()=>{try{sendQueue.list().forEach(it=>sendQueue.retryNow(it.id,Date.now()));drainQueue();}catch(e){}};
+  }
+  if(gave>0){
+    el.style.background='#ffdad6';el.style.color='#8c0009';el.style.fontWeight='700';
+    el.textContent=`⚠ ${gave}件が送信できていません。タップして再送してください`;
+  }else{
+    el.style.background='#fff4d6';el.style.color='#7a5b00';el.style.fontWeight='400';
+    el.textContent=`⏳ 未送信 ${n}件（自動で送信中）`;
+  }
+  if(_pendingUiLastN!==n)rerenderAll();
+  _pendingUiLastN=n;
+}
 function setStaleBadge(on,failed){
   try{
     let el=document.getElementById('cal-stale-badge');
@@ -2267,7 +2321,8 @@ function removeLocalByIds(ids){
   allNippos=allNippos.filter(n=>!set.has(String(n.id))&&!(n.isGhost&&set.has(String(n.originalId))));
   rerenderAll();
 }
-function addLocalRows(rows){
+function addLocalRows(rows,opts){
+  const pending=!!(opts&&opts.pending);
   const added=(rows||[]).map(r=>({
     id:String(r.id||''),timestamp:'',
     date:r.date,genba:r.genba||'',loc:r.loc||'',name:r.name||'',role:r.role||'',
@@ -2275,10 +2330,28 @@ function addLocalRows(rows){
     kosu:Number(r.kosu)||0,memo:r.memo||'',
     yakin:!!r.yakin,yasumi:!!r.yasumi,yotei:!!r.yotei,souko:!!r.souko,
     company:r.company||currentCompany,updatedBy:r.updatedBy||'',color:r.color||'',
-    division:String(r.jobNoDivision||''),jobNo:'',workType:r.workType||'',vehicle:r.vehicle||''
+    division:String(r.jobNoDivision||''),jobNo:'',workType:r.workType||'',vehicle:r.vehicle||'',
+    isPending:pending
   }));
   allNippos=allNippos.concat(added).concat(generateGhosts(added));
   rerenderAll();
+}
+// ★案A（設計書D1）: loadData / hydrateFromSnapshot は allNippos を丸ごと
+// 差し替えるため、未送信の行が画面から消える。差し替えのたびに載せ直す。
+// 未送信は「本人の予定」として人工の集計にも数える（利用者判断 2026-08-25）
+// ＝isGhostのように除外はしない。
+function applyPendingRows(){
+  let rows;
+  // ★設計書D6: loadDataは currentCompany で絞って取得しているため、
+  // 他社の未送信をそのまま足すと画面に他社の予定が混ざる。表示中の会社だけ足す。
+  // 「全社」表示のときは全部足す（登録ボタンは全社では無効なので、
+  // 箱の中身に company==='全社' の項目は存在しない）。
+  try{rows=sendQueue.pendingRows(currentCompany==='全社'?'':currentCompany);}catch(e){return;}
+  if(!rows||!rows.length)return;
+  const have=new Set(allNippos.map(n=>String(n.id)));
+  const fresh=rows.filter(r=>!have.has(String(r.id||'')));
+  if(!fresh.length)return;
+  addLocalRows(fresh,{pending:true});
 }
 // ★案A 送信係: 箱から1件取り出して送る。例外を投げない。多重起動しない。
 //
@@ -2532,6 +2605,7 @@ async function loadData(forceGas){
     allNippos=parseRows(json.compact?expandCompactRows(json.headers,json.rows):json.rows,'');
     // 日付跨ぎ予定の翌日表示用ゴーストを追加
     allNippos=allNippos.concat(generateGhosts(allNippos));
+    applyPendingRows();
     if(json.members)allMembers=json.members;
     if(json.genbaMaster){
       if(json.genbaMaster.length>0&&typeof json.genbaMaster[0]==='object')allGenbaMaster=json.genbaMaster;
@@ -2556,6 +2630,7 @@ async function loadData(forceGas){
     }else{
       setStaleBadge(false);
       allNippos=[];allMembers=[];allGenbaMaster=[];allJobsites=[];
+      applyPendingRows();
       initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();
       showAlert('読込エラー：'+e.message+'（再度「更新」を押してください）','err');
     }
@@ -2589,7 +2664,7 @@ function groupNippos(nippos){
   const groups={};
   nippos.forEach(n=>{
     const key=n.id||`${n.date}__${n.genba}__${n.loc}__${n.start}__${n.end}__${n.kosu}__${n.memo}__${n.yakin}__${n.yasumi}__${n.yotei}__${n.souko}`;
-    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,timestamp:n.timestamp||'',color:n.color,jobNo:n.jobNo,workType:n.workType||'',vehicle:n.vehicle||'',isGhost:!!n.isGhost,originalId:n.originalId||''};
+    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,timestamp:n.timestamp||'',color:n.color,jobNo:n.jobNo,workType:n.workType||'',vehicle:n.vehicle||'',isGhost:!!n.isGhost,isPending:!!n.isPending,originalId:n.originalId||''};
     groups[key].members.push({name:n.name,role:n.role});
     if(n.id)groups[key].ids.push(n.id);
     // グループ内で最新の登録日時 + その時の更新者を採用（Date 経由で比較）
@@ -2737,6 +2812,7 @@ function openCalDay(dateStr){
       const color=g.color||'#1D9E75';
       const modeBadges=(g.souko?'🏭':'')+(g.yakin?'🌙':'')+(g.yasumi?'🏖️':'')+(g.yotei?'📌':'');
       const ghostMarker=g.isGhost?`<span class="ghost-marker">⏰前日から</span>`:'';
+      const pendingMarker=g.isPending?`<span class="ghost-marker">⏳未送信</span>`:'';
       const badgesHtml=modeBadges?` <span class="card-mode-badges">${modeBadges}</span>`:'';
       // 休み/倉庫は元請名を表示せず「休み」「倉庫」で統一
       let titleText;
@@ -2749,7 +2825,7 @@ function openCalDay(dateStr){
           else if(g.yakin)titleText='夜勤';
         }
       }
-      const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
+      const titleLine=`${ghostMarker}${pendingMarker}${titleText}${badgesHtml}`;
       const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','材料引取・検品':'📦','撤去品返却':'♻️','前乗り':'🚗','移動':'🚗','置局':'📡','事務所':'🏢','倉庫作業':'🏭','休み':'🏖️','その他':'📋'};
       const wt=g.workType||'現場作業';
       const wtEmoji=wtMap[wt]||'🏷️';
