@@ -973,6 +973,28 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
      requireして直接テストする（実装とテストの乖離を防ぐため）。詳細は同ファイルの
      コメント参照。file://直開きでも動くよう素の<script src>（非module）にしてある。 -->
 <script src="sync-guard.js"></script>
+<script src="send-queue.js"></script>
+<script>
+// ★send-queue.jsが読めなかったとき（配置漏れ・部分配布・キャッシュ不整合）に
+// 画面が壊れないための最小フォールバック。sync-guard.jsと同じ方針で、
+// 「使えない」と答えるだけの箱を置く＝submitNippoは従来どおり同期送信で待たせる。
+if(typeof createSendQueue==='undefined'){
+  try{console.error('[予定管理] send-queue.jsの読み込みに失敗しました。保存は従来どおり（送信を待つ）で動作します');}catch(e){}
+  window.createSendQueue=function(){return{
+    isStorageUsable:function(){return false;},
+    enqueue:function(){return false;},
+    list:function(){return [];},
+    count:function(){return 0;},
+    pendingRows:function(){return [];},
+    nextDue:function(){return null;},
+    beginSend:function(){return null;},
+    markSent:function(){return false;},
+    markFailed:function(){return false;},
+    retryNow:function(){return false;},
+    gaveUpCount:function(){return 0;}
+  };};
+}
+</script>
 <script>
 // ★5回目レビュー修正4（高・Codex）: sync-guard.jsが何らかの理由（配置漏れ・部分配布・
 // オフラインキャッシュ不足・版ずれ等）で読み込めなかったとき、旧実装は
@@ -1023,6 +1045,15 @@ const GAS_URL='https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3eg
 const READ_TIMEOUT_MS=15000;       // D1(Worker)への読み取り用
 const GAS_READ_TIMEOUT_MS=60000;   // GASへの読み取り用（実測最大56秒＋安全マージン）
 const SYNC_TIMEOUT_MS=20000;       // /api/sync（Worker）用
+// ★案A: 未送信の登録を貯める箱。タブごとに違うIDを持たせ、
+// 「初回送信は登録したタブだけが行う」判定に使う（設計書D2）。
+const SEND_TAB_ID='t'+Math.random().toString(36).slice(2)+Date.now().toString(36);
+const sendQueue=createSendQueue({
+  storage:(function(){try{return window.localStorage;}catch(e){return null;}})(),
+  tabId:SEND_TAB_ID
+});
+let drainRunning=false;
+let drainTimer=null;
 const BACKEND_JSON_TIMEOUT_MS=3000; // backend.json読み込み用
 
 // ★修正1（最優先）: AbortSignal.timeout() はSafari 16未満（iOS15止まりのiPhone 6s/7/
@@ -2155,6 +2186,8 @@ function hydrateFromSnapshot(company){
     return true;
   }catch(e){console.error(e);return false;}
 }
+// ★案A: 未送信の帯と印。中身はTask4で実装する（ここでは何もしない）。
+function renderPendingUi(){}
 function setStaleBadge(on,failed){
   try{
     let el=document.getElementById('cal-stale-badge');
@@ -2247,6 +2280,83 @@ function addLocalRows(rows){
   allNippos=allNippos.concat(added).concat(generateGhosts(added));
   rerenderAll();
 }
+// ★案A 送信係: 箱から1件取り出して送る。例外を投げない。多重起動しない。
+//
+// 2回目以降の送信では、送る直前にGASから最新を読み「もう入っていないか」を
+// 確認する（設計書§4.3）。2026-08-25の実測で「送信側にエラーが返ったのに
+// 実際は書き込まれていた」が実際に発生しており、確認せず再送すると
+// 予定が二重になる。確認はD1ではなくGASから行う（D1は最大5分古くなりうる）。
+async function checkAlreadyLanded(item){
+  const base=getGasUrl();
+  const res=await fetch(base+(base.includes('?')?'&':'?')+'compact=1&t='+Date.now(),
+    {signal:timeoutSignal(GAS_READ_TIMEOUT_MS)});
+  if(!res.ok)throw new Error('確認のための読み取りに失敗しました('+res.status+')');
+  const json=await res.json();
+  if(!json||json.status!=='ok')throw new Error('確認のための読み取りに失敗しました');
+  const rows=json.compact?expandCompactRows(json.headers,json.rows):json.rows;
+  const seen=new Set((rows||[]).map(r=>String((r&&(r.ID!==undefined?r.ID:r.id))||'')));
+  return (item.rows||[]).some(r=>seen.has(String(r.id||'')));
+}
+
+async function drainQueue(){
+  if(drainRunning)return;
+  drainRunning=true;
+  try{
+    for(;;){
+      const item=sendQueue.nextDue(Date.now());
+      if(!item)break;
+      const claim=sendQueue.beginSend(item.id,Date.now());
+      if(!claim)break; // 他タブが持っている／記録できなかった＝安全側で何もしない
+      try{
+        if(claim.wasRetry){
+          const landed=await checkAlreadyLanded(item);
+          if(landed){sendQueue.markSent(item.id,claim.token);renderPendingUi();continue;}
+        }
+        const res=await fetch(getGasUrl(),{method:'POST',
+          body:JSON.stringify({action:'add',rows:item.rows,updatedBy:(item.rows[0]&&item.rows[0].updatedBy)||''}),
+          headers:{'Content-Type':'text/plain'},signal:timeoutSignal(GAS_READ_TIMEOUT_MS)});
+        const json=await res.json();
+        if(res.ok&&json&&json.status==='ok'){
+          sendQueue.markSent(item.id,claim.token);
+          renderPendingUi();
+          refreshInBackground();
+        }else{
+          sendQueue.markFailed(item.id,claim.token,(json&&json.message)||('HTTP '+res.status),Date.now());
+          renderPendingUi();
+          break;
+        }
+      }catch(err){
+        sendQueue.markFailed(item.id,claim.token,String((err&&err.message)||err),Date.now());
+        renderPendingUi();
+        break;
+      }
+    }
+  }finally{
+    drainRunning=false;
+    // ★Task3で追加した判断（ブリーフに無い要件・タスク指示(4)）: isStorageUsable()が
+    // falseのタブでは、Task2の仕様によりbeginSendが常にnullを返す（記録を残せない
+    // 状態で送ると二重登録になるため意図的）。そのままcount()>0だけを見て
+    // scheduleDrain(5000)を続けると、このタブは5秒おきに「nextDueは拾えるが
+    // beginSendは常にnull」を繰り返す永久空回りになり、帯には「送信中」の表示が
+    // 残ったまま利用者に嘘をつき続けることになる。isStorageUsable()がtrueの間
+    // だけ再スケジュールし、falseなら再スケジュールせずrenderPendingUi()で表示だけ
+    // 更新して止める。箱の中身はlocalStorageに残っている（Task2でキーを消さない
+    // 修正済み）ので、次にページを開いたタブが正常に送信できる＝未送信は失われない。
+    try{
+      if(sendQueue.isStorageUsable()){
+        if(sendQueue.count()>0)scheduleDrain(5000);
+      }else{
+        renderPendingUi();
+      }
+    }catch(e){}
+  }
+}
+
+function scheduleDrain(ms){
+  if(drainTimer)clearTimeout(drainTimer);
+  drainTimer=setTimeout(()=>{drainTimer=null;drainQueue();},Math.max(1000,ms||5000));
+}
+
 function refreshInBackground(after){
   // 2026-08-22: 書き込みはGASへ行くので、D1へ取り込ませてから読み直す。
   // ★2026-08-24修正5: 書き込み直後にこれを挟まず直接loadData()を呼ぶと、切替後は
@@ -4092,6 +4202,12 @@ initCompanyBar();initSelects();initAvailWeek();initVehicleWeek();initUsername();
 // 会社が未設定の場合は会社選択ピッカーを表示し、データロードはスキップ
 if(needsCompanyPicker)showCompanyPicker();
 else{if(hydrateFromSnapshot(currentCompany))setStaleBadge(true);loadData();}
+
+// ★案A: 前回送れなかった登録を、アプリを開いたときと電波が戻ったときに送る
+try{
+  if(sendQueue.count()>0){renderPendingUi();scheduleDrain(1000);}
+  window.addEventListener('online',()=>scheduleDrain(1000));
+}catch(e){}
 
 // 管理者モード以外では事務タブを非表示
 if(!isAdminMode){
