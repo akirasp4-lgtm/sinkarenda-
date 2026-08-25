@@ -2230,7 +2230,23 @@ function renderPendingUi(){
     el=document.createElement('div');el.id='cal-pending-badge';
     el.style.cssText='position:sticky;top:0;z-index:60;padding:8px 12px;font-size:13px;text-align:center;cursor:pointer';
     document.body.insertBefore(el,document.body.firstChild);
-    el.onclick=()=>{try{sendQueue.list().forEach(it=>sendQueue.retryNow(it.id,Date.now()));drainQueue();}catch(e){}};
+    // ★レビュー修正ラウンド1・Important I-1: 全項目にretryNowすると、他タブが
+    // 送信中（リース有効）の項目まで横取りしてしまい、存在確認の窓をすり抜けて
+    // 二重送信になりうる（レビュアーが2タブ構成で実測）。帯の文言
+    // 「⚠N件が送信できていません」はgaveUp件数（諦めた項目）を指しているので、
+    // 実際の挙動もgaveUpした項目だけに絞る。あわせて、他タブが今リース中
+    // （claimedAt+30000msが未経過かつownerが自分でない）の項目は触らない。
+    el.onclick=()=>{
+      try{
+        const now=Date.now();
+        sendQueue.list().forEach(it=>{
+          if(!it.gaveUp)return;
+          if(it.claimedAt&&now<it.claimedAt+30000&&it.owner!==SEND_TAB_ID)return;
+          sendQueue.retryNow(it.id,now);
+        });
+        drainQueue();
+      }catch(e){}
+    };
   }
   if(gave>0){
     el.style.background='#ffdad6';el.style.color='#8c0009';el.style.fontWeight='700';
@@ -2853,6 +2869,23 @@ function findOriginalGroup(originalId){
   if(matching.length===0)return null;
   return groupNippos(matching)[0]||null;
 }
+// ★レビュー修正ラウンド1・Critical C-1: 未送信（サーバー未着）の予定は通常の
+// 編集・削除を通さない。サーバーに無いidへ'update'を送ると旧idが消えず新idが
+// 増えるだけになり、再送時に旧内容も送られて二重登録になる。削除も同様に
+// サーバー側は0件削除で成功扱いになり、再送で「消したはずの予定」が復活する
+// （レビュアーが両方とも実測）。
+// isPendingフラグではなく、その場でsendQueue.list()に照合して判定する。
+// フラグ方式だと「実際は送信済みだが背景更新(refreshInBackground)がまだ
+// 届いていない数秒間」も誤って編集・削除を弾いてしまう（レビュー指摘）。
+// sendQueueの中身は送信完了(markSent)の瞬間に消えるため、こちらのほうが
+// 実態に即して早く解除される。
+function isGroupPending(g){
+  if(!g||!g.ids||!g.ids.length)return false;
+  try{
+    const pendingIds=new Set(sendQueue.list().map(it=>String(it.id)));
+    return g.ids.some(id=>pendingIds.has(String(id)));
+  }catch(e){return false;}
+}
 
 // ===== 予定詳細フルスクリーン =====
 let detailGroups=[],detailIdx=-1;
@@ -2906,7 +2939,12 @@ function renderEventDetail(){
   // （グローライズ以外の会社の代表が登録すると行の工番が空のまま保存されるため）
   const masterJobNo=(!g.jobNo&&g.genba&&g.loc)?(((allJobsites||[]).find(j=>j.genba===g.genba&&j.loc===g.loc)||{}).jobNo||''):'';
   const displayJobNo=g.jobNo||masterJobNo;
+  // ★レビュー修正ラウンド1・M-5: カードの「⏳未送信」印だけだと、詳細画面を
+  // 開いた人は編集・削除がなぜ弾かれるのか分からず戸惑う。詳細画面自体にも
+  // 一言出す。
+  const pendingNote=isGroupPending(g)?`<div style="background:#fff4d6;color:#7a5b00;font-size:12px;font-weight:600;padding:8px 12px;border-radius:8px;margin-bottom:10px">⏳ まだ送信中です。送信が終わってから編集・削除できます</div>`:'';
   const html=`
+    ${pendingNote}
     <div class="detail-title-row">
       <div class="detail-color-bar" style="background:${esc(color)}"></div>
       <div class="detail-title">${detailTitle}</div>
@@ -2974,11 +3012,19 @@ async function toggleSiteCompletion_(genba,loc,completed){
 function editFromDetail(){
   const idx=detailIdx;
   let g=detailGroups[idx];
-  closeEventDetail();
+  // ★レビュー修正ラウンド1・Critical C-1: 判定・alertはモーダルを閉じる前に行う
+  // （閉じてから出すとs-alertは入力タブの中にあり、カレンダー画面では見えない
+  // ため気づかれない。alert()なら画面によらず必ず見える）。
   if(g&&g.isGhost){
     const orig=findOriginalGroup(g.originalId);
-    if(orig){openEditModal(0,[orig]);return;}
+    if(orig){
+      if(isGroupPending(orig)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+      closeEventDetail();
+      openEditModal(0,[orig]);return;
+    }
   }
+  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+  closeEventDetail();
   // 日別モーダルが既に開いている前提で、その index で編集モーダルを開く
   openEditModal(idx,detailGroups);
 }
@@ -2999,6 +3045,11 @@ async function deleteFromDetail(){
     const orig=findOriginalGroup(g.originalId);
     if(orig)g=orig;
   }
+  // ★レビュー修正ラウンド1・Critical C-1: 未送信の予定はサーバー側にidが
+  // 無いため、削除リクエストは0件削除でも成功扱いになり、後で再送されると
+  // 「消したはずの予定」が復活する（レビュアー実測）。確認ダイアログの前に
+  // 弾く（弾かれるのに確認だけ出す不自然なUXを避ける）。
+  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから削除してください');return;}
   if(!confirm('この日報を削除しますか？'))return;
   setLoading(true);
   try{
@@ -3057,11 +3108,18 @@ function copyGroupToInput_(g){
 function calOpenEdit(idx){
   const groups=getCalDayGroups();
   let g=groups[idx];if(!g)return;
-  document.getElementById('cal-day-modal').classList.remove('active');
+  // ★レビュー修正ラウンド1・Critical C-1: editFromDetailと同じ理由（現状の
+  // UIでは日別モーダルに編集ボタンは無いが、防御的に同じガードを入れる）。
   if(g.isGhost){
     const orig=findOriginalGroup(g.originalId);
-    if(orig){openEditModal(0,[orig]);return;}
+    if(orig){
+      if(isGroupPending(orig)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+      document.getElementById('cal-day-modal').classList.remove('active');
+      openEditModal(0,[orig]);return;
+    }
   }
+  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+  document.getElementById('cal-day-modal').classList.remove('active');
   openEditModal(idx,groups);
 }
 
@@ -3069,6 +3127,8 @@ async function calDeleteGroup(idx){
   const groups=getCalDayGroups();
   let g=groups[idx];if(!g)return;
   if(g.isGhost){const orig=findOriginalGroup(g.originalId);if(orig)g=orig;}
+  // ★レビュー修正ラウンド1・Critical C-1: deleteFromDetailと同じ理由。
+  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから削除してください');return;}
   if(!confirm('この日報を削除しますか？'))return;
   const ids=[...new Set(g.ids)];
   setLoading(true);
