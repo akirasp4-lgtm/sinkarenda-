@@ -18,6 +18,12 @@
 
   var DEFAULT_KEY = 'yotei-pending-add-v1';
   var DEFAULT_MAX = 50;
+  // ★最終レビュー指摘: このデフォルト値はテスト（30秒前提）のためにあり、
+  // 変更しない。呼び出し側（index.html/admin.html）は drainQueue が1回の
+  // 送信で行いうる最長時間（存在確認の読み取り＋POST、両方タイムアウトまで
+  // かかった場合の合計）より長いリースを、必ず自前で計算して o.leaseMs に
+  // 渡す責任を持つ。渡し忘れてこの既定値のまま使うと、送信が飛行中に
+  // リースが切れて別タブに同じ項目を拾われ、二重送信の原因になる。
   var DEFAULT_LEASE_MS = 30000;
   var DEFAULT_GIVE_UP = 10;
   var DEFAULT_BACKOFF = [5000, 15000, 45000, 120000, 300000];

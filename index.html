@@ -1045,12 +1045,20 @@ const GAS_URL='https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3eg
 const READ_TIMEOUT_MS=15000;       // D1(Worker)への読み取り用
 const GAS_READ_TIMEOUT_MS=60000;   // GASへの読み取り用（実測最大56秒＋安全マージン）
 const SYNC_TIMEOUT_MS=20000;       // /api/sync（Worker）用
+// ★最終レビュー指摘: 送信権の保持時間は、1回の送信にかかりうる最長時間より
+// 長くなければならない。drainQueueは再送のとき checkAlreadyLanded（最大
+// GAS_READ_TIMEOUT_MS）→ POST（最大GAS_READ_TIMEOUT_MS）を1回の保持のうちに
+// 行うため、最長で GAS_READ_TIMEOUT_MS×2＝120秒かかる。既定の30秒のままだと、
+// POSTが飛行中なのにリースが切れて別タブが同じ項目を拾い、
+// 「相手の分はまだ着いていない」と誤判定して二重に登録してしまう。
+const SEND_LEASE_MS=GAS_READ_TIMEOUT_MS*2+30000;   // 150秒（120秒＋余裕30秒）
 // ★案A: 未送信の登録を貯める箱。タブごとに違うIDを持たせ、
 // 「初回送信は登録したタブだけが行う」判定に使う（設計書D2）。
 const SEND_TAB_ID='t'+Math.random().toString(36).slice(2)+Date.now().toString(36);
 const sendQueue=createSendQueue({
   storage:(function(){try{return window.localStorage;}catch(e){return null;}})(),
-  tabId:SEND_TAB_ID
+  tabId:SEND_TAB_ID,
+  leaseMs:SEND_LEASE_MS
 });
 let drainRunning=false;
 let drainTimer=null;
@@ -2235,13 +2243,13 @@ function renderPendingUi(){
     // 二重送信になりうる（レビュアーが2タブ構成で実測）。帯の文言
     // 「⚠N件が送信できていません」はgaveUp件数（諦めた項目）を指しているので、
     // 実際の挙動もgaveUpした項目だけに絞る。あわせて、他タブが今リース中
-    // （claimedAt+30000msが未経過かつownerが自分でない）の項目は触らない。
+    // （claimedAt+SEND_LEASE_MSが未経過かつownerが自分でない）の項目は触らない。
     el.onclick=()=>{
       try{
         const now=Date.now();
         sendQueue.list().forEach(it=>{
           if(!it.gaveUp)return;
-          if(it.claimedAt&&now<it.claimedAt+30000&&it.owner!==SEND_TAB_ID)return;
+          if(it.claimedAt&&now<it.claimedAt+SEND_LEASE_MS&&it.owner!==SEND_TAB_ID)return;
           sendQueue.retryNow(it.id,now);
         });
         drainQueue();
