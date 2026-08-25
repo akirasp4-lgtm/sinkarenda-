@@ -303,4 +303,70 @@ describe('send-queue.js Task2: 送信権・バックオフ・諦め', () => {
     expect(q.markFailed('ない', 't', 'e', 0)).toBe(false);
     expect(q.retryNow('ない', 0)).toBe(false);
   });
+
+  // ★修正ラウンド1・Critical C-1（設計書D2(b)）: localStorageにはCASが無いため、
+  // beginSendがattemptsを書いた直後に、別タブが「その書き込みより前に取っていた
+  // 古いスナップショット」をそのまま書き戻すと、attemptsが巻き戻る。
+  // storage.setItemをフックして「タブAの書き込み直後・タブBの古いスナップショットの
+  // 書き戻し」という手順3→4の順序を決定的に再現する。
+  it('★C-1: beginSendの書き込み直後に別タブの古いスナップショットで巻き戻されたら、nullを返して送らせない（wasRetry:falseで二重登録に至らせない）', () => {
+    const st = makeStorage();
+    const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    a.enqueue(ITEM, 1000); // I1: attempts=0, owner=tab-a
+    const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
+    // タブBが「別項目のmutateの最中」に取った古いスナップショット（I1: attempts=0のまま）
+    const staleSnapshot = b._internals.readState();
+
+    const realSetItem = st.setItem.bind(st);
+    let writeCount = 0;
+    st.setItem = function (k, v) {
+      realSetItem(k, v);
+      writeCount++;
+      if (writeCount === 1) {
+        // タブAの書き込み（attempts=1の永続化）の直後、タブBが古いスナップショットの
+        // まま書き戻す＝storage上のI1がattempts=0に巻き戻る
+        b._internals.writeState(staleSnapshot);
+      }
+    };
+
+    const r = a.beginSend('ID-1', 1000);
+    expect(r).toBeNull(); // 巻き戻りを読み直しで検知し、送らせない
+  });
+
+  // ★修正ラウンド1・Important I-2: 一度usableがfalseに落ちたタブは、その後storageに
+  // 書き込まない。書き込み続けると、storageが回復した後にこのタブの古いmemoryで
+  // 上書きしてしまい、その間に別タブが正しく登録した未送信が消える。
+  it('★I-2: usable=falseに落ちたタブは、その後storageを上書きせず、別タブの未送信を消さない', () => {
+    const st = makeStorage();
+    const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    a.enqueue(ITEM, 1000); // storage = {ID-1}
+    st.failSet = true;
+    a.retryNow('ID-1', 1000); // 書き込み失敗 → キー削除・usable=false・メモリ運転へ
+    expect(a.isStorageUsable()).toBe(false);
+
+    st.failSet = false; // quotaが回復
+    const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
+    const ITEM2 = { id: 'ID-2', rows: [ROW], company: 'グローライズ' };
+    expect(b.enqueue(ITEM2, 2000)).toBe(true); // storage = {ID-2}
+
+    a.beginSend('ID-1', 3000); // usableが戻っていないタブAは、書いてもstorageには触らない
+
+    const c = SQ.createSendQueue({ storage: st, tabId: 'tab-c' });
+    expect(c.list().map(x => x.id)).toEqual(['ID-2']); // タブBの未送信が消えていない
+  });
+
+  // ★修正ラウンド1・Minor M-2: token不一致のテストはmarkSentにしかなかった。
+  // markFailedでも「古い試行がnextAt/claimedAt/lastErrorを触れない」ことを固定する。
+  it('markFailed は token が違えば nextAt/claimedAt/lastError を書き換えない（古い試行が新しい試行の状態を上書きしない）', () => {
+    const q = SQ.createSendQueue({ storage: makeStorage(), tabId: 'tab-a' });
+    q.enqueue(ITEM, 1000);
+    q.beginSend('ID-1', 1000); // attempts=1, token=tab-a:1
+    const before = q.list()[0];
+    expect(q.markFailed('ID-1', 'ちがうtoken', 'えらー', 2000)).toBe(false);
+    const after = q.list()[0];
+    expect(after.nextAt).toBe(before.nextAt);
+    expect(after.claimedAt).toBe(before.claimedAt);
+    expect(after.lastError).toBe(before.lastError);
+    expect(after.gaveUp).toBe(before.gaveUp);
+  });
 });

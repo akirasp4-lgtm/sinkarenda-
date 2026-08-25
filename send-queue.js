@@ -101,7 +101,12 @@
 
     function writeState(st) {
       memory = st;
-      if (!storage) return false;
+      // ★レビュー修正ラウンド1・Important I-2: 一度usableがfalseに落ちたタブは、
+      // その後storageへ一切書き込まない（メモリのみで動く）。usable===falseのまま
+      // storageへの書き込みを試み続けると、このタブが持つ古い（storageと食い違った）
+      // memoryの内容を、storageが回復した後に上書きしてしまい、その間に別タブが
+      // 正しく書き込んだ未送信を消してしまう（実測済みの事故）。
+      if (!storage || !usable) return false;
       try {
         storage.setItem(storageKey, JSON.stringify(st));
         return true;
@@ -124,9 +129,14 @@
     // ため許容）。
     function mutate(fn) {
       var st = readState();          // 直前に読み直す
-      var ret = fn(st);
-      var ok = writeState(st);
-      return { ok: ok, ret: ret };
+      var dirty = fn(st);
+      // ★レビュー修正ラウンド1・Minor M-1: fnが実際に書き換えた（truthyを返した）
+      // ときだけ書く。「見つからない・変化なし」の呼び出しでも無条件に書いていると、
+      // 読んでから書くまでの間に別タブが割り込める窓（C-1で防ごうとしている交錯）を
+      // 無駄に広げてしまう。beginSendの永続化ゲート（書けなかったらnull）は
+      // dirtyがtrueのときのwriteStateの成否で判定されるため、この変更では壊れない。
+      var ok = dirty ? writeState(st) : true;
+      return { ok: ok, ret: dirty };
     }
 
     function copyItems(items) {
@@ -176,7 +186,7 @@
         if (!id || rows.length === 0) return false;
         var accepted = false;
         mutate(function (st) {
-          if (st.items.length >= maxItems) { accepted = false; return; }
+          if (st.items.length >= maxItems) { accepted = false; return false; }
           st.items.push({
             id: id, rows: cloneRows(rows), company: String(item.company || ''),
             createdAt: typeof now === 'number' ? now : 0,
@@ -184,6 +194,7 @@
             owner: tabId, claimedAt: 0
           });
           accepted = true;
+          return true;
         });
         return accepted;
       },
@@ -220,17 +231,35 @@
         var found = false;
         var token = null;
         var wasRetry = false;
+        var expectedOwner = tabId;
+        var expectedAttempts = 0;
         var m = mutate(function (st) {
           var it = findItem(st, id);
-          if (!it || !isDue(it, n)) return;
+          if (!it || !isDue(it, n)) return false;
           found = true;
           wasRetry = (it.attempts || 0) >= 1;
           it.attempts = (it.attempts || 0) + 1;
           it.owner = tabId;
           it.claimedAt = n;
           token = tokenOf(it);
+          expectedAttempts = it.attempts;
+          return true;
         });
         if (!found || !m.ok) return null;
+
+        // ★レビュー修正ラウンド1・Critical C-1（設計書D2(b)）: localStorageには
+        // 比較交換（CAS）が無いため、上のmutateが書いた直後に、別タブが「読んで
+        // からこの書き込みより前に取っていた古いスナップショット」をそのまま
+        // 書き戻すと、attempts/ownerがこの書き込み以前の値に巻き戻ることがある。
+        // 書いて終わりにせず、もう一度storageから読み直して「自分が書いたはずの
+        // 値」がまだ残っているか確認する。巻き戻っていたら null を返して送らせない
+        // （＝attemptsが0のまま拾われてwasRetry:falseになり、二重登録に至る事故を
+        // 防ぐ）。
+        var verify = readState();
+        var after = findItem(verify, id);
+        if (!after || after.owner !== expectedOwner || (after.attempts || 0) !== expectedAttempts) {
+          return null;
+        }
         return { token: token, wasRetry: wasRetry };
       },
 
@@ -238,9 +267,10 @@
         var found = false;
         mutate(function (st) {
           var it = findItem(st, id);
-          if (!it || tokenOf(it) !== String(token)) return;
+          if (!it || tokenOf(it) !== String(token)) return false;
           found = true;
           st.items = st.items.filter(function (x) { return x !== it; });
+          return true;
         });
         return found;
       },
@@ -250,13 +280,14 @@
         var found = false;
         mutate(function (st) {
           var it = findItem(st, id);
-          if (!it || tokenOf(it) !== String(token)) return;
+          if (!it || tokenOf(it) !== String(token)) return false;
           found = true;
           var idx = Math.min(Math.max((it.attempts || 1) - 1, 0), backoffMs.length - 1);
           it.nextAt = n + backoffMs[idx];
           it.lastError = String(message || '');
           it.claimedAt = 0;
           if ((it.attempts || 0) >= giveUpAfter) it.gaveUp = true;
+          return true;
         });
         return found;
       },
@@ -266,12 +297,13 @@
         var found = false;
         mutate(function (st) {
           var it = findItem(st, id);
-          if (!it) return;
+          if (!it) return false;
           found = true;
           it.gaveUp = false;
           it.nextAt = 0;
           it.claimedAt = 0;
           it.owner = tabId;
+          return true;
         });
         return found;
       },
