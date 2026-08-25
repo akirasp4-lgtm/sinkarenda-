@@ -1167,7 +1167,6 @@ if(typeof createPreferGasTracker==='undefined'){
       clear:function(){return true;},
       status:function(){return 'block';},
       isActive:function(){return true;},
-      resolveWithHealthEvidence:function(){return false;},
       markedAtValue:function(){return null;},
       capMsValue:function(){return 0;}
     };
@@ -2164,10 +2163,22 @@ async function loadData(forceGas){
     // ★5回目レビュー修正1（重大・両者一致）: 旧実装はここで単純にisActive()（＝
     // 5分経てば自動でfalseになる）を見ていた。今はtrackerが時間だけで解除しない
     // ため、status()が'recheck'（cap=15分に達したがまだ確実成功を確認できていない）
-    // のときは、無条件に諦めてブロックし続けるのではなく、/api/healthを見て
-    // 「markした時刻より後に確実な書き込み（snapshotAtの更新）があったか」を
-    // 確認してから解除する（要件どおり「成功を確認せずに解除しない」）。
-    // 確認できなければ引き続きGASを優先する＝安全側のデフォルト。
+    // のときは、無条件に諦めてブロックし続けるのではなく、確認してから解除する
+    // （要件どおり「成功を確認せずに解除しない」）。確認できなければ引き続き
+    // GASを優先する＝安全側のデフォルト。
+    // ★6回目レビュー修正1（高・両者一致）: 旧実装は/api/healthを読むだけで
+    // 「markした時刻より後にsnapshotAt（GAS取り込みの完了時刻）が進んでいるか」を
+    // 見ていた。これには2つの穴があった: (1) snapshotAtは書き込み完了時刻であり
+    // GAS取得の開始時刻ではないため、「取得開始がmarkより前（＝利用者の書き込みを
+    // 含まない内容）だが完了がmarkより後」の同期でも誤って解除できてしまう。
+    // (2) markedAtはブラウザの時計・snapshotAtはサーバーの時計という異なる時計を
+    // 直接比較していた（端末の時計ずれで解除の窓が広がる）。
+    // → 実際に/api/syncをPOSTしてこの場で同期させ、refreshInBackgroundと全く同じ
+    // decideSyncOutcome().confirmedで判定する（sync-guard.js参照）。「変更なし
+    // （ハッシュ一致）によるスキップ」もそちら側でconfirmed扱いになるため、GASが
+    // 回復した後データが一切変化しない静穏期でもブロックが解ける。beginAttempt/
+    // clearはどちらもブラウザ側のDate.now()だけで完結するため、サーバー時計との
+    // 比較が原理的に発生しない。
     let effectiveForceGas=!!forceGas;
     if(!effectiveForceGas){
       const trackerStatus=preferGasTracker.status();
@@ -2176,16 +2187,13 @@ async function loadData(forceGas){
       }else if(trackerStatus==='recheck'){
         effectiveForceGas=true; // 既定は継続（確認できるまで安全側）
         if(cfg.backend==='d1'&&cfg.workerUrl){
+          const recheckStartedAt=preferGasTracker.beginAttempt();
           try{
-            const hRes=await fetch(cfg.workerUrl+'/api/health',{signal:timeoutSignal(READ_TIMEOUT_MS)});
-            const h=await hRes.json();
-            // snapshotAtは「実際に中身が変わって書き込まれた」ときだけ進む値
-            // （cf/src/sync.jsのsyncAllは変更が無ければ書かない）。これがmarkした
-            // 時刻より後なら「mark後に確実な取り込みが実際にあった」ことの強い
-            // 証拠になる。
-            const evidenceAt=h&&h.snapshotAt?Date.parse(h.snapshotAt):NaN;
-            const evidenceOk=!!(hRes.ok&&h&&h.status==='ok'&&Number.isFinite(evidenceAt));
-            if(preferGasTracker.resolveWithHealthEvidence(evidenceOk,evidenceAt))effectiveForceGas=false;
+            const headers=cfg.syncKey?{'X-Sync-Key':cfg.syncKey}:{};
+            const sRes=await fetch(cfg.workerUrl+'/api/sync',{method:'POST',headers,signal:timeoutSignal(SYNC_TIMEOUT_MS)});
+            const sJson=await sRes.json().catch(()=>null);
+            const outcome=decideSyncOutcome(sRes.ok,sJson);
+            if(outcome.confirmed&&preferGasTracker.clear(recheckStartedAt))effectiveForceGas=false;
           }catch(e){/* 確認できなければブロック継続＝安全側 */}
         }
       }

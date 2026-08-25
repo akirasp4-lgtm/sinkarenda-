@@ -125,7 +125,10 @@ export default {
       // ★syncAllは例外を投げない契約。同時実行中は{ok:true, skipped:true}で
       // 返る（修正2の同時実行抑止）ので、try/catchではなく戻り値のokを見る。
       const r = await syncAll(env, { force });
-      return json({ status: r.ok ? 'ok' : 'error', rows: r.rows, message: r.message, skipped: !!r.skipped });
+      // ★6回目レビュー修正1: skipReasonをそのまま画面へ返す。'unchanged'（変更なし
+      // スキップ＝GASを実際に取得しD1と完全一致することを確認できた）のときだけ、
+      // 画面側（sync-guard.js）はこの応答を「確実成功」として扱う。
+      return json({ status: r.ok ? 'ok' : 'error', rows: r.rows, message: r.message, skipped: !!r.skipped, skipReason: r.skipReason });
     }
 
     if (url.pathname === '/api/health') {

@@ -352,10 +352,15 @@ async function recentForceAcceptCount(env, now, windowMs) {
  *   forceで受理していれば、今回のforceは無効化される（force連打の頻度制限）。
  *   詳細はsyncAll内のforceEligible周りのコメント参照。
  *
- * 返り値: { ok, rows, message, skipped? }
+ * 返り値: { ok, rows, message, skipped?, skipReason? }
  *   - skipped: true のときは「進行中のためスキップ」「変更なしのためスキップ」
  *     「より新しい取得結果が既に保存されているためスキップ」のいずれか
  *     （message で区別できる）。いずれも ok:true。
+ *   - skipReason: 'unchanged' が付くのは「変更なしのためスキップ」のときだけ
+ *     （★6回目レビュー修正1）。GASを実際に取得しD1と完全一致することを確認できた
+ *     ことを示す機械可読な合図。呼び出し側（sync-guard.jsのdecideSyncOutcome）は
+ *     これを「確実成功」として扱ってよい。「進行中のためスキップ」（GASへ一度も
+ *     取得しに行っていない）にはこのフィールドを付けない＝区別できる。
  */
 export async function syncAll(env, opts = {}) {
   const force = !!(opts && opts.force);
@@ -504,10 +509,15 @@ export async function syncAll(env, opts = {}) {
     }
 
     // ★修正1（変更が無ければ書かない）: 夜間・休日の書き込みが0になる。
+    // ★6回目レビュー修正1（高・両者一致）: skipReason:'unchanged' を付ける。
+    // 画面側（sync-guard.jsのdecideSyncOutcome）はこれを「GASを実際に取得し、
+    // D1と完全一致することを確認できた＝確実成功」として扱う（ロック競合による
+    // skip「前回の同期が進行中のためスキップ」にはこの値を付けないため、
+    // GASへ一度も取得しに行っていないskipと区別できる）。
     if (existing && existing.hash === hash) {
       const message = '変更なし（書き込みをスキップしました）' + shrinkNote;
       await safeWriteSyncLog(env, { rows: rowCount, ok: 1, message, payloadHash: hash });
-      return { ok: true, rows: rowCount, message, skipped: true };
+      return { ok: true, rows: rowCount, message, skipped: true, skipReason: 'unchanged' };
     }
 
     const at = new Date().toISOString();

@@ -382,6 +382,40 @@ describe('POST /api/sync（修正2: 同時実行の抑止）', () => {
   });
 });
 
+describe('POST /api/sync（6回目レビュー修正1: skipReasonの受け渡し）', () => {
+  it('2回連続で同じ内容を同期すると、2回目のHTTP応答にskipReason:"unchanged"が含まれる（sync-guard.jsのdecideSyncOutcomeが確実成功として扱うための合図。recheckが/api/healthではなく/api/syncを見に行く6回目修正の前提）', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
+    }));
+    const { db } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const first = await worker.fetch(syncRequest('https://worker.test/api/sync'), env, {});
+    const firstBody = await first.json();
+    expect(firstBody.skipped).toBeFalsy();
+
+    const second = await worker.fetch(syncRequest('https://worker.test/api/sync'), env, {});
+    const secondBody = await second.json();
+    expect(secondBody.status).toBe('ok');
+    expect(secondBody.skipped).toBe(true);
+    expect(secondBody.skipReason).toBe('unchanged');
+  });
+
+  it('「進行中のためスキップ」（ロック競合）のHTTP応答にはskipReasonが含まれない（GASへ一度も取得しに行っていないため確実成功の証拠にならない）', async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock;
+    const locked = makeMockDB();
+    locked.state.lockedAt = String(Date.now() - 500);
+    const env = { DB: locked.db, GAS_URL: 'https://example.test/exec' };
+
+    const res = await worker.fetch(syncRequest('https://worker.test/api/sync'), env, {});
+    const body = await res.json();
+    expect(body.skipped).toBe(true);
+    expect(body.skipReason).toBeUndefined();
+  });
+});
+
 describe('GET /api/health', () => {
   it('snapshotとsync_logの最新状態を返す', async () => {
     const snapshot = makeSnapshot([makeRow({ ID: 'a-1' })]);

@@ -327,9 +327,13 @@ describe('syncAll（修正1: 変更が無ければ書かない）', () => {
     expect(second.ok).toBe(true);
     expect(second.skipped).toBe(true);
     expect(second.message).toMatch(/変更なし/);
+    // ★6回目レビュー修正1: 「変更なしスキップ」にはskipReason:'unchanged'が付く。
+    // sync-guard.jsのdecideSyncOutcomeがこれを確実成功として扱うための合図。
+    expect(second.skipReason).toBe('unchanged');
     // 2回目はsnapshotへの書き込みが増えていない（スキップされた）
     expect(calls.snapshotWrites).toBe(1);
   });
+
 
   it('内容が変わっていれば2回目も書き込む', async () => {
     const { db, calls } = makeMockDB();
@@ -489,6 +493,10 @@ describe('syncAll（修正2: 同時実行の抑止）', () => {
     expect(out.skipped).toBe(true);
     expect(out.message).toMatch(/進行中/);
     expect(fetchMock).not.toHaveBeenCalled();
+    // ★6回目レビュー修正1: 「進行中のためスキップ」はGASへ一度も取得しに行って
+    // いないため、skipReasonを付けない（decideSyncOutcomeが確実成功として
+    // 誤って扱わないようにするための区別）。
+    expect(out.skipReason).toBeUndefined();
   });
 
   it('古いロック（前回が異常終了して解放されなかった想定）は上書きして実行する', async () => {

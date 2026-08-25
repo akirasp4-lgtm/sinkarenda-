@@ -136,29 +136,121 @@ describe('sync-guard.js: createPreferGasTracker（5回目レビュー修正1: �
     expect(tracker.status(now)).toBe('trust');
   });
 
-  it('resolveWithHealthEvidence: markedAtより後の確実な証拠があれば、capに達していなくても解除できる', () => {
-    const tracker = SG.createPreferGasTracker({ capMs: 15 * 60 * 1000, storage: makeFakeStorage() });
-    const markedAt = 1_000_000;
-    tracker.mark(markedAt);
-    expect(tracker.isActive(markedAt + 1000)).toBe(true);
+});
 
-    const resolved = tracker.resolveWithHealthEvidence(true, markedAt - 500); // markedAtより前の証拠→不十分
-    expect(resolved).toBe(false);
-    expect(tracker.isActive(markedAt + 1000)).toBe(true);
-
-    const resolved2 = tracker.resolveWithHealthEvidence(true, markedAt + 1); // markedAtより後の証拠
-    expect(resolved2).toBe(true);
-    expect(tracker.isActive(markedAt + 2000)).toBe(false);
-  });
-
-  it('resolveWithHealthEvidence: evidenceOk:falseや証拠なしでは解除しない（確認できなければブロック継続＝安全側）', () => {
+// ★6回目レビュー修正1（高・両者一致）: 旧resolveWithHealthEvidence()（/api/healthの
+// snapshotAt＝サーバー時計とmarkedAt＝ブラウザ時計を直接比較する専用の解除経路）は
+// 削除した。「取得完了時刻」を「取得開始時刻」の代わりに使っていた欠陥と、異なる
+// 時計を直接比較していた欠陥の2つがあったため。capを超えた後（'recheck'）の解除も
+// 通常のclear(attemptStartedAt)経路に一本化し、呼び出し側（index.html/admin.htmlの
+// loadData）が実際に/api/syncをPOSTしてdecideSyncOutcome().confirmedで判定してから
+// clear()を呼ぶ設計に変えた。以下はその新しい経路の安全性を確認するテスト
+// （clear()自体の race 保護は5回目レビュー修正7のテストで既に確認済みのため、
+// ここでは「recheckがdecideSyncOutcomeの結果をどう扱うべきか」に絞る）。
+describe('sync-guard.js: createPreferGasTracker + decideSyncOutcome（6回目レビュー修正1: recheckは/api/syncのconfirmedでのみ解除）', () => {
+  it('recheckの/api/syncが「進行中でスキップ」（GASへ取得しに行けていない）で返れば、decideSyncOutcomeはconfirmed:falseを返し、呼び出し側はclear()を呼ばない設計なのでブロックは続く', () => {
     const tracker = SG.createPreferGasTracker({ storage: makeFakeStorage() });
     const markedAt = 1_000_000;
     tracker.mark(markedAt);
-    expect(tracker.resolveWithHealthEvidence(false, markedAt + 999999)).toBe(false);
-    expect(tracker.resolveWithHealthEvidence(true, undefined)).toBe(false);
-    expect(tracker.resolveWithHealthEvidence(true, NaN)).toBe(false);
+
+    const outcome = SG.decideSyncOutcome(true, { status: 'ok', skipped: true, message: '前回の同期が進行中のため今回はスキップしました' });
+    expect(outcome.confirmed).toBe(false);
+    // index.html/admin.htmlのloadDataは outcome.confirmed のときだけ clear() を呼ぶ設計。
     expect(tracker.isActive(markedAt + 1000)).toBe(true);
+  });
+
+  it('recheckの/api/syncが確実成功（skipped:false）で返れば、その場でclear()できる', () => {
+    const tracker = SG.createPreferGasTracker({ storage: makeFakeStorage() });
+    const markedAt = 1_000_000;
+    tracker.mark(markedAt);
+
+    const recheckStartedAt = tracker.beginAttempt(markedAt + 500);
+    const outcome = SG.decideSyncOutcome(true, { status: 'ok', skipped: false, rows: 42 });
+    expect(outcome.confirmed).toBe(true);
+    expect(outcome.confirmed && tracker.clear(recheckStartedAt)).toBe(true);
+    expect(tracker.isActive(markedAt + 1000)).toBe(false);
+  });
+
+  it('★静穏期対策: recheckの/api/syncが「変更なし（ハッシュ一致）によるスキップ」で返っても、GASを実際に取得しD1と一致することを確認できているため、その場でclear()できる（旧resolveWithHealthEvidenceにはこの経路が無く、静穏期の間ずっとブロックが解けなかった）', () => {
+    const tracker = SG.createPreferGasTracker({ storage: makeFakeStorage() });
+    const markedAt = 1_000_000;
+    tracker.mark(markedAt);
+
+    const recheckStartedAt = tracker.beginAttempt(markedAt + 500);
+    const outcome = SG.decideSyncOutcome(true, { status: 'ok', skipped: true, skipReason: 'unchanged', rows: 10, message: '変更なし（書き込みをスキップしました）' });
+    expect(outcome.confirmed).toBe(true);
+    expect(outcome.confirmed && tracker.clear(recheckStartedAt)).toBe(true);
+    expect(tracker.isActive(markedAt + 1000)).toBe(false);
+  });
+
+  it('recheckの/api/syncを開始した後、応答が返るまでの間に別タブの新しい失敗がmarkされていれば、recheckが確実成功でもclear()は反映されない（時計を比較しない安全策。旧実装の「取得開始と完了の取り違え」問題そのものが構造的に起きない）', () => {
+    const tracker = SG.createPreferGasTracker({ storage: makeFakeStorage() });
+    const recheckStartedAt = tracker.beginAttempt(1000); // recheckの/api/syncを開始
+    tracker.mark(1500); // その最中に別タブ（別の書き込み）が失敗してmark
+    const outcome = SG.decideSyncOutcome(true, { status: 'ok', skipped: false }); // recheck自体は確実成功で返った
+    expect(outcome.confirmed).toBe(true);
+    const cleared = outcome.confirmed && tracker.clear(recheckStartedAt);
+    expect(cleared).toBe(false); // recheck開始後により新しい問題が起きているため解除しない
+    expect(tracker.isActive(2000)).toBe(true);
+  });
+});
+
+describe('sync-guard.js: decideSyncOutcome（6回目レビュー修正1: skipReason別の確実成功判定）', () => {
+  it('skipped:true・skipReason:"unchanged"なら確実成功（forceGas:false, confirmed:true）', () => {
+    const out = SG.decideSyncOutcome(true, { status: 'ok', skipped: true, skipReason: 'unchanged' });
+    expect(out).toEqual({ forceGas: false, confirmed: true });
+  });
+
+  it('skipped:trueでもskipReasonが"unchanged"以外（未設定・"locked"等）なら従来どおり確実成功ではない', () => {
+    expect(SG.decideSyncOutcome(true, { status: 'ok', skipped: true }).confirmed).toBe(false);
+    expect(SG.decideSyncOutcome(true, { status: 'ok', skipped: true, skipReason: 'locked' }).confirmed).toBe(false);
+  });
+
+  it('status:"error"やHTTPエラーのときは、skipReason:"unchanged"が付いていても確実成功ではない（あり得ない組合せだが念のため）', () => {
+    expect(SG.decideSyncOutcome(true, { status: 'error', skipped: true, skipReason: 'unchanged' }).confirmed).toBe(false);
+    expect(SG.decideSyncOutcome(false, { status: 'ok', skipped: true, skipReason: 'unchanged' }).confirmed).toBe(false);
+  });
+});
+
+describe('sync-guard.js: createPreferGasTracker（6回目レビュー修正2・中・Fable 5: localStorageのsetItemが後から失敗しても古い値を読み続けない）', () => {
+  it('setItemが失敗（例: 他アプリのデータでquotaが埋まった）しても、storageに残っていた古い値（過去にclear()できたときの{markedAt:null}等）を読み続けない。同じタブ内でmark()直後のisActive()が正しくtrueになる', () => {
+    const map = new Map();
+    map.set('yotei-cf-prefer-gas-v1', JSON.stringify({ markedAt: null })); // quota超過前に書けていた古い値
+    const storage = {
+      getItem: (k) => (map.has(k) ? map.get(k) : null),
+      setItem: (k) => {
+        if (k === '__sync_guard_test__') return; // createPreferGasTracker初期化時の試し書きだけ許可（detectLocalStorage）
+        throw new Error('QuotaExceededError');
+      },
+      removeItem: (k) => { map.delete(k); }
+    };
+    const tracker = SG.createPreferGasTracker({ storage });
+    const now = 1_000_000;
+    tracker.mark(now);
+    // 旧実装のバグ: storageに残った古い{markedAt:null}をreadState()が優先してしまい、
+    // 同じタブ内の直後のisActive()もfalseのままになっていた（安全側のはずが危険側に反転）。
+    expect(tracker.isActive(now)).toBe(true);
+    expect(tracker.status(now)).toBe('block');
+  });
+
+  it('setItem失敗時にremoveItem（実キー）も失敗する場合は、以後このtrackerインスタンスがstorageを使わずメモリのみで動く（例外を投げない）', () => {
+    const map = new Map();
+    map.set('yotei-cf-prefer-gas-v1', JSON.stringify({ markedAt: null }));
+    const storage = {
+      getItem: (k) => (map.has(k) ? map.get(k) : null),
+      setItem: (k) => {
+        if (k === '__sync_guard_test__') return; // 初期化時の試し書きは許可（detectLocalStorage）
+        throw new Error('QuotaExceededError');
+      },
+      removeItem: (k) => {
+        if (k === '__sync_guard_test__') return; // 初期化時の試し消去は許可（detectLocalStorageを通すため）
+        throw new Error('storage blocked'); // 実キーの削除は失敗する（storageが完全に壊れている想定）
+      }
+    };
+    const tracker = SG.createPreferGasTracker({ storage });
+    const now = 1_000_000;
+    expect(() => tracker.mark(now)).not.toThrow();
+    expect(tracker.isActive(now)).toBe(true);
   });
 });
 

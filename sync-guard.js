@@ -54,13 +54,40 @@
 //     確認してからでないと反映しない（＝古い試行の成功が新しい試行のmarkを
 //     消せない）。mark()は常に反映する（安全側に倒すだけなので、順序を気にする
 //     必要が無い）。
+//
+// ★2026-08-25 6回目レビュー（Fable 5・Codex 両者が収束・「切り替えてよい」の
+// 手順条件として指摘された2件）:
+//   修正1（高）: capを超えた後の解除経路resolveWithHealthEvidence()を廃止した。
+//     /api/healthのsnapshotAt（GAS取り込みの完了時刻・サーバー時計）とmarkedAt
+//     （ブラウザ時計）を直接比較しており、(a)「取得開始がmarkより前だが完了が
+//     markより後」の同期でも誤って解除できる、(b) 端末の時計ずれで解除の窓が
+//     広がる、という2つの穴があった。代わりに、capに達したときも通常のclear
+//     経路と同じ仕組み（実際に/api/syncをPOSTし、decideSyncOutcome().confirmed
+//     で判定してからclear(attemptStartedAt)を呼ぶ）に一本化した。これにより
+//     時計比較そのものが無くなる（比較する2つの時刻がどちらもブラウザ側の
+//     Date.now()になるため）。あわせて、cf/src/sync.jsの「変更なし（ハッシュ
+//     一致）によるスキップ」にskipReason:'unchanged'を追加し、decideSyncOutcome
+//     がこれも確実成功として扱うようにした（GASが回復した後もデータが一切
+//     変化しない静穏期の間ずっとブロックが解けない、という副作用も同時に解消）。
+//   修正2（中・Fable 5）: writeState()がsetItem失敗時に何もしていなかったため、
+//     「以前は書けていた古い値（例:{markedAt:null}）がstorageに残ったまま」に
+//     なり、readState()が常にstorageを優先する結果、同じタブ内の直後の
+//     readState()すら最新のmark（メモリには反映済み）を見失っていた（安全側の
+//     はずが危険側に反転）。setItem失敗時はstorageのキーを消し、readState()を
+//     メモリへフォールバックさせるよう直した。
 (function (root) {
   'use strict';
 
   // ★5回目レビュー修正1: 「時間が経てば無条件解除」をやめたため、この定数は
   // もう「stickyの持続時間」ではなく「時間だけでは絶対に超えて良いブロック期間の
-  // 上限（cap）」という意味に変わった。上限に達しても自動では解除されない
-  // （呼び出し側がresolveWithHealthEvidenceで確認できたときだけ解除される）。
+  // 上限（cap）」という意味に変わった。上限に達しても自動では解除されない。
+  // ★6回目レビュー修正3（記録の訂正）: capは「ブロックを終わらせる上限」ではない。
+  // 呼び出し側（index.html/admin.htmlのloadData）がcapに達したことをきっかけに
+  // 「本当に確実成功したか」の再確認（recheck。★6回目レビュー修正1で/api/syncを
+  // POSTして直接確かめる方式に変更。旧実装は/api/healthのsnapshotAtを見るだけ
+  // だった）を1回試みるだけのトリガーであり、確認できなければ無期限にブロックが
+  // 続く。「sticky最大15分」という言い方は、この「無期限にもなりうる」実態を
+  // 誤解させるため使わない。
   // 15分＝D1側の鮮度ガード（cf/src/read.jsのFRESHNESS_THRESHOLD_MS）と同じ値。
   // 「D1がまだ正常返却できる程度に新しい」とみなされる期間と揃えてあるだけで、
   // これ自体が解除の根拠にはならない。
@@ -100,10 +127,21 @@
   // （＝今回は「確実に成功した」と言えないか）を判定する。
   //   resOk: HTTPステータスが2xxだったか
   //   json:  レスポンスボディ（パース失敗・未取得ならnullを渡す）
-  // 「確実成功」の定義は3回目レビュー修正2から変わっていない
-  // （HTTP 200・JSON.status==='ok'・skippedでない）。
+  // 「確実成功」の定義は3回目レビュー修正2（HTTP 200・JSON.status==='ok'・
+  // skippedでない）が基本だが、
+  // ★6回目レビュー修正1（高・両者一致・Fable 5推奨）: skipped:trueでも
+  // json.skipReason==='unchanged'（GASを実際に取得した結果、既存のD1と
+  // ハッシュが完全一致したためのスキップ＝cf/src/sync.js参照）は確実成功として
+  // 扱う。GASへ実際に取得しに行き、D1が既に同一内容であることまで確認できて
+  // いるため、これを「確実成功でない」として扱い続けるとGAS復旧後もデータが
+  // 一切変化しない静穏期の間ずっとブロックが解けない欠陥になる
+  // （旧実装のindex.html/admin.htmlのrecheck分岐がこの欠陥を持っていた）。
+  // 「進行中のためスキップ」（GASへ一度も取得しに行っていない）にはskipReasonが
+  // 付かないため、これまでどおり確実成功として扱わない（安全側を維持）。
   function decideSyncOutcome(resOk, json) {
-    var confirmed = !!(resOk && json && json.status === 'ok' && !json.skipped);
+    var okStatus = !!(resOk && json && json.status === 'ok');
+    var confirmedBySkip = !!(json && json.skipped && json.skipReason === 'unchanged');
+    var confirmed = okStatus && (!(json && json.skipped) || confirmedBySkip);
     return { forceGas: !confirmed, confirmed: confirmed };
   }
 
@@ -134,8 +172,16 @@
   // ★5回目レビュー修正1（重大・両者一致）: 状態が持つのは「until」ではなく
   // 「markedAt（直近、確実成功でなかった時刻。ブロックしていなければnull）」。
   // isActive/statusは時間だけでfalseへは戻らない。解除は必ずclear()（確実成功を
-  // 観測したとき）かresolveWithHealthEvidence()（capを超えた後、healthで確認できた
-  // とき）を経由する。
+  // 観測したとき）を経由する。
+  // ★6回目レビュー修正1（高・両者一致）: capを超えた後（status()==='recheck'）の
+  // 解除経路は、旧実装は専用のresolveWithHealthEvidence()（/api/healthのsnapshotAt
+  // ＝サーバー時計と、markedAt＝ブラウザ時計を直接比較）を持っていたが削除した。
+  // 「取得完了時刻」と「取得開始時刻」を取り違えると誤解除しうる欠陥があったため
+  // （詳細はこの下のPREFER_GAS_CAP_MSコメント）。今は呼び出し側が実際に/api/syncを
+  // POSTして直接確かめ、decideSyncOutcome().confirmedがtrueのときだけ通常のclear()
+  // を呼ぶ設計に一本化した（index.html/admin.htmlのloadData参照）。clear()自体は
+  // markedAtともattemptStartedAtとも「ブラウザ側のDate.now()」だけで比較するため、
+  // サーバー時計との突き合わせが原理的に発生しない。
   //
   // ★5回目レビュー修正7（中・Codex）: clear()は「この呼び出しが対応する試行が
   // 開始した時刻」（beginAttemptの返り値）を受け取り、その時刻より後に記録された
@@ -179,7 +225,23 @@
         try {
           storage.setItem(storageKey, JSON.stringify(state));
         } catch (e) {
-          // 書けなくても致命的ではない（メモリには反映済み。このタブ内では正しく動く）
+          // ★6回目レビュー修正2（中・Fable 5）: 旧実装はここで失敗を握りつぶすだけ
+          // だった。すると、以前は書けていた古い値（例: 過去にclear()できたときの
+          // {markedAt:null}）がstorageに残ったままになり、readState()は常に
+          // storageを優先するため、直後のreadState()（同じタブ内の次のloadData等）
+          // が古い値を読んでmemoryStateの最新のmark（危険を示す情報）を見失う
+          // （安全側のはずが危険側に反転する）。このアプリは同じlocalStorageに
+          // 全データキャッシュ（実測700KB≒UTF-16で1.4MB）も書いており、他アプリと
+          // 共有するquota（5MB前後）が埋まって setItem だけ失敗するのは現実的に
+          // 起こりうる。storageのキーを消してreadState()をメモリへフォールバック
+          // させる。removeItem自体が失敗する（quota超過ではなくstorageそのものが
+          // 使えない）場合は、以後このtrackerインスタンスではstorageを使わず
+          // メモリのみで動かす（このタブ内では、この時点から正しく動く）。
+          try {
+            storage.removeItem(storageKey);
+          } catch (e2) {
+            storage = null;
+          }
         }
       }
     }
@@ -214,8 +276,10 @@
       //   'trust'   : ブロックしていない。D1を読んでよい。
       //   'block'   : ブロック中（cap未満）。D1を読まずGASを使う。
       //   'recheck' : cap（上限）に達した。時間だけでは解除しない。呼び出し側は
-      //               /api/healthを見て確認してから resolveWithHealthEvidence() を
-      //               呼ぶこと（確認できなければ実質'block'と同じに扱ってよい）。
+      //               実際に/api/syncをPOSTして確かめ、decideSyncOutcome().confirmed
+      //               がtrueのときだけ通常のclear(attemptStartedAt)を呼ぶこと
+      //               （★6回目レビュー修正1。確認できなければ実質'block'と同じに
+      //               扱ってよい＝呼び出し側は何もしなければ自動的にそうなる）。
       status: function (now) {
         var n = typeof now === 'number' ? now : Date.now();
         var state = readState();
@@ -229,26 +293,20 @@
       isActive: function (now) {
         return this.status(now) !== 'trust';
       },
-      // ★5回目レビュー修正1（capに達した後の解除経路）: /api/healthから読み取った
-      // 「直近の確実な同期成功」の証拠を渡し、それがmarkedAtより後であれば解除する。
-      //   evidenceOk:    health応答が信用できる形だったか（呼び出し側が判定）
-      //   evidenceAtMs:  その証拠の時刻（epoch ms）。例えばhealth.snapshotAtは
-      //                  「実際に中身が変わって書き込まれた」ときだけ進む値なので、
-      //                  これがmarkedAtより後なら「mark後に確実な取り込みがあった」
-      //                  ことの強い証拠になる。
-      // markedAtより後の証拠が無ければ解除しない（＝ブロックを継続。安全側）。
-      // capに達しているかどうかに関わらず、確実な証拠さえあれば解除してよい
-      // （capはあくまで「呼び出し側がheartbeatを確認しに行く目安のタイミング」であり、
-      // 解除そのものの必須条件ではない）。
-      resolveWithHealthEvidence: function (evidenceOk, evidenceAtMs) {
-        var state = readState();
-        if (state.markedAt === null) return true;
-        if (evidenceOk && typeof evidenceAtMs === 'number' && Number.isFinite(evidenceAtMs) && evidenceAtMs > state.markedAt) {
-          writeState({ markedAt: null });
-          return true;
-        }
-        return false;
-      },
+      // ★6回目レビュー修正1（高・両者一致）: 旧実装はここに resolveWithHealthEvidence()
+      // （/api/healthのsnapshotAtとmarkedAtを比較して解除する専用メソッド）を持って
+      // いたが削除した。理由（2点。詳細はfix-round6-report.md）:
+      //   1. snapshotAtは「書き込み完了時刻」であり、GAS取得の「開始時刻」ではない。
+      //      「取得開始がmarkより前（＝利用者の書き込みを含まない内容）だが完了が
+      //      markより後」という同期でも証拠として通ってしまう欠陥があった。
+      //   2. markedAtはブラウザの時計、snapshotAtはサーバーの時計であり、
+      //      異なる時計を直接比較していた（端末の時計が遅れているだけで誤解除の
+      //      窓が広がる）。
+      // 解除はどちらの経路（cap未満のclear／capを超えた後のrecheck）でも同じ
+      // clear(attemptStartedAt)だけを使う。呼び出し側は実際に/api/syncをPOSTし、
+      // decideSyncOutcome().confirmedがtrueのときだけclear()を呼ぶ（index.html/
+      // admin.htmlのloadData参照）。beginAttempt/markedAt/clearはすべてブラウザ側の
+      // Date.now()だけで完結するため、サーバー時計との比較が原理的に発生しない。
       markedAtValue: function () { return readState().markedAt; },
       capMsValue: function () { return capMs; }
     };
