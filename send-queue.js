@@ -5,6 +5,14 @@
 // この箱は「次にどれを送るか」だけを判断する純ロジックで、DOMにもfetchにも
 // 触らない。だからNode/vitestからそのままテストできる（sync-guard.jsと同じ方針）。
 // 画面側（index.html/admin.html）が実際の送信を担当する。
+//
+// ★修正ラウンド2・変更1: 保存の形を「1つのキーに全項目をまとめる」から
+// 「1件＝1キー（storageKey + ':' + id）」に変えた。別々の項目を触る2つの
+// タブがそもそも同じキーを書かなくなるため、「読み直してから丸ごと書き戻す」
+// ことに伴う交錯（修正ラウンド1でCritical C-1として直しても窓を塞ぎ切れな
+// かった問題）が構造的に起きなくなる。同じ項目を2つのタブが同時に触るケース
+// （既存のリース・初回所有権が通常は防ぐ）だけ、beginSend内の読み直し確認で
+// 引き続き二重に守る。
 (function (root) {
   'use strict';
 
@@ -14,27 +22,18 @@
   var DEFAULT_GIVE_UP = 10;
   var DEFAULT_BACKOFF = [5000, 15000, 45000, 120000, 300000];
 
-  // ★レビュー修正ラウンド1・Critical: readStateが読み込んだitemsの各要素を検疫する。
-  // 捨てる条件はこの2つだけに限定する（厳しくしすぎて正常な項目を捨てないため）:
-  //   - 項目がオブジェクトでない（null・数値・文字列等）
-  //   - idが空文字、またはrowsが配列でない
-  // これを怠ると、一度壊れた項目がstorageに乗った時点でlist()/pendingRows()が
-  // 毎回例外を投げ続け、未送信が永久に送られなくなる（帯の表示・カレンダーへの
-  // 合流・送信ループはすべてこの2つを呼ぶ）。
-  function sanitizeItems(rawItems) {
-    var out = [];
-    for (var i = 0; i < rawItems.length; i++) {
-      var it = rawItems[i];
-      if (!it || typeof it !== 'object') continue;
-      var id = typeof it.id === 'string' ? it.id : String(it.id || '');
-      if (!id) continue;
-      if (!Array.isArray(it.rows)) continue;
-      out.push(it);
-    }
-    return out;
+  // 項目1件の形が正しいかを検査する。壊れていたら null を返すだけで、
+  // 呼び出し側はそのキーを読み飛ばす。
+  // ★修正ラウンド2・変更1: 消さない。職人が入力した予定そのものなので、
+  // 壊れて読めないからといって勝手に消していい理由がない（変更2と同じ考え方）。
+  function sanitizeItem(it) {
+    if (!it || typeof it !== 'object') return null;
+    var id = typeof it.id === 'string' ? it.id : String(it.id || '');
+    if (!id) return null;
+    if (!Array.isArray(it.rows)) return null;
+    return it;
   }
 
-  // ★レビュー修正ラウンド1・Important 2: rowsの中身を深く複製する。
   // rowsに積まれるのは文字列・数値・真偽値だけ（index.html:1961で日付は
   // YYYY-MM-DD文字列、1976-1977で時刻はinputのvalue＝文字列、人工は数値、
   // フラグは真偽値であることを確認済み）なのでJSON往復で複製できる。
@@ -51,6 +50,7 @@
     var o = opts || {};
     var storage = o.storage || null;
     var storageKey = o.storageKey || DEFAULT_KEY;
+    var prefix = storageKey + ':';
     var tabId = String(o.tabId || 'tab');
     var maxItems = typeof o.maxItems === 'number' ? o.maxItems : DEFAULT_MAX;
     var leaseMs = typeof o.leaseMs === 'number' ? o.leaseMs : DEFAULT_LEASE_MS;
@@ -69,74 +69,85 @@
       } catch (e) { usable = false; }
     }
 
-    // storageが使えなくなったときだけ使う控え。usableな間はこれを読まない。
-    var memory = null;
+    // storageが使えない／使えなくなったときに使う控え（id → 項目）。
+    // usableな間もopportunisticに更新するが、そこから読みに行くのはusableが
+    // falseの間だけ（Task1の「memory」を1件単位のMapにした形）。
+    var memory = new Map();
 
-    // ★着手前スキャンで発見した欠陥（2026-08-25）:
-    // 「一度読んだらメモリに抱えて二度とstorageを読み直さない」実装にすると、
-    // 別タブが後から入れた未送信を、先に開いていたタブが見失う。さらに
-    // writeStateは状態を丸ごと書き戻すため、先に開いていたタブが次に何か
-    // 書いた時点で **別タブの未送信が消える**（登録が黙って失われる＝
-    // このアプリで一番防ぎたい事故）。
-    // → storageが使える間は毎回storageから読み直す。localStorageの読み取りは
-    //   小さなJSONのparseなので、この頻度では速度上の問題にならない。
-    function readState() {
+    // 1件読む。storageが使える間は毎回storageから読み直す（Task1由来の
+    // 「毎回読み直す」方針を1件単位に引き継ぐ）。読めたらmemoryにも反映し、
+    // 無ければmemoryからも消す（他タブが消した項目を抱え込み続けないため）。
+    function readItem(id) {
       if (storage && usable) {
-        var st = { v: 1, items: [] };
         try {
-          var raw = storage.getItem(storageKey);
-          if (raw) {
-            var parsed = JSON.parse(raw);
-            if (parsed && Array.isArray(parsed.items)) {
-              st = { v: 1, items: sanitizeItems(parsed.items) };
-            }
-          }
-        } catch (e) { /* 壊れていたら空として扱う */ }
-        memory = st;
-        return st;
+          var raw = storage.getItem(prefix + id);
+          if (!raw) { memory.delete(id); return null; }
+          var it = sanitizeItem(JSON.parse(raw));
+          if (it) memory.set(id, it);
+          return it;
+        } catch (e) { return null; }
       }
-      if (!memory) memory = { v: 1, items: [] };
-      return memory;
+      return memory.has(id) ? memory.get(id) : null;
     }
 
-    function writeState(st) {
-      memory = st;
-      // ★レビュー修正ラウンド1・Important I-2: 一度usableがfalseに落ちたタブは、
-      // その後storageへ一切書き込まない（メモリのみで動く）。usable===falseのまま
-      // storageへの書き込みを試み続けると、このタブが持つ古い（storageと食い違った）
-      // memoryの内容を、storageが回復した後に上書きしてしまい、その間に別タブが
-      // 正しく書き込んだ未送信を消してしまう（実測済みの事故）。
+    // 1件書く。
+    // ★修正ラウンド2・変更2: 失敗してもキーを消さない（sync-guard.jsの踏襲を
+    // やめる）。この箱に入っているのは職人が入力した予定そのものであり、キーを
+    // 消す＝未送信の全消去になる。usable=falseにしてメモリ運転へ移るだけにする。
+    // storageに古い内容が残っても、以後readItem/listAllItemsはmemoryを見る
+    // ので実害はない。むしろ次にページを開いてstorageが回復したとき、残って
+    // いた古い内容がそのまま読まれて送信される＝救済になる。
+    function writeItem(item) {
+      memory.set(item.id, item);
       if (!storage || !usable) return false;
       try {
-        storage.setItem(storageKey, JSON.stringify(st));
+        storage.setItem(prefix + item.id, JSON.stringify(item));
         return true;
       } catch (e) {
-        // ★sync-guard.jsの6回目レビュー修正2と同じ手当て:
-        // 古い内容が残ったまま読み勝つことを防ぐため、キーを消してメモリへ倒す。
-        try { storage.removeItem(storageKey); } catch (e2) { /* noop */ }
         usable = false;
         return false;
       }
     }
 
-    // ★レビュー修正ラウンド1・Important 1: 状態を変更する処理は必ずこれを通す。
-    // 直前に読み直してから変更して書くため、「読んでから書くまでの間に別タブが
-    // 入れた内容」を巻き込まずに済む。fnの中でawaitを挟まないこと（挟むと窓が
-    // 再び開く）。Task 2で追加するbeginSend/markSent/markFailed/retryNowも同じ
-    // 入口を使う前提なので、_internalsとして外から使える形にしておく。
-    // 限界: localStorageには比較交換（CAS）が無いため、2つのタブが同じ同期
-    // ブロックで書いた場合の競合までは防げない（1人1端末が基本の業務アプリの
-    // ため許容）。
-    function mutate(fn) {
-      var st = readState();          // 直前に読み直す
-      var dirty = fn(st);
-      // ★レビュー修正ラウンド1・Minor M-1: fnが実際に書き換えた（truthyを返した）
-      // ときだけ書く。「見つからない・変化なし」の呼び出しでも無条件に書いていると、
-      // 読んでから書くまでの間に別タブが割り込める窓（C-1で防ごうとしている交錯）を
-      // 無駄に広げてしまう。beginSendの永続化ゲート（書けなかったらnull）は
-      // dirtyがtrueのときのwriteStateの成否で判定されるため、この変更では壊れない。
-      var ok = dirty ? writeState(st) : true;
-      return { ok: ok, ret: dirty };
+    function deleteItem(id) {
+      memory.delete(id);
+      if (!storage || !usable) return;
+      try { storage.removeItem(prefix + id); } catch (e) { /* noop */ }
+    }
+
+    // 全件を走査する。
+    // ★修正ラウンド2・変更3: このオリジンには他アプリの大きなキャッシュ等も
+    // 同居しているため、走査は prefix（storageKey + ':'）の前方一致に厳密に
+    // 限定する。それ以外のキー（無関係なキー・旧形式の1キーまとめ）は読みも
+    // 消しもしない。
+    function listAllItems() {
+      var out = [];
+      if (storage && usable) {
+        var len = 0;
+        try { len = storage.length; } catch (e) { len = 0; }
+        var seen = {};
+        for (var i = 0; i < len; i++) {
+          var k = null;
+          try { k = storage.key(i); } catch (e) { k = null; }
+          if (typeof k !== 'string' || k.indexOf(prefix) !== 0) continue;
+          var id = k.slice(prefix.length);
+          seen[id] = true;
+          try {
+            var raw = storage.getItem(k);
+            if (!raw) continue;
+            var it = sanitizeItem(JSON.parse(raw));
+            if (it) { out.push(it); memory.set(id, it); }
+          } catch (e) { /* 壊れていたら読み飛ばす（storageからは消さない） */ }
+        }
+        // storage側で見えなくなった項目はmemoryのミラーからも落とす（他タブが
+        // 送り終えて消した項目を、usable=falseに落ちた後まで「未送信」として
+        // 抱え続けないため）。
+        memory.forEach(function (_v, mid) { if (!seen[mid]) memory.delete(mid); });
+      } else {
+        memory.forEach(function (it) { out.push(it); });
+      }
+      out.sort(function (a, b) { return (a.createdAt || 0) - (b.createdAt || 0); });
+      return out;
     }
 
     function copyItems(items) {
@@ -148,13 +159,6 @@
           gaveUp: !!it.gaveUp, owner: it.owner || '', claimedAt: it.claimedAt || 0
         };
       });
-    }
-
-    function findItem(st, id) {
-      for (var i = 0; i < st.items.length; i++) {
-        if (st.items[i].id === String(id)) return st.items[i];
-      }
-      return null;
     }
 
     // tokenは「どのタブの、何回目の試行か」。これが一致しない限り
@@ -184,28 +188,23 @@
         var id = String(item.id || '');
         var rows = Array.isArray(item.rows) ? item.rows : [];
         if (!id || rows.length === 0) return false;
-        var accepted = false;
-        mutate(function (st) {
-          if (st.items.length >= maxItems) { accepted = false; return false; }
-          st.items.push({
-            id: id, rows: cloneRows(rows), company: String(item.company || ''),
-            createdAt: typeof now === 'number' ? now : 0,
-            attempts: 0, nextAt: 0, lastError: '', gaveUp: false,
-            owner: tabId, claimedAt: 0
-          });
-          accepted = true;
-          return true;
+        if (listAllItems().length >= maxItems) return false;
+        writeItem({
+          id: id, rows: cloneRows(rows), company: String(item.company || ''),
+          createdAt: typeof now === 'number' ? now : 0,
+          attempts: 0, nextAt: 0, lastError: '', gaveUp: false,
+          owner: tabId, claimedAt: 0
         });
-        return accepted;
+        return true;
       },
 
-      list: function () { return copyItems(readState().items); },
-      count: function () { return readState().items.length; },
+      list: function () { return copyItems(listAllItems()); },
+      count: function () { return listAllItems().length; },
 
       pendingRows: function (company) {
         var want = typeof company === 'string' && company !== '' ? company : null;
         var out = [];
-        readState().items.forEach(function (it) {
+        listAllItems().forEach(function (it) {
           if (want !== null && it.company !== want) return;
           cloneRows(it.rows || []).forEach(function (r) { out.push(r); });
         });
@@ -214,110 +213,87 @@
 
       nextDue: function (now) {
         var n = typeof now === 'number' ? now : 0;
-        var st = readState();
-        for (var i = 0; i < st.items.length; i++) {
-          if (isDue(st.items[i], n)) return copyItems([st.items[i]])[0];
+        var items = listAllItems();
+        for (var i = 0; i < items.length; i++) {
+          if (isDue(items[i], n)) return copyItems([items[i]])[0];
         }
         return null;
       },
 
       // ★fetchの前に attempts を +1 して永続化する（設計書D9）。
-      // Task 1で導入した mutate() を通す＝「直前に読み直してから変更して書く」ため、
-      // 別タブが後から入れた未送信を巻き込まずに済む（fnの中でawaitは挟まない）。
       // 永続化できなければ null を返して送らせない（記録が残らない以上、
-      // 次回に再送扱いへ倒せず、二重登録の危険が残るため。mutate().ok で判定する）。
+      // 次回に再送扱いへ倒せず、二重登録の危険が残るため）。
       beginSend: function (id, now) {
         var n = typeof now === 'number' ? now : 0;
-        var found = false;
-        var token = null;
-        var wasRetry = false;
-        var expectedOwner = tabId;
-        var expectedAttempts = 0;
-        var m = mutate(function (st) {
-          var it = findItem(st, id);
-          if (!it || !isDue(it, n)) return false;
-          found = true;
-          wasRetry = (it.attempts || 0) >= 1;
-          it.attempts = (it.attempts || 0) + 1;
-          it.owner = tabId;
-          it.claimedAt = n;
-          token = tokenOf(it);
-          expectedAttempts = it.attempts;
-          return true;
-        });
-        if (!found || !m.ok) return null;
+        var it = readItem(id);
+        if (!it || !isDue(it, n)) return null;
+        var wasRetry = (it.attempts || 0) >= 1;
+        var updated = {
+          id: it.id, rows: cloneRows(it.rows || []), company: it.company || '',
+          createdAt: it.createdAt || 0, attempts: (it.attempts || 0) + 1,
+          nextAt: it.nextAt || 0, lastError: it.lastError || '',
+          gaveUp: !!it.gaveUp, owner: tabId, claimedAt: n
+        };
+        var token = tokenOf(updated);
+        if (!writeItem(updated)) return null;
 
-        // ★レビュー修正ラウンド1・Critical C-1（設計書D2(b)）: localStorageには
-        // 比較交換（CAS）が無いため、上のmutateが書いた直後に、別タブが「読んで
-        // からこの書き込みより前に取っていた古いスナップショット」をそのまま
-        // 書き戻すと、attempts/ownerがこの書き込み以前の値に巻き戻ることがある。
-        // 書いて終わりにせず、もう一度storageから読み直して「自分が書いたはずの
-        // 値」がまだ残っているか確認する。巻き戻っていたら null を返して送らせない
-        // （＝attemptsが0のまま拾われてwasRetry:falseになり、二重登録に至る事故を
-        // 防ぐ）。
-        var verify = readState();
-        var after = findItem(verify, id);
-        if (!after || after.owner !== expectedOwner || (after.attempts || 0) !== expectedAttempts) {
+        // ★修正ラウンド1・Critical C-1（設計書D2(b)）を1件キーの世界に引き継ぐ:
+        // localStorageにはCASが無いため、同じキーへ他タブが同時に書き込んだ
+        // 場合の競合はまだ残りうる（既存のリース・初回所有権で通常は起きない
+        // 想定だが、二重に確かめる）。書いた直後にもう一度読み直し、自分が
+        // 書いたはずの値がまだ残っているか確認する。巻き戻っていたら null を
+        // 返して送らせない。
+        var after = readItem(id);
+        if (!after || after.owner !== tabId || (after.attempts || 0) !== updated.attempts) {
           return null;
         }
         return { token: token, wasRetry: wasRetry };
       },
 
       markSent: function (id, token) {
-        var found = false;
-        mutate(function (st) {
-          var it = findItem(st, id);
-          if (!it || tokenOf(it) !== String(token)) return false;
-          found = true;
-          st.items = st.items.filter(function (x) { return x !== it; });
-          return true;
-        });
-        return found;
+        var it = readItem(id);
+        if (!it || tokenOf(it) !== String(token)) return false;
+        deleteItem(id);
+        return true;
       },
 
       markFailed: function (id, token, message, now) {
         var n = typeof now === 'number' ? now : 0;
-        var found = false;
-        mutate(function (st) {
-          var it = findItem(st, id);
-          if (!it || tokenOf(it) !== String(token)) return false;
-          found = true;
-          var idx = Math.min(Math.max((it.attempts || 1) - 1, 0), backoffMs.length - 1);
-          it.nextAt = n + backoffMs[idx];
-          it.lastError = String(message || '');
-          it.claimedAt = 0;
-          if ((it.attempts || 0) >= giveUpAfter) it.gaveUp = true;
-          return true;
+        var it = readItem(id);
+        if (!it || tokenOf(it) !== String(token)) return false;
+        var idx = Math.min(Math.max((it.attempts || 1) - 1, 0), backoffMs.length - 1);
+        writeItem({
+          id: it.id, rows: cloneRows(it.rows || []), company: it.company || '',
+          createdAt: it.createdAt || 0, attempts: it.attempts || 0,
+          nextAt: n + backoffMs[idx], lastError: String(message || ''),
+          gaveUp: !!it.gaveUp || (it.attempts || 0) >= giveUpAfter,
+          owner: it.owner || '', claimedAt: 0
         });
-        return found;
+        return true;
       },
 
       retryNow: function (id, now) {
-        var n = typeof now === 'number' ? now : 0;
-        var found = false;
-        mutate(function (st) {
-          var it = findItem(st, id);
-          if (!it) return false;
-          found = true;
-          it.gaveUp = false;
-          it.nextAt = 0;
-          it.claimedAt = 0;
-          it.owner = tabId;
-          return true;
+        var it = readItem(id);
+        if (!it) return false;
+        writeItem({
+          id: it.id, rows: cloneRows(it.rows || []), company: it.company || '',
+          createdAt: it.createdAt || 0, attempts: it.attempts || 0,
+          nextAt: 0, lastError: it.lastError || '',
+          gaveUp: false, owner: tabId, claimedAt: 0
         });
-        return found;
+        return true;
       },
 
       gaveUpCount: function () {
-        return readState().items.filter(function (it) { return !!it.gaveUp; }).length;
+        return listAllItems().filter(function (it) { return !!it.gaveUp; }).length;
       },
 
-      // ★Task 2以降（beginSend/markSent/markFailed/retryNow等）が同じ入口を
-      // 使えるように公開する。テストからも直接検証できる。
+      // ★テストから1件単位の入出力を直接検証できるように公開する。
       _internals: {
-        mutate: mutate,
-        readState: readState,
-        writeState: writeState
+        readItem: readItem,
+        writeItem: writeItem,
+        deleteItem: deleteItem,
+        listAllItems: listAllItems
       }
     };
   }

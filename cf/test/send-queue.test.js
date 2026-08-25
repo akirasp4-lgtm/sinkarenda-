@@ -8,6 +8,9 @@ const require = createRequire(import.meta.url);
 const SQ = require('../../send-queue.js');
 
 // localStorage の代わり。setItem を失敗させられる。
+// ★修正ラウンド2: 本物の localStorage と同じ形で length / key(i) を持たせる
+// （send-queue.js が「1件＝1キー」の走査に storage.length / storage.key(i) を
+// 使うようになったため）。Map の挿入順で返せば十分。
 function makeStorage(opts) {
   const o = opts || {};
   const map = new Map();
@@ -17,6 +20,11 @@ function makeStorage(opts) {
     getItem(k) { return map.has(k) ? map.get(k) : null; },
     setItem(k, v) { if (this.failSet) throw new Error('quota'); map.set(k, String(v)); },
     removeItem(k) { if (this.failRemove) throw new Error('no'); map.delete(k); },
+    get length() { return map.size; },
+    key(i) {
+      const keys = Array.from(map.keys());
+      return i >= 0 && i < keys.length ? keys[i] : null;
+    },
     _map: map
   };
 }
@@ -110,25 +118,30 @@ describe('send-queue.js Task1: 箱（永続化・投入・一覧）', () => {
     expect(q.count()).toBe(0);
   });
 
-  it('storageの値がJSON文字列として壊れていて丸ごとparseに失敗しても、空として扱い落ちない（下の「壊れた項目」テストとは別ケース＝JSON.parse自体の失敗）', () => {
+  // ★修正ラウンド2・変更1で「1つのキーに全項目をまとめる」形をやめたため、
+  // このテストは「1件のキーの値が壊れているケース」に作り替えた。
+  it('1件のキーの値がJSON文字列として壊れていても、そのキーだけ読み飛ばして落ちない（他は正常に動く。壊れたキー自体は消さない）', () => {
     const st = makeStorage();
-    st._map.set('yotei-pending-add-v1', '{壊れ');
+    st._map.set('yotei-pending-add-v1:BAD-1', '{壊れ');
     const q = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
     expect(q.count()).toBe(0);
     expect(q.enqueue(ITEM, 1)).toBe(true);
+    expect(q.count()).toBe(1);
+    expect(st._map.has('yotei-pending-add-v1:BAD-1')).toBe(true); // 消えていない
   });
 
-  it('★Critical修正: 壊れた項目（null・空文字id・文字列・rowsが配列でない）が混ざっていても list()/pendingRows()/count() が落ちず、正常な項目だけが残る', () => {
+  it('★Critical修正: 壊れた項目（JSON破損・空文字id・オブジェクトでない・rowsが配列でない）が別々のキーに混ざっていても list()/pendingRows()/count() が落ちず、正常な項目だけが残る（壊れたキー自体は消さない）', () => {
     const st = makeStorage();
     const good = {
       id: 'GOOD-1', rows: [ROW], company: 'グローライズ',
       createdAt: 1, attempts: 0, nextAt: 0, lastError: '', gaveUp: false,
       owner: 'tab-a', claimedAt: 0
     };
-    st._map.set('yotei-pending-add-v1', JSON.stringify({
-      v: 1,
-      items: [null, { id: '', rows: [] }, '文字列', { id: 'BAD-2', rows: 'notarray' }, good]
-    }));
+    st._map.set('yotei-pending-add-v1:BAD-1', '{壊れ');                                   // JSON破損
+    st._map.set('yotei-pending-add-v1:BAD-2', JSON.stringify({ id: '', rows: [] }));      // id空
+    st._map.set('yotei-pending-add-v1:BAD-3', JSON.stringify('文字列'));                   // オブジェクトでない
+    st._map.set('yotei-pending-add-v1:BAD-4', JSON.stringify({ id: 'BAD-4', rows: 'x' })); // rowsが配列でない
+    st._map.set('yotei-pending-add-v1:GOOD-1', JSON.stringify(good));
     const q = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
     expect(() => q.count()).not.toThrow();
     expect(() => q.list()).not.toThrow();
@@ -136,12 +149,25 @@ describe('send-queue.js Task1: 箱（永続化・投入・一覧）', () => {
     expect(q.count()).toBe(1);
     expect(q.list().map(x => x.id)).toEqual(['GOOD-1']);
     expect(q.pendingRows().length).toBe(1);
+    // ★修正ラウンド2・変更1: 壊れたキーは読み飛ばすだけで、消してはいけない
+    expect(st._map.has('yotei-pending-add-v1:BAD-1')).toBe(true);
+    expect(st._map.has('yotei-pending-add-v1:BAD-2')).toBe(true);
+    expect(st._map.has('yotei-pending-add-v1:BAD-3')).toBe(true);
+    expect(st._map.has('yotei-pending-add-v1:BAD-4')).toBe(true);
   });
 
-  it('★Important1修正: mutate()は_internalsとして公開され、自分が読んだ後に別インスタンスがenqueueした項目を、自分のenqueueが上書きしない', () => {
+  // ★修正ラウンド2・変更1で mutate()（丸ごと読み直して丸ごと書き戻す仕組み）自体を
+  // 廃止したため、_internals の検査対象を1件単位の入出力に置き換えた。
+  // 「自分が読んだ後に別インスタンスが入れた項目を、自分のenqueueが上書きしない」
+  // という検査内容自体は、1件＝1キーになったことで構造的に保証されるようになったが、
+  // 回帰を防ぐため検査は残す。
+  it('★Important1修正の引き継ぎ: _internalsに1件単位の入出力（readItem/writeItem/deleteItem/listAllItems）が公開され、自分が読んだ後に別インスタンスが入れた項目を、自分のenqueueが上書きしない', () => {
     const st = makeStorage();
     const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
-    expect(typeof a._internals.mutate).toBe('function'); // Task2以降が使う入口が公開されていること
+    expect(typeof a._internals.readItem).toBe('function');
+    expect(typeof a._internals.writeItem).toBe('function');
+    expect(typeof a._internals.deleteItem).toBe('function');
+    expect(typeof a._internals.listAllItems).toBe('function');
     a.count(); // 先に一度読ませておく
     const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
     b.enqueue({ id: 'B-1', rows: [ROW], company: 'X' }, 1000);
@@ -172,6 +198,49 @@ describe('send-queue.js Task1: 箱（永続化・投入・一覧）', () => {
     expect(q.pendingRows('グローライズ').length).toBe(2);
     expect(q.pendingRows('和信カインド').length).toBe(1);
     expect(q.pendingRows().length).toBe(3);
+  });
+
+  // ★修正ラウンド2・変更3: このオリジンには別の大きなキャッシュ（実測700KB）も
+  // 同居している。走査は storageKey + ':' の前方一致に厳密に限定し、他のキーを
+  // 拾わないこと・触らないことを検査する。
+  it('★変更3: 無関係なキー（別アプリのキャッシュ・旧形式の1キーまとめ）を list() が拾わない', () => {
+    const st = makeStorage();
+    const cacheValue = JSON.stringify({ huge: 'unrelated cache data' });
+    st._map.set('yotei-cache-v1', cacheValue);
+    st._map.set('yotei-pending-add-v1', JSON.stringify({ v: 1, items: [ITEM] })); // 旧形式そのもの
+    const q = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    expect(q.count()).toBe(0);
+    expect(q.list()).toEqual([]);
+    expect(q.enqueue(ITEM, 1000)).toBe(true);
+    expect(q.count()).toBe(1);
+    // 無関係なキー・旧形式のキーは書き換えられても消されてもいない
+    expect(st._map.get('yotei-cache-v1')).toBe(cacheValue);
+    expect(st._map.has('yotei-pending-add-v1')).toBe(true);
+  });
+
+  it('★変更3: 走査は prefix 前方一致のキーだけを読み、無関係なキーを読んだり消したりしない', () => {
+    const st = makeStorage();
+    st._map.set('yotei-cache-v1', JSON.stringify({ huge: '...' }));
+    st._map.set('yotei-pending-add-v1', JSON.stringify({ v: 1, items: [ITEM] }));
+    st._map.set('yotei-pending-add-v1:ID-1', JSON.stringify({
+      id: 'ID-1', rows: [ROW], company: 'グローライズ',
+      createdAt: 1000, attempts: 0, nextAt: 0, lastError: '', gaveUp: false,
+      owner: 'tab-a', claimedAt: 0
+    }));
+
+    const touchedGet = [];
+    const realGetItem = st.getItem.bind(st);
+    st.getItem = function (k) { touchedGet.push(k); return realGetItem(k); };
+    const removed = [];
+    const realRemoveItem = st.removeItem.bind(st);
+    st.removeItem = function (k) { removed.push(k); return realRemoveItem(k); };
+
+    const q = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    expect(q.list().map(x => x.id)).toEqual(['ID-1']);
+    expect(touchedGet).not.toContain('yotei-cache-v1');
+    expect(touchedGet).not.toContain('yotei-pending-add-v1');
+    expect(removed).not.toContain('yotei-cache-v1');
+    expect(removed).not.toContain('yotei-pending-add-v1');
   });
 });
 
@@ -304,28 +373,58 @@ describe('send-queue.js Task2: 送信権・バックオフ・諦め', () => {
     expect(q.retryNow('ない', 0)).toBe(false);
   });
 
-  // ★修正ラウンド1・Critical C-1（設計書D2(b)）: localStorageにはCASが無いため、
-  // beginSendがattemptsを書いた直後に、別タブが「その書き込みより前に取っていた
-  // 古いスナップショット」をそのまま書き戻すと、attemptsが巻き戻る。
-  // storage.setItemをフックして「タブAの書き込み直後・タブBの古いスナップショットの
-  // 書き戻し」という手順3→4の順序を決定的に再現する。
-  it('★C-1: beginSendの書き込み直後に別タブの古いスナップショットで巻き戻されたら、nullを返して送らせない（wasRetry:falseで二重登録に至らせない）', () => {
+  // ★修正ラウンド2・変更1: 保存の形を「1つのキーに全項目」から「1件＝1キー」に
+  // 変えたことで、修正ラウンド1のCritical C-1（別タブの古いスナップショットの
+  // 丸ごと書き戻しによる巻き戻り）はそもそも成立しなくなった（タブBが別項目を
+  // 書いても、タブAの項目のキーには構造的に触れないため）。この構造的な効果を
+  // 直接確認する。
+  it('★変更1の構造確認: 別タブが別項目を同時に書いても、キーが分かれているため互いに一切影響しない', () => {
     const st = makeStorage();
     const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
-    a.enqueue(ITEM, 1000); // I1: attempts=0, owner=tab-a
+    a.enqueue(ITEM, 1000); // ID-1
     const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
-    // タブBが「別項目のmutateの最中」に取った古いスナップショット（I1: attempts=0のまま）
-    const staleSnapshot = b._internals.readState();
+    const ITEM2 = { id: 'ID-2', rows: [ROW], company: 'グローライズ' };
+
+    const realSetItem = st.setItem.bind(st);
+    st.setItem = function (k, v) {
+      if (k === 'yotei-pending-add-v1:ID-1') {
+        // タブAがID-1のキーへ書いている「最中」に、タブBがID-2を新規登録する
+        b.enqueue(ITEM2, 2000);
+      }
+      realSetItem(k, v);
+    };
+
+    const r = a.beginSend('ID-1', 1000);
+    expect(r).not.toBeNull(); // ID-2側の割り込みはID-1に一切影響しない
+    expect(r.wasRetry).toBe(false);
+    const c = SQ.createSendQueue({ storage: st, tabId: 'tab-c' });
+    expect(c.list().map(x => x.id).sort()).toEqual(['ID-1', 'ID-2']); // 両方残っている
+  });
+
+  // ★修正ラウンド1・Critical C-1（設計書D2(b)）の読み直し確認は、1件キーの
+  // 世界でも「同じキー」への競合が起きた場合に備えて残してある（localStorage
+  // にはCASが無いため、既存のリース・初回所有権をすり抜けた場合の保険）。
+  // この保険がまだ働くことを、同じ項目キーへの割り込みで確認する。
+  it('★C-1（1件キーの世界に引き継ぎ）: 同じ項目キーへの書き込みが割り込んでも、beginSendは読み直しで検知してnullを返す', () => {
+    const st = makeStorage();
+    const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    a.enqueue(ITEM, 1000); // ID-1: attempts=0, owner=tab-a
+    const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
 
     const realSetItem = st.setItem.bind(st);
     let writeCount = 0;
     st.setItem = function (k, v) {
       realSetItem(k, v);
       writeCount++;
-      if (writeCount === 1) {
-        // タブAの書き込み（attempts=1の永続化）の直後、タブBが古いスナップショットの
-        // まま書き戻す＝storage上のI1がattempts=0に巻き戻る
-        b._internals.writeState(staleSnapshot);
+      if (writeCount === 1 && k === 'yotei-pending-add-v1:ID-1') {
+        // タブAがID-1のキーへ書いた直後、タブBが同じキーへ古い内容（attempts=0）を
+        // 割り込ませて書く（localStorageにCASが無いため、同一キーへの競合は
+        // 依然として残る）
+        b._internals.writeItem({
+          id: 'ID-1', rows: [ROW], company: 'グローライズ', createdAt: 1000,
+          attempts: 0, nextAt: 0, lastError: '', gaveUp: false,
+          owner: 'tab-b', claimedAt: 0
+        });
       }
     };
 
@@ -333,26 +432,50 @@ describe('send-queue.js Task2: 送信権・バックオフ・諦め', () => {
     expect(r).toBeNull(); // 巻き戻りを読み直しで検知し、送らせない
   });
 
-  // ★修正ラウンド1・Important I-2: 一度usableがfalseに落ちたタブは、その後storageに
-  // 書き込まない。書き込み続けると、storageが回復した後にこのタブの古いmemoryで
-  // 上書きしてしまい、その間に別タブが正しく登録した未送信が消える。
-  it('★I-2: usable=falseに落ちたタブは、その後storageを上書きせず、別タブの未送信を消さない', () => {
+  // ★修正ラウンド2・変更2: 書き込み失敗時に removeItem していたのをやめた。
+  // 未送信そのものを全消去してしまう致命的な副作用だったため。
+  it('★変更2: 書き込みが失敗しても既存キーを消さない。storageが回復すれば古い内容がそのまま読まれて送信される（救済）', () => {
     const st = makeStorage();
     const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
-    a.enqueue(ITEM, 1000); // storage = {ID-1}
+    a.enqueue(ITEM, 1000);
+    expect(st._map.has('yotei-pending-add-v1:ID-1')).toBe(true);
+
     st.failSet = true;
-    a.retryNow('ID-1', 1000); // 書き込み失敗 → キー削除・usable=false・メモリ運転へ
+    a.retryNow('ID-1', 1000); // 書き込み失敗 → usable=false になるが、キーは消えない
     expect(a.isStorageUsable()).toBe(false);
+    expect(st._map.has('yotei-pending-add-v1:ID-1')).toBe(true); // ★消えていない
+    const raw = JSON.parse(st._map.get('yotei-pending-add-v1:ID-1'));
+    expect(raw.id).toBe('ID-1'); // 失敗前の内容がそのまま残っている
+
+    st.failSet = false; // quotaが回復
+    const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' }); // 次にページを開いた想定
+    expect(b.list().map(x => x.id)).toEqual(['ID-1']); // 救済＝正常に読まれる
+  });
+
+  // ★修正ラウンド1・Important I-2（メモリ運転に落ちたタブが storage を上書きして
+  // 別タブの未送信を消す）を、変更1・変更2を踏まえて引き継ぐ。1件＝1キーになった
+  // ことで、タブAが usable=false のまま書いても構造的に自分のキーにしか触れない
+  // （タブBの ID-2 のキーへ触りようがない）。さらに変更2により、タブA自身の
+  // ID-1 のキーも消えずに残る。旧テストは「タブBの項目だけが残る」ことを検査
+  // していたが、変更2によって「両方残る」に改善されたため、その通りに検査する。
+  it('★I-2の引き継ぎ（変更1・変更2により強化）: usable=falseに落ちたタブが後から書いても、別タブの未送信どころか自分の未送信も消えない', () => {
+    const st = makeStorage();
+    const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    a.enqueue(ITEM, 1000); // ID-1
+    st.failSet = true;
+    a.retryNow('ID-1', 1000); // 書き込み失敗 → usable=false・メモリ運転へ
+    expect(a.isStorageUsable()).toBe(false);
+    expect(st._map.has('yotei-pending-add-v1:ID-1')).toBe(true); // 消えていない（変更2）
 
     st.failSet = false; // quotaが回復
     const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
     const ITEM2 = { id: 'ID-2', rows: [ROW], company: 'グローライズ' };
-    expect(b.enqueue(ITEM2, 2000)).toBe(true); // storage = {ID-2}
+    expect(b.enqueue(ITEM2, 2000)).toBe(true);
 
-    a.beginSend('ID-1', 3000); // usableが戻っていないタブAは、書いてもstorageには触らない
+    a.beginSend('ID-1', 3000); // usableが戻っていないタブAは、ID-1のキーにしか触れようがない
 
     const c = SQ.createSendQueue({ storage: st, tabId: 'tab-c' });
-    expect(c.list().map(x => x.id)).toEqual(['ID-2']); // タブBの未送信が消えていない
+    expect(c.list().map(x => x.id).sort()).toEqual(['ID-1', 'ID-2']); // ★両方残っている
   });
 
   // ★修正ラウンド1・Minor M-2: token不一致のテストはmarkSentにしかなかった。
