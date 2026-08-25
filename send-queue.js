@@ -14,6 +14,39 @@
   var DEFAULT_GIVE_UP = 10;
   var DEFAULT_BACKOFF = [5000, 15000, 45000, 120000, 300000];
 
+  // ★レビュー修正ラウンド1・Critical: readStateが読み込んだitemsの各要素を検疫する。
+  // 捨てる条件はこの2つだけに限定する（厳しくしすぎて正常な項目を捨てないため）:
+  //   - 項目がオブジェクトでない（null・数値・文字列等）
+  //   - idが空文字、またはrowsが配列でない
+  // これを怠ると、一度壊れた項目がstorageに乗った時点でlist()/pendingRows()が
+  // 毎回例外を投げ続け、未送信が永久に送られなくなる（帯の表示・カレンダーへの
+  // 合流・送信ループはすべてこの2つを呼ぶ）。
+  function sanitizeItems(rawItems) {
+    var out = [];
+    for (var i = 0; i < rawItems.length; i++) {
+      var it = rawItems[i];
+      if (!it || typeof it !== 'object') continue;
+      var id = typeof it.id === 'string' ? it.id : String(it.id || '');
+      if (!id) continue;
+      if (!Array.isArray(it.rows)) continue;
+      out.push(it);
+    }
+    return out;
+  }
+
+  // ★レビュー修正ラウンド1・Important 2: rowsの中身を深く複製する。
+  // rowsに積まれるのは文字列・数値・真偽値だけ（index.html:1961で日付は
+  // YYYY-MM-DD文字列、1976-1977で時刻はinputのvalue＝文字列、人工は数値、
+  // フラグは真偽値であることを確認済み）なのでJSON往復で複製できる。
+  // 往復が失敗した場合だけslice()にフォールバックし、落ちないようにする。
+  function cloneRows(rows) {
+    try {
+      return JSON.parse(JSON.stringify(rows));
+    } catch (e) {
+      return rows.slice();
+    }
+  }
+
   function createSendQueue(opts) {
     var o = opts || {};
     var storage = o.storage || null;
@@ -54,7 +87,9 @@
           var raw = storage.getItem(storageKey);
           if (raw) {
             var parsed = JSON.parse(raw);
-            if (parsed && Array.isArray(parsed.items)) st = { v: 1, items: parsed.items };
+            if (parsed && Array.isArray(parsed.items)) {
+              st = { v: 1, items: sanitizeItems(parsed.items) };
+            }
           }
         } catch (e) { /* 壊れていたら空として扱う */ }
         memory = st;
@@ -79,10 +114,25 @@
       }
     }
 
+    // ★レビュー修正ラウンド1・Important 1: 状態を変更する処理は必ずこれを通す。
+    // 直前に読み直してから変更して書くため、「読んでから書くまでの間に別タブが
+    // 入れた内容」を巻き込まずに済む。fnの中でawaitを挟まないこと（挟むと窓が
+    // 再び開く）。Task 2で追加するbeginSend/markSent/markFailed/retryNowも同じ
+    // 入口を使う前提なので、_internalsとして外から使える形にしておく。
+    // 限界: localStorageには比較交換（CAS）が無いため、2つのタブが同じ同期
+    // ブロックで書いた場合の競合までは防げない（1人1端末が基本の業務アプリの
+    // ため許容）。
+    function mutate(fn) {
+      var st = readState();          // 直前に読み直す
+      var ret = fn(st);
+      var ok = writeState(st);
+      return { ok: ok, ret: ret };
+    }
+
     function copyItems(items) {
       return items.map(function (it) {
         return {
-          id: it.id, rows: (it.rows || []).slice(), company: it.company || '',
+          id: it.id, rows: cloneRows(it.rows || []), company: it.company || '',
           createdAt: it.createdAt || 0, attempts: it.attempts || 0,
           nextAt: it.nextAt || 0, lastError: it.lastError || '',
           gaveUp: !!it.gaveUp, owner: it.owner || '', claimedAt: it.claimedAt || 0
@@ -98,16 +148,18 @@
         var id = String(item.id || '');
         var rows = Array.isArray(item.rows) ? item.rows : [];
         if (!id || rows.length === 0) return false;
-        var st = readState();
-        if (st.items.length >= maxItems) return false;
-        st.items.push({
-          id: id, rows: rows.slice(), company: String(item.company || ''),
-          createdAt: typeof now === 'number' ? now : 0,
-          attempts: 0, nextAt: 0, lastError: '', gaveUp: false,
-          owner: tabId, claimedAt: 0
+        var accepted = false;
+        mutate(function (st) {
+          if (st.items.length >= maxItems) { accepted = false; return; }
+          st.items.push({
+            id: id, rows: cloneRows(rows), company: String(item.company || ''),
+            createdAt: typeof now === 'number' ? now : 0,
+            attempts: 0, nextAt: 0, lastError: '', gaveUp: false,
+            owner: tabId, claimedAt: 0
+          });
+          accepted = true;
         });
-        writeState(st);
-        return true;
+        return accepted;
       },
 
       list: function () { return copyItems(readState().items); },
@@ -118,9 +170,17 @@
         var out = [];
         readState().items.forEach(function (it) {
           if (want !== null && it.company !== want) return;
-          (it.rows || []).forEach(function (r) { out.push(r); });
+          cloneRows(it.rows || []).forEach(function (r) { out.push(r); });
         });
         return out;
+      },
+
+      // ★Task 2以降（beginSend/markSent/markFailed/retryNow等）が同じ入口を
+      // 使えるように公開する。テストからも直接検証できる。
+      _internals: {
+        mutate: mutate,
+        readState: readState,
+        writeState: writeState
       }
     };
   }

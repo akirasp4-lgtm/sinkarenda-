@@ -52,7 +52,7 @@ describe('send-queue.js Task1: 箱（永続化・投入・一覧）', () => {
     expect(items[0].gaveUp).toBe(false);
   });
 
-  it('list() は複製を返す（返り値を書き換えても箱の中身は変わらない）', () => {
+  it('list() は複製を返す（返り値のトップレベルの値を書き換えても箱の中身は変わらない。rowsの深い複製は別テストで検査）', () => {
     const q = SQ.createSendQueue({ storage: makeStorage(), tabId: 'tab-a' });
     q.enqueue(ITEM, 1000);
     q.list()[0].attempts = 999;
@@ -110,12 +110,59 @@ describe('send-queue.js Task1: 箱（永続化・投入・一覧）', () => {
     expect(q.count()).toBe(0);
   });
 
-  it('壊れたJSONが storage に入っていても空として扱い、落ちない', () => {
+  it('storageの値がJSON文字列として壊れていて丸ごとparseに失敗しても、空として扱い落ちない（下の「壊れた項目」テストとは別ケース＝JSON.parse自体の失敗）', () => {
     const st = makeStorage();
     st._map.set('yotei-pending-add-v1', '{壊れ');
     const q = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
     expect(q.count()).toBe(0);
     expect(q.enqueue(ITEM, 1)).toBe(true);
+  });
+
+  it('★Critical修正: 壊れた項目（null・空文字id・文字列・rowsが配列でない）が混ざっていても list()/pendingRows()/count() が落ちず、正常な項目だけが残る', () => {
+    const st = makeStorage();
+    const good = {
+      id: 'GOOD-1', rows: [ROW], company: 'グローライズ',
+      createdAt: 1, attempts: 0, nextAt: 0, lastError: '', gaveUp: false,
+      owner: 'tab-a', claimedAt: 0
+    };
+    st._map.set('yotei-pending-add-v1', JSON.stringify({
+      v: 1,
+      items: [null, { id: '', rows: [] }, '文字列', { id: 'BAD-2', rows: 'notarray' }, good]
+    }));
+    const q = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    expect(() => q.count()).not.toThrow();
+    expect(() => q.list()).not.toThrow();
+    expect(() => q.pendingRows()).not.toThrow();
+    expect(q.count()).toBe(1);
+    expect(q.list().map(x => x.id)).toEqual(['GOOD-1']);
+    expect(q.pendingRows().length).toBe(1);
+  });
+
+  it('★Important1修正: mutate()は_internalsとして公開され、自分が読んだ後に別インスタンスがenqueueした項目を、自分のenqueueが上書きしない', () => {
+    const st = makeStorage();
+    const a = SQ.createSendQueue({ storage: st, tabId: 'tab-a' });
+    expect(typeof a._internals.mutate).toBe('function'); // Task2以降が使う入口が公開されていること
+    a.count(); // 先に一度読ませておく
+    const b = SQ.createSendQueue({ storage: st, tabId: 'tab-b' });
+    b.enqueue({ id: 'B-1', rows: [ROW], company: 'X' }, 1000);
+    expect(a.enqueue({ id: 'A-1', rows: [ROW], company: 'X' }, 2000)).toBe(true);
+    const ids = SQ.createSendQueue({ storage: st, tabId: 'tab-c' }).list().map(x => x.id);
+    expect(ids.sort()).toEqual(['A-1', 'B-1']);
+  });
+
+  it('★Important2修正(a): storage不使用（メモリ）モードでも、enqueueに渡したrowsを後から書き換えても箱の中身は変わらない', () => {
+    const q = SQ.createSendQueue({ storage: null, tabId: 'tab-a' });
+    const row = { id: 'ID-1', date: '2026-09-01', name: '山田', company: 'グローライズ' };
+    expect(q.enqueue({ id: 'X1', rows: [row], company: 'Y' }, 1000)).toBe(true);
+    row.name = 'CORRUPTED';
+    expect(q.list()[0].rows[0].name).toBe('山田');
+  });
+
+  it('★Important2修正(b): storage不使用（メモリ）モードでも、list()の返り値のrows[0]を書き換えても次のlist()に影響しない', () => {
+    const q = SQ.createSendQueue({ storage: null, tabId: 'tab-a' });
+    q.enqueue(ITEM, 1000);
+    q.list()[0].rows[0].name = 'CORRUPTED';
+    expect(q.list()[0].rows[0].name).toBe('山田');
   });
 
   it('pendingRows(company) は会社が一致する項目の rows だけを平坦化して返す', () => {
