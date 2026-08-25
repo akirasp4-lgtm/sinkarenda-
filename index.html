@@ -3248,6 +3248,20 @@ function openEditModal(idx,groupsOverride){
   document.getElementById('edit-modal').classList.add('active');
 }
 
+// ★2026-08-25 利用者要望: 予定を保存しても、開いたままの「日付の小窓」の中身が
+// 古いままだった（人を追加して保存 → 小窓に戻ってきても増えていない。小窓を閉じて
+// 日付を開き直すと初めて出る）。openCalDayはその日の一覧を毎回ゼロから作り直す
+// 作りなので、小窓が開いていれば呼び直すだけでよい。
+// ・裏の自動更新（他の人の変更）では呼ばない＝読んでいる最中に一覧が動かないため
+//   （利用者判断 2026-08-25）
+// ・削除の経路はもともと cal-day-modal ごと閉じるため対象外
+// ・allNippos を更新した「後」に呼ぶこと（openCalDayはfilteredNippos()から作り直すため）
+function refreshCalDayIfOpen(){
+  try{
+    const m=document.getElementById('cal-day-modal');
+    if(m&&m.classList.contains('active')&&calSelectedDate)openCalDay(calSelectedDate);
+  }catch(e){}
+}
 function closeEditModal(){document.getElementById('edit-modal').classList.remove('active');}
 
 async function saveEdit(){
@@ -3354,7 +3368,7 @@ async function saveEdit(){
   try{
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update',ids:editIds,rows}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status==='ok'){closeEditModal();bulkEditMode=false;removeLocalByIds(editIds);addLocalRows(rows);renderGmList();refreshInBackground(renderGmList);}
+    if(json.status==='ok'){closeEditModal();bulkEditMode=false;removeLocalByIds(editIds);addLocalRows(rows);renderGmList();refreshCalDayIfOpen();refreshInBackground(renderGmList);}
     else alert('保存エラー：'+json.message);
   }catch(e){alert('保存エラー：'+e.message);}
   btn.textContent='保存する';btn.disabled=false;
