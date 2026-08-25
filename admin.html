@@ -1148,6 +1148,28 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
      requireして直接テストする（実装とテストの乖離を防ぐため）。詳細は同ファイルの
      コメント参照。file://直開きでも動くよう素の<script src>（非module）にしてある。 -->
 <script src="sync-guard.js"></script>
+<script src="send-queue.js"></script>
+<script>
+// ★send-queue.jsが読めなかったとき（配置漏れ・部分配布・キャッシュ不整合）に
+// 画面が壊れないための最小フォールバック。sync-guard.jsと同じ方針で、
+// 「使えない」と答えるだけの箱を置く＝submitNippoは従来どおり同期送信で待たせる。
+if(typeof createSendQueue==='undefined'){
+  try{console.error('[予定管理-admin] send-queue.jsの読み込みに失敗しました。保存は従来どおり（送信を待つ）で動作します');}catch(e){}
+  window.createSendQueue=function(){return{
+    isStorageUsable:function(){return false;},
+    enqueue:function(){return false;},
+    list:function(){return [];},
+    count:function(){return 0;},
+    pendingRows:function(){return [];},
+    nextDue:function(){return null;},
+    beginSend:function(){return null;},
+    markSent:function(){return false;},
+    markFailed:function(){return false;},
+    retryNow:function(){return false;},
+    gaveUpCount:function(){return 0;}
+  };};
+}
+</script>
 <script>
 // ★5回目レビュー修正4（高・Codex）: sync-guard.jsが何らかの理由（配置漏れ・部分配布・
 // オフラインキャッシュ不足・版ずれ等）で読み込めなかったとき、旧実装は
@@ -1204,6 +1226,15 @@ const GAS_URL='https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3eg
 const READ_TIMEOUT_MS=15000;       // D1(Worker)への読み取り用
 const GAS_READ_TIMEOUT_MS=60000;   // GASへの読み取り用（実測最大56秒＋安全マージン）
 const SYNC_TIMEOUT_MS=20000;       // /api/sync（Worker）用
+// ★案A: 未送信の登録を貯める箱。タブごとに違うIDを持たせ、
+// 「初回送信は登録したタブだけが行う」判定に使う（設計書D2）。
+const SEND_TAB_ID='t'+Math.random().toString(36).slice(2)+Date.now().toString(36);
+const sendQueue=createSendQueue({
+  storage:(function(){try{return window.localStorage;}catch(e){return null;}})(),
+  tabId:SEND_TAB_ID
+});
+let drainRunning=false;
+let drainTimer=null;
 const BACKEND_JSON_TIMEOUT_MS=3000; // backend.json読み込み用
 
 // ★修正1（最優先）: AbortSignal.timeout() はSafari 16未満（iOS15止まりのiPhone 6s/7/
@@ -1458,6 +1489,14 @@ function initApp(){
   applyWorkTypeLock('s');
   if(hydrateFromSnapshot(currentCompany))setStaleBadge(true);
   loadData();
+  // ★案A: 前回送れなかった登録を、アプリを開いたときと電波が戻ったときに送る
+  // ★修正ラウンド1・Minor-2: 固定1000msだと、PWA復元等で複数タブが同時に開いたとき
+  // 送信係の発火時刻が揃いやすい。beginSendの「書いて読み直す確認」は原子的ではない
+  // （Task1・2で受容済みの残余競合）ため、乱数で少しずらして重なる窓をさらに狭める。
+  try{
+    if(sendQueue.count()>0){renderPendingUi();scheduleDrain(1000+Math.floor(Math.random()*2000));}
+    window.addEventListener('online',()=>scheduleDrain(1000+Math.floor(Math.random()*2000)));
+  }catch(e){}
   switchTab('jimu');
 }
 
@@ -1980,10 +2019,62 @@ function hydrateFromSnapshot(company){
     const base=parseRows(s.compact?expandCompactRows(s.headers,s.rows):s.rows,'');
     if(!base.length)return false;
     allNippos=base.concat(generateGhosts(base));
+    applyPendingRows();
     allMembers=s.members||[];allGenbaMaster=s.genbaMaster||[];allJobsites=s.jobsites||[];
     rerenderAll();
     return true;
   }catch(e){console.error(e);return false;}
+}
+// ★案A: 未送信の帯。件数は全社分を出す（会社を切り替えていても
+// 見落とさないため・設計書D6）。タップで諦めた分も含めて手動再送する。
+// ★Task4で追加した判断（ブリーフに無い最適化・タスク指示(4)）: drainQueueは
+// 未送信を1件処理するたびにrenderPendingUiを呼ぶため、ブリーフのコードのまま
+// 毎回rerenderAll()すると、未送信が10件あれば10回カレンダー・一覧・事務タブ等の
+// 重い再描画が走ってしまう。カードの見た目に効くのは件数（isPendingの付いた
+// 行の集合）であり、件数（n）が前回の呼び出しから変わっていなければ
+// rerenderAll()を省略する（帯自体のDOM更新は毎回行う＝表示の鮮度は変わらない）。
+let _pendingUiLastN=-1;
+function renderPendingUi(){
+  let n=0,gave=0;
+  try{n=sendQueue.count();gave=sendQueue.gaveUpCount();}catch(e){return;}
+  let el=document.getElementById('cal-pending-badge');
+  if(n===0){
+    if(el)el.remove();
+    if(_pendingUiLastN!==0)rerenderAll();
+    _pendingUiLastN=0;
+    return;
+  }
+  if(!el){
+    el=document.createElement('div');el.id='cal-pending-badge';
+    el.style.cssText='position:sticky;top:0;z-index:60;padding:8px 12px;font-size:13px;text-align:center;cursor:pointer';
+    document.body.insertBefore(el,document.body.firstChild);
+    // ★レビュー修正ラウンド1・Important I-1: 全項目にretryNowすると、他タブが
+    // 送信中（リース有効）の項目まで横取りしてしまい、存在確認の窓をすり抜けて
+    // 二重送信になりうる（レビュアーが2タブ構成で実測）。帯の文言
+    // 「⚠N件が送信できていません」はgaveUp件数（諦めた項目）を指しているので、
+    // 実際の挙動もgaveUpした項目だけに絞る。あわせて、他タブが今リース中
+    // （claimedAt+30000msが未経過かつownerが自分でない）の項目は触らない。
+    el.onclick=()=>{
+      try{
+        const now=Date.now();
+        sendQueue.list().forEach(it=>{
+          if(!it.gaveUp)return;
+          if(it.claimedAt&&now<it.claimedAt+30000&&it.owner!==SEND_TAB_ID)return;
+          sendQueue.retryNow(it.id,now);
+        });
+        drainQueue();
+      }catch(e){}
+    };
+  }
+  if(gave>0){
+    el.style.background='#ffdad6';el.style.color='#8c0009';el.style.fontWeight='700';
+    el.textContent=`⚠ ${gave}件が送信できていません。タップして再送してください`;
+  }else{
+    el.style.background='#fff4d6';el.style.color='#7a5b00';el.style.fontWeight='400';
+    el.textContent=`⏳ 未送信 ${n}件（自動で送信中）`;
+  }
+  if(_pendingUiLastN!==n)rerenderAll();
+  _pendingUiLastN=n;
 }
 function setStaleBadge(on,failed){
   try{
@@ -2051,7 +2142,8 @@ function removeLocalByIds(ids){
   allNippos=allNippos.filter(n=>!set.has(String(n.id))&&!(n.isGhost&&set.has(String(n.originalId))));
   rerenderAll();
 }
-function addLocalRows(rows){
+function addLocalRows(rows,opts){
+  const pending=!!(opts&&opts.pending);
   const added=(rows||[]).map(r=>({
     id:String(r.id||''),timestamp:'',
     date:r.date,genba:r.genba||'',loc:r.loc||'',name:r.name||'',role:r.role||'',
@@ -2059,11 +2151,120 @@ function addLocalRows(rows){
     kosu:Number(r.kosu)||0,memo:r.memo||'',
     yakin:!!r.yakin,yasumi:!!r.yasumi,yotei:!!r.yotei,souko:!!r.souko,
     company:r.company||currentCompany,updatedBy:r.updatedBy||'',color:r.color||'',
-    division:String(r.jobNoDivision||''),jobNo:'',workType:r.workType||'',vehicle:r.vehicle||''
+    division:String(r.jobNoDivision||''),jobNo:'',workType:r.workType||'',vehicle:r.vehicle||'',
+    isPending:pending
   }));
   allNippos=allNippos.concat(added).concat(generateGhosts(added));
   rerenderAll();
 }
+// ★案A（設計書D1）: loadData / hydrateFromSnapshot は allNippos を丸ごと
+// 差し替えるため、未送信の行が画面から消える。差し替えのたびに載せ直す。
+// 未送信は「本人の予定」として人工の集計にも数える（利用者判断 2026-08-25）
+// ＝isGhostのように除外はしない。
+function applyPendingRows(){
+  let rows;
+  // ★設計書D6: loadDataは currentCompany で絞って取得しているため、
+  // 他社の未送信をそのまま足すと画面に他社の予定が混ざる。表示中の会社だけ足す。
+  // 「全社」表示のときは全部足す（登録ボタンは全社では無効なので、
+  // 箱の中身に company==='全社' の項目は存在しない）。
+  try{rows=sendQueue.pendingRows(currentCompany==='全社'?'':currentCompany);}catch(e){return;}
+  if(!rows||!rows.length)return;
+  const have=new Set(allNippos.map(n=>String(n.id)));
+  const fresh=rows.filter(r=>!have.has(String(r.id||'')));
+  if(!fresh.length)return;
+  addLocalRows(fresh,{pending:true});
+}
+// ★案A 送信係: 箱から1件取り出して送る。例外を投げない。多重起動しない。
+//
+// 2回目以降の送信では、送る直前にGASから最新を読み「もう入っていないか」を
+// 確認する（設計書§4.3）。2026-08-25の実測で「送信側にエラーが返ったのに
+// 実際は書き込まれていた」が実際に発生しており、確認せず再送すると
+// 予定が二重になる。確認はD1ではなくGASから行う（D1は最大5分古くなりうる）。
+async function checkAlreadyLanded(item){
+  const base=getGasUrl();
+  const res=await fetch(base+(base.includes('?')?'&':'?')+'compact=1&t='+Date.now(),
+    {signal:timeoutSignal(GAS_READ_TIMEOUT_MS)});
+  if(!res.ok)throw new Error('確認のための読み取りに失敗しました('+res.status+')');
+  const json=await res.json();
+  if(!json||json.status!=='ok')throw new Error('確認のための読み取りに失敗しました');
+  const rows=json.compact?expandCompactRows(json.headers,json.rows):json.rows;
+  const seen=new Set((rows||[]).map(r=>String((r&&(r.ID!==undefined?r.ID:r.id))||'')));
+  // ★修正ラウンド1・Important-1: 空文字は「一致」と見なさない。事務がシートを
+  // 直接編集してID空欄の行を作ることがあり、seenに''が入りうる。キュー側の
+  // item.rowsのidが（本来無いはずだが）空だった場合にseen.has('')へ誤一致すると、
+  // 送っていないのに「着地済み」と判定してmarkSentで消してしまい、職人の予定が
+  // 無言で消える。空文字はどちらの集合からも除外して一致対象から外す。
+  seen.delete('');
+  return (item.rows||[]).some(r=>{
+    const k=String(r.id||'');
+    return k!==''&&seen.has(k);
+  });
+}
+
+async function drainQueue(){
+  if(drainRunning)return;
+  drainRunning=true;
+  try{
+    for(;;){
+      const item=sendQueue.nextDue(Date.now());
+      if(!item)break;
+      const claim=sendQueue.beginSend(item.id,Date.now());
+      if(!claim)break; // 他タブが持っている／記録できなかった＝安全側で何もしない
+      try{
+        if(claim.wasRetry){
+          const landed=await checkAlreadyLanded(item);
+          if(landed){sendQueue.markSent(item.id,claim.token);renderPendingUi();continue;}
+        }
+        const res=await fetch(getGasUrl(),{method:'POST',
+          body:JSON.stringify({action:'add',rows:item.rows,updatedBy:(item.rows[0]&&item.rows[0].updatedBy)||''}),
+          headers:{'Content-Type':'text/plain'},signal:timeoutSignal(GAS_READ_TIMEOUT_MS)});
+        const json=await res.json();
+        if(res.ok&&json&&json.status==='ok'){
+          sendQueue.markSent(item.id,claim.token);
+          renderPendingUi();
+          refreshInBackground();
+        }else{
+          sendQueue.markFailed(item.id,claim.token,(json&&json.message)||('HTTP '+res.status),Date.now());
+          renderPendingUi();
+          break;
+        }
+      }catch(err){
+        sendQueue.markFailed(item.id,claim.token,String((err&&err.message)||err),Date.now());
+        renderPendingUi();
+        break;
+      }
+    }
+  }finally{
+    drainRunning=false;
+    // ★Task3で追加した判断（ブリーフに無い要件・タスク指示(4)）: isStorageUsable()が
+    // falseのタブでは、Task2の仕様によりbeginSendが常にnullを返す（記録を残せない
+    // 状態で送ると二重登録になるため意図的）。そのままcount()>0だけを見て
+    // scheduleDrain(5000)を続けると、このタブは5秒おきに「nextDueは拾えるが
+    // beginSendは常にnull」を繰り返す永久空回りになり、帯には「送信中」の表示が
+    // 残ったまま利用者に嘘をつき続けることになる。isStorageUsable()がtrueの間
+    // だけ再スケジュールし、falseなら再スケジュールせずrenderPendingUi()で表示だけ
+    // 更新して止める。箱の中身はlocalStorageに残っている（Task2でキーを消さない
+    // 修正済み）ので、次にページを開いたタブが正常に送信できる＝未送信は失われない。
+    try{
+      if(sendQueue.isStorageUsable()){
+        // ★修正ラウンド1・Minor-1: count()はgaveUp（諦め）項目も数える。諦めた
+        // 項目しか残っていないのに再スケジュールし続けると、二度と送れないのに
+        // 5秒おきにタイマーが永久に回り続ける（スマホの電池の無駄）。バックオフ
+        // 待ち中の項目はgaveUpではないのでこの条件を満たし、引き続き再スケジュール
+        // される。
+        if(sendQueue.count()>sendQueue.gaveUpCount())scheduleDrain(5000);
+      }else{
+        renderPendingUi();
+      }
+    }catch(e){}
+  }
+}
+
+function scheduleDrain(ms){
+  if(drainTimer)clearTimeout(drainTimer);
+  drainTimer=setTimeout(()=>{drainTimer=null;drainQueue();},Math.max(1000,ms||5000));
+}
+
 function refreshInBackground(after){
   // 2026-08-22: 書き込みはGASへ行くので、D1へ取り込ませてから読み直す。
   // ★2026-08-24修正5: 書き込み直後にこれを挟まず直接loadData()を呼ぶと、切替後は
@@ -2224,6 +2425,7 @@ async function loadData(forceGas){
     try{console.log('[予定管理] 読み取り元:',usedBackend);}catch(e){}
     allNippos=parseRows(json.compact?expandCompactRows(json.headers,json.rows):json.rows,'');
     allNippos=allNippos.concat(generateGhosts(allNippos));
+    applyPendingRows();
     if(json.members)allMembers=json.members;
     if(json.genbaMaster){
       allGenbaMaster=json.genbaMaster.length>0&&typeof json.genbaMaster[0]==='object'
@@ -2245,6 +2447,7 @@ async function loadData(forceGas){
     }else{
       setStaleBadge(false);
       allNippos=[];allMembers=[];allGenbaMaster=[];allJobsites=[];
+      applyPendingRows();
       initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();
       showAlert('読込エラー：'+e.message+'（再度「更新」を押してください）','err');
     }
@@ -2512,27 +2715,49 @@ async function submitNippo(){
   }
   const rows=[];
   dates.forEach(date=>{const dayId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company:currentCompany,id:dayId,updatedBy:operator,color,jobNoDivision,workType,vehicle});});});
-  const btn=document.getElementById('submit-btn');isSubmitting=true;btn.textContent=`送信中...`;btn.disabled=true;
+  const btn=document.getElementById('submit-btn');
+  const clearForm=()=>{
+    document.getElementById('s-genba').value='';document.getElementById('s-genba-select').value='';document.getElementById('s-genba').style.display='none';document.getElementById('s-location').value='';
+    document.getElementById('s-memo').value='';document.getElementById('s-leader').value='';
+    document.getElementById('s-date-end').value='';
+    const _v=document.getElementById('s-vehicle');if(_v)_v.value='';
+    refreshVehicleSelect('s');
+    const _wt=document.getElementById('s-work-type');if(_wt)_wt.value='';
+    applyWorkTypeLock('s');
+    const _ls=document.getElementById('s-location-select');if(_ls)_ls.value='';
+    const _li=document.getElementById('s-location');if(_li){_li.value='';_li.style.display='none';}
+    const _lse=document.getElementById('s-location-search');if(_lse)_lse.value='';
+    const _lsim=document.getElementById('s-loc-similar');if(_lsim){_lsim.style.display='none';_lsim.innerHTML='';}
+    document.getElementById('s-jobno-hint').style.display='none';
+    document.getElementById('s-jobno-div-wrap').style.display='none';
+    const _jnSel=document.getElementById('s-jobno-division');if(_jnSel){delete _jnSel.dataset.userSet;_jnSel.value='ICT';}
+    applyMode('s','');selectedMembers=[];renderMemberChips('member-selector',selectedMembers,toggleMember);
+  };
+
+  // ★案A: 箱が使えるときだけ楽観化する。使えないとき（localStorage不可・
+  // 上限超過・send-queue.js未読込）は従来どおり同期送信で待たせる＝安全側。
+  const canQueue=sendQueue.isStorageUsable()
+    &&sendQueue.enqueue({id:rows[0].id,rows:rows,company:currentCompany},Date.now());
+
+  if(canQueue){
+    hapticSuccess();
+    showAlert(`✓ ${dates.length}日×${members.length}人分を登録しました！（${currentCompany}）`,'ok');
+    clearForm();
+    addLocalRows(rows,{pending:true});
+    renderPendingUi();
+    drainQueue();               // awaitしない＝ここで待たせない
+    isSubmitting=false;btn.textContent='登録する';btn.disabled=(currentCompany==='全社');
+    return;
+  }
+
+  isSubmitting=true;btn.textContent=`送信中...`;btn.disabled=true;
   try{
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'add',rows}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'){
       hapticSuccess();
       showAlert(`✓ ${dates.length}日×${members.length}人分を登録しました！`,'ok');
-      document.getElementById('s-genba').value='';document.getElementById('s-genba-select').value='';document.getElementById('s-genba').style.display='none';
-      document.getElementById('s-location').value='';document.getElementById('s-memo').value='';document.getElementById('s-leader').value='';
-      document.getElementById('s-date-end').value='';document.getElementById('s-jobno-hint').style.display='none';
-      document.getElementById('s-jobno-div-wrap').style.display='none';
-      const _v=document.getElementById('s-vehicle');if(_v)_v.value='';
-      refreshVehicleSelect('s');
-      const _wt=document.getElementById('s-work-type');if(_wt)_wt.value='';
-      applyWorkTypeLock('s');
-      const _ls=document.getElementById('s-location-select');if(_ls)_ls.value='';
-      const _li=document.getElementById('s-location');if(_li){_li.value='';_li.style.display='none';}
-      const _lse=document.getElementById('s-location-search');if(_lse)_lse.value='';
-      const _lsim=document.getElementById('s-loc-similar');if(_lsim){_lsim.style.display='none';_lsim.innerHTML='';}
-      const _jnSel=document.getElementById('s-jobno-division');if(_jnSel){delete _jnSel.dataset.userSet;_jnSel.value='ICT';}
-      applyMode('s','');selectedMembers=[];renderMemberChips('member-selector',selectedMembers,toggleMember);
+      clearForm();
       addLocalRows(rows);refreshInBackground();
     }else showAlert('エラー：'+json.message,'err');
   }catch(err){showAlert('送信エラー：'+err.message,'err');}
@@ -2569,7 +2794,7 @@ function groupNippos(nippos){
   const groups={};
   nippos.forEach(n=>{
     const key=n.id||`${n.date}__${n.genba}__${n.loc}__${n.start}__${n.end}__${n.kosu}__${n.memo}`;
-    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,timestamp:n.timestamp||'',color:n.color,jobNo:n.jobNo,workType:n.workType||'',vehicle:n.vehicle||'',isGhost:!!n.isGhost,originalId:n.originalId||''};
+    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,timestamp:n.timestamp||'',color:n.color,jobNo:n.jobNo,workType:n.workType||'',vehicle:n.vehicle||'',isGhost:!!n.isGhost,isPending:!!n.isPending,originalId:n.originalId||''};
     groups[key].members.push({name:n.name,role:n.role});if(n.id)groups[key].ids.push(n.id);
     // グループ内で最新の登録日時 + その時の更新者を採用（Date 経由で比較）
     if(n.timestamp && tsValue(n.timestamp)>tsValue(groups[key].timestamp)){
@@ -2681,6 +2906,7 @@ function openCalDay(dateStr){
       const color=g.color||'#1D9E75';
       const modeBadges=(g.souko?'🏭':'')+(g.yakin?'🌙':'')+(g.yasumi?'🏖️':'')+(g.yotei?'📌':'');
       const ghostMarker=g.isGhost?`<span class="ghost-marker">⏰前日から</span>`:'';
+      const pendingMarker=g.isPending?`<span class="ghost-marker">⏳未送信</span>`:'';
       const badgesHtml=modeBadges?` <span class="card-mode-badges">${modeBadges}</span>`:'';
       // 休み/倉庫は元請名を表示せず「休み」「倉庫」で統一
       let titleText;
@@ -2693,7 +2919,7 @@ function openCalDay(dateStr){
           else if(g.yakin)titleText='夜勤';
         }
       }
-      const titleLine=`${ghostMarker}${titleText}${badgesHtml}`;
+      const titleLine=`${ghostMarker}${pendingMarker}${titleText}${badgesHtml}`;
       const wtMap={'現場作業':'⛑️','現調':'📐','着打ち':'🔨','カギ借用':'🗝️','材料引き取り':'📦','材料引取・検品':'📦','撤去品返却':'♻️','前乗り':'🚗','移動':'🚗','置局':'📡','事務所':'🏢','倉庫作業':'🏭','休み':'🏖️','その他':'📋'};
       const wt=g.workType||'現場作業';
       const wtEmoji=wtMap[wt]||'🏷️';
@@ -2715,6 +2941,28 @@ function findOriginalGroup(originalId){
   const matching=allNippos.filter(n=>!n.isGhost&&n.id===originalId);
   if(matching.length===0)return null;
   return groupNippos(matching)[0]||null;
+}
+// ★レビュー修正ラウンド1・Critical C-1: 未送信（サーバー未着）の予定は通常の
+// 編集・削除を通さない。サーバーに無いidへ'update'を送ると旧idが消えず新idが
+// 増えるだけになり、再送時に旧内容も送られて二重登録になる。削除も同様に
+// サーバー側は0件削除で成功扱いになり、再送で「消したはずの予定」が復活する
+// （レビュアーが両方とも実測）。
+// isPendingフラグではなく、その場でsendQueue.list()に照合して判定する。
+// フラグ方式だと「実際は送信済みだが背景更新(refreshInBackground)がまだ
+// 届いていない数秒間」も誤って編集・削除を弾いてしまう（レビュー指摘）。
+// sendQueueの中身は送信完了(markSent)の瞬間に消えるため、こちらのほうが
+// 実態に即して早く解除される。
+function isGroupPending(g){
+  if(!g||!g.ids||!g.ids.length)return false;
+  try{
+    // ★レビュー修正ラウンド3・Critical C-1: キュー項目のidは「初日のdayId」
+    // だけ（submitNippoがsendQueue.enqueueへrows[0].idしか渡さないため）。
+    // 一方、箱の中のrowsは「終了日（連続入力）」で登録すると日付ごとに別の
+    // uuidを持つ。it.idだけを照合すると2日目以降がガードをすり抜けてしまう
+    // （再レビューがNodeで実測）ため、必ず全rowsのidを集めて照合する。
+    const pendingIds=new Set(sendQueue.list().flatMap(it=>(it.rows||[]).map(r=>String(r.id))));
+    return g.ids.some(id=>pendingIds.has(String(id)));
+  }catch(e){return false;}
 }
 
 // ===== 予定詳細フルスクリーン =====
@@ -2759,7 +3007,12 @@ function renderEventDetail(){
   // （グローライズ以外の会社の代表が登録すると行の工番が空のまま保存されるため）
   const masterJobNo=(!g.jobNo&&g.genba&&g.loc)?(((allJobsites||[]).find(j=>j.genba===g.genba&&j.loc===g.loc)||{}).jobNo||''):'';
   const displayJobNo=g.jobNo||masterJobNo;
+  // ★レビュー修正ラウンド1・M-5: カードの「⏳未送信」印だけだと、詳細画面を
+  // 開いた人は編集・削除がなぜ弾かれるのか分からず戸惑う。詳細画面自体にも
+  // 一言出す。
+  const pendingNote=isGroupPending(g)?`<div style="background:#fff4d6;color:#7a5b00;font-size:12px;font-weight:600;padding:8px 12px;border-radius:8px;margin-bottom:10px">⏳ まだ送信中です。送信が終わってから編集・削除できます</div>`:'';
   const html=`
+    ${pendingNote}
     <div class="detail-title-row">
       <div class="detail-color-bar" style="background:${esc(color)}"></div>
       <div class="detail-title">${detailTitle}</div>
@@ -2868,11 +3121,19 @@ function shiftDetailEvent(delta){
 function editFromDetail(){
   const idx=detailIdx;
   let g=detailGroups[idx];
-  closeEventDetail();
+  // ★レビュー修正ラウンド1・Critical C-1: 判定・alertはモーダルを閉じる前に行う
+  // （閉じてから出すとs-alertは入力タブの中にあり、カレンダー画面では見えない
+  // ため気づかれない。alert()なら画面によらず必ず見える）。
   if(g&&g.isGhost){
     const orig=findOriginalGroup(g.originalId);
-    if(orig){openEditModal(0,[orig]);return;}
+    if(orig){
+      if(isGroupPending(orig)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+      closeEventDetail();
+      openEditModal(0,[orig]);return;
+    }
   }
+  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+  closeEventDetail();
   openEditModal(idx,detailGroups);
 }
 function copyFromDetail(){
@@ -2889,6 +3150,11 @@ function copyFromDetail(){
 async function deleteFromDetail(){
   let g=detailGroups[detailIdx];if(!g)return;
   if(g.isGhost){const orig=findOriginalGroup(g.originalId);if(orig)g=orig;}
+  // ★レビュー修正ラウンド1・Critical C-1: 未送信の予定はサーバー側にidが
+  // 無いため、削除リクエストは0件削除でも成功扱いになり、後で再送されると
+  // 「消したはずの予定」が復活する（レビュアー実測）。確認ダイアログの前に
+  // 弾く（弾かれるのに確認だけ出す不自然なUXを避ける）。
+  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから削除してください');return;}
   if(!confirm('この日報を削除しますか？'))return;
   setLoading(true);
   try{
@@ -2926,13 +3192,25 @@ function copyGroupToInput_(g){
 }
 function calOpenEdit(idx){
   const groups=getCalDayGroups();let g=groups[idx];if(!g)return;
+  // ★レビュー修正ラウンド1・Critical C-1: editFromDetailと同じ理由（現状の
+  // UIでは日別モーダルに編集ボタンは無いが、防御的に同じガードを入れる）。
+  if(g.isGhost){
+    const orig=findOriginalGroup(g.originalId);
+    if(orig){
+      if(isGroupPending(orig)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+      document.getElementById('cal-day-modal').classList.remove('active');
+      openEditModal(0,[orig]);return;
+    }
+  }
+  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
   document.getElementById('cal-day-modal').classList.remove('active');
-  if(g.isGhost){const orig=findOriginalGroup(g.originalId);if(orig){openEditModal(0,[orig]);return;}}
   openEditModal(idx,groups);
 }
 async function calDeleteGroup(idx){
   let g=getCalDayGroups()[idx];if(!g)return;
   if(g.isGhost){const orig=findOriginalGroup(g.originalId);if(orig)g=orig;}
+  // ★レビュー修正ラウンド1・Critical C-1: deleteFromDetailと同じ理由。
+  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから削除してください');return;}
   if(!confirm('この日報を削除しますか？'))return;
   setLoading(true);
   try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'delete',ids:[...new Set(g.ids)],updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
@@ -2950,8 +3228,12 @@ function onEditDateChange(){
   if(typeof refreshVehicleSelect==='function')refreshVehicleSelect('e');
 }
 function openEditModal(idx,groupsOverride){
-  bulkEditMode=false;
   const g=(groupsOverride||getDisplayedGroups())[idx];if(!g)return;
+  // ★レビュー修正ラウンド2・Critical C-1: 単一編集の入口（詳細画面の編集・
+  // 現場管理タブの編集ボタン）を一元的に塞ぐ。取りこぼしても最終的にsaveEdit側の
+  // ガードで止まるが、ここで止めれば編集モーダルすら開かないぶん体験が良い。
+  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+  bulkEditMode=false;
   editIds=[...new Set(g.ids)];editDate=g.date;
   window._editIds=editIds;window._editDates=[editDate];
   // 単一編集時は作業日フィールドを表示・入力可能に
@@ -2977,6 +3259,12 @@ function getDisplayedGroups(){return groupNippos(filteredNippos()).filter(g=>g.d
 async function saveEdit(){
   const btn=document.getElementById('save-edit-btn');if(btn.disabled)return;
   if(!dataLoadOk){showAlert('最新データを読み込めていないため保存できません。「更新」を押してください','err');return;}
+  // ★レビュー修正ラウンド2・Critical C-1: action:'update'を送る箇所は本関数の
+  // 1箇所のみ（openEditModal/openBulkEditModalのどちらから開かれても、保存は
+  // 必ずここを通る）。取りこぼしを防ぐ唯一の場所として、ここで最終的に塞ぐ
+  // （openEditModal/openBulkEditModal側にも早期ガードを入れて開かせない
+  // ようにするが、それらは利便性のためであり、正しさの根拠はここにある）。
+  if(isGroupPending({ids:editIds})){alert('チェックした（または開いた）予定の中に、まだ送信中のものが含まれています。送信が終わってから保存してください');return;}
   const genba=getGenbaValue('e');const loc=document.getElementById('e-location').value.trim();
   const start=document.getElementById('e-start').value;const end=document.getElementById('e-end').value;
   const kosu=1.0;const memo=document.getElementById('e-memo').value;
@@ -3167,6 +3455,9 @@ function toggleGmSelectAll(){
 function openBulkEditModal(){
   const groups=getActiveGmGroups();const checked=[...document.querySelectorAll('.gm-day-check:checked')];if(checked.length===0)return;
   const targets=checked.map(c=>groups[Number(c.dataset.idx)]).filter(Boolean);if(targets.length===0)return;
+  // ★レビュー修正ラウンド2・Critical C-1: 一括編集はopenEditModalを経由しない
+  // 別経路（機械的な洗い出しで判明）。ここにも同じガードが要る。
+  if(targets.some(isGroupPending)){alert('チェックした中に、まだ送信中の予定が含まれています。送信が終わってから編集してください');return;}
   bulkEditMode=true;editIds=[...new Set(targets.flatMap(g=>g.ids))];editDates=[...new Set(targets.map(g=>g.date))];
   window._editIds=editIds;window._editDates=editDates;
   // 一括編集時は作業日フィールドを非表示（複数日まとめて単一日付に変えるのは UI として複雑なので未対応）
@@ -3188,6 +3479,11 @@ function openBulkEditModal(){
 async function deleteGmChecked(){
   const groups=getActiveGmGroups();const checked=[...document.querySelectorAll('.gm-day-check:checked')];if(checked.length===0)return;
   const targets=checked.map(c=>groups[Number(c.dataset.idx)]).filter(Boolean);
+  // ★レビュー修正ラウンド2・Critical C-1: 現場管理タブ（元請/人で探す/ピン留めの
+  // どのモードもrenderGmList経由でこのボタンを共有する）はfilteredNippos()ベースで
+  // 未送信を除外していないため、未送信の日も普通にチェック対象へ出てくる。
+  // チェックした中に未送信が1件でも含まれていたら、確認ダイアログの前に弾く。
+  if(targets.some(isGroupPending)){alert('チェックした中に、まだ送信中の予定が含まれています。送信が終わってから削除してください');return;}
   if(!confirm(`${targets.map(g=>formatDate(g.date)).join('、')}\nを削除しますか？`))return;
   const ids=[...new Set(targets.flatMap(g=>g.ids))];setLoading(true);
   try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'delete',ids,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
