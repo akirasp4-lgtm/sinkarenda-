@@ -2882,7 +2882,12 @@ function findOriginalGroup(originalId){
 function isGroupPending(g){
   if(!g||!g.ids||!g.ids.length)return false;
   try{
-    const pendingIds=new Set(sendQueue.list().map(it=>String(it.id)));
+    // ★レビュー修正ラウンド3・Critical C-1: キュー項目のidは「初日のdayId」
+    // だけ（submitNippoがsendQueue.enqueueへrows[0].idしか渡さないため）。
+    // 一方、箱の中のrowsは「終了日（連続入力）」で登録すると日付ごとに別の
+    // uuidを持つ。it.idだけを照合すると2日目以降がガードをすり抜けてしまう
+    // （再レビューがNodeで実測）ため、必ず全rowsのidを集めて照合する。
+    const pendingIds=new Set(sendQueue.list().flatMap(it=>(it.rows||[]).map(r=>String(r.id))));
     return g.ids.some(id=>pendingIds.has(String(id)));
   }catch(e){return false;}
 }
