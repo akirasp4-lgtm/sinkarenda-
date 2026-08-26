@@ -102,7 +102,8 @@ function makeApp(o = {}) {
   vm.createContext(sandbox);
   const BRIDGE = `\n;globalThis.__T={get state(){return state},set state(v){state=v},
     get presLoadOk(){return presLoadOk},
-    get tracker(){return presPreferGasTracker}, get PIN(){return PIN}};`;
+    get tracker(){return presPreferGasTracker}, get PIN(){return PIN},
+    get presQueue(){return presQueue}};`;
   vm.runInContext(guardJs + '\n' + queueJs + '\n' + pageJs + BRIDGE, sandbox, { filename: 'president' });
   app.s = sandbox; app.T = sandbox.__T;
   // ★描画に必要な初期値。入れ忘れると renderCalendar() が例外を投げ、loadEvents の
@@ -324,5 +325,54 @@ describe('社長用のtrackerが社員用と混ざらないこと', () => {
     const keys = [];
     for (let i = 0; i < app.s.localStorage.length; i++) keys.push(app.s.localStorage.key(i));
     expect(keys).toContain('pres-prefer-gas-v1');
+  });
+});
+
+// ★2026-08-26 Codexレビュー[P1]#1 で見つかった欠陥の再発防止。
+describe('書き込みがD1へ確実に伝わること（Codexレビュー[P1]#1）', () => {
+  const settle = () => new Promise(r => setTimeout(r, 40));
+
+  it('★同期の結果を待つ前に、その場でGAS優先を立てる（待っている間に別タブ・再読込が古いD1を読まない）', async () => {
+    let releaseSync;
+    const app = makeApp({
+      backendJson: D1_CFG,
+      // 同期は「まだ返ってこない」状態にする＝書き込み直後の数秒間を再現
+      presSync: () => new Promise(r => { releaseSync = r; }),
+      d1: (b, respond) => respond({ status: 'ok', rows: [] }),
+      gas: (b, respond) => respond({ status: 'ok', rows: [] })
+    });
+    app.s.refreshInBackground();
+    await settle();                       // 同期はまだ返っていない
+    app.hits.length = 0;
+    await app.s.presFetchList(false);     // この隙に別タブが読みに来た想定
+    expect(app.hits.some(h => h.startsWith('d1:'))).toBe(false);   // 古いD1を読まない
+    expect(app.hits.some(h => h.startsWith('gas:'))).toBe(true);
+    if (releaseSync) releaseSync({ ok:true, status:200, clone:()=>({json:()=>Promise.resolve({})}), json:()=>Promise.resolve({status:'ok',rows:1,skipped:false}) });
+  });
+
+  it('★再送で「もう入っていた」と分かった時もD1へ取り込ませる（画面から予定が消えない）', async () => {
+    const app = makeApp({
+      backendJson: D1_CFG,
+      gas: (b, respond) => {
+        if (b.action === 'pres_list') return respond({ status:'ok', rows:[{ ID:'PDUP1', 'タイトル':'先に届いていた予定', '開始日':'2026-08-27' }] });
+        return respond({ status: 'ok' });
+      },
+      presSync: (b, respond) => respond({ status:'ok', rows:1, skipped:false }),
+      d1: (b, respond) => respond({ status: 'ok', rows: [] })
+    });
+    // 「一度送信に失敗した未送信」をキューに積む
+    const q = app.T.presQueue;
+    q.enqueue({ id:'PDUP1', rows:[{ id:'PDUP1', title:'先に届いていた予定', startDate:'2026-08-27' }] }, Date.now());
+    const item = q.list()[0];
+    // ★1度送信を試みて失敗させる＝次回は wasRetry になり「もう入っていないか」の確認が走る
+    const firstClaim = q.beginSend(item.id, Date.now());
+    q.markFailed(item.id, firstClaim.token, 'HTTP 404', Date.now() - 60000);
+    expect(q.nextDue(Date.now())).toBeTruthy();   // 再送の順番が回ってくる状態
+
+    app.hits.length = 0;
+    await app.s.presDrainQueue();
+    await settle();
+    // 着地確認(pres_list)のあと、D1への取り込みを必ず呼ぶ
+    expect(app.hits).toContain('pres-sync');
   });
 });
