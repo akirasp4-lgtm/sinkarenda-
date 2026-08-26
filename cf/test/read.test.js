@@ -376,3 +376,35 @@ describe('filterSnapshot（拠点での絞り込み）', () => {
     expect(out.rows).toHaveLength(1);
   });
 });
+
+// ★2026-08-26 Codexレビュー[P1]#6#7 / [P2]#12 の再発防止
+describe('filterSnapshot（Codexレビュー指摘）', () => {
+  it('★「全拠点」（画面が使う語）でも絞り込まない — 画面とWorkerの語を揃える', () => {
+    const rows = [
+      makeRow20({ 会社: 'グローライズ', 現場名: 'A', 拠点: '本社' }),
+      makeRow20({ 会社: 'GRミツマ',     現場名: 'B', 拠点: '関東支店' })
+    ];
+    expect(filterSnapshot(payload20(rows), '', '全拠点').rows).toHaveLength(2);
+    expect(filterSnapshot(payload20(rows), '', '全社').rows).toHaveLength(2);   // 旧語も許容
+  });
+
+  it('★知らない拠点の値が来たら、混ぜずに0件にする（誤って全件返さない）', () => {
+    const rows = [makeRow20({ 会社: 'グローライズ', 現場名: 'A', 拠点: '本社' })];
+    expect(filterSnapshot(payload20(rows), '', '関西支店').rows).toHaveLength(0);
+  });
+
+  it('★拠点列がまだ無い取り込み（19列）でも、拠点で絞れば他事業の会社は返さない', () => {
+    // 移行途中: D1が19列のまま。それでも「本社」で絞ったら和信カインドは出さない
+    const old19 = {
+      headers: HEADERS,
+      rows: [ makeRow({ 会社: 'グローライズ' }), makeRow({ 会社: '和信カインド' }), makeRow({ 会社: 'ラーテル' }) ],
+      members: [], genbaMaster: [], jobsites: []
+    };
+    const out = filterSnapshot(old19, '', '本社');
+    expect(out.rows).toHaveLength(1);
+    expect(out.rows[HEADERS.indexOf('会社')]).toBeUndefined();
+    expect(out.rows[0][HEADERS.indexOf('会社')]).toBe('グローライズ');
+    // 関東で絞れば、拠点列が無い＝全部「本社」扱いなので0件
+    expect(filterSnapshot(old19, '', '関東支店').rows).toHaveLength(0);
+  });
+});

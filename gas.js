@@ -3254,8 +3254,14 @@ function error(msg) {
 //     （アーカイブ処理で「1行ずつだと6分の実行上限に達して落ちる」実績があるため）。
 // ============================================================
 function backfillKyoten() {
+  // ★Codexレビュー[P2]#11: 列全体を読んで書き戻すため、実行中に誰かが予定を
+  //   登録・編集すると、その変更を巻き戻す恐れがある。予定の書き込みと同じロックを取る。
+  const dataLock = getDailyDataLock_();
+  if (!dataLock.tryLock(30000)) {
+    return '他の処理が予定を更新中のため中止しました。数十秒おいて実行し直してください。';
+  }
+  try {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const kyotenMap = getJobsiteKyotenMap_(ss);
   const result = [];
   [SHEET_NAME, ARCHIVE_SHEET].forEach(function (name) {
     const sheet = ss.getSheetByName(name);
@@ -3266,12 +3272,10 @@ function backfillKyoten() {
 
     const kyotenCol = HEADERS.indexOf('拠点') + 1;
     const companyCol = HEADERS.indexOf('会社') + 1;
-    const locCol = HEADERS.indexOf('現場名') + 1;
 
     const n = lastRow - 1;
     const kyotenVals  = sheet.getRange(2, kyotenCol,  n, 1).getValues();
     const companyVals = sheet.getRange(2, companyCol, n, 1).getValues();
-    const locVals     = sheet.getRange(2, locCol,     n, 1).getValues();
 
     let filled = 0, kept = 0, skipped = 0;
     for (let i = 0; i < n; i++) {
@@ -3279,7 +3283,12 @@ function backfillKyoten() {
       if (KYOTEN_VALUES.indexOf(cur) >= 0) { kept++; continue; }   // 既に入っている＝触らない
       // ★拠点の軸を持たない会社（和信カインド・ラーテル・GRHD）は空欄のまま
       if (!hasKyotenAxis_(companyVals[i][0])) { skipped++; continue; }
-      kyotenVals[i][0] = resolveKyoten_('', kyotenMap[String(locVals[i][0] || '').trim()], companyVals[i][0]);
+      // ★Codexレビュー[P1]#8: 利用者が承認したのは「会社から一括で埋める」。
+      //   現場マスタを優先すると、getJobsiteKyotenMap_ が現場名だけをキーにしている
+      //   ため同名現場の衝突で誤った拠点を大量に確定させ、しかも再実行では
+      //   「既に入っている」扱いになって自動修復できない。ここでは会社だけを使う。
+      //   （新規登録では現場マスタ優先のままでよい＝1件ずつ目に見える形で入るため）
+      kyotenVals[i][0] = defaultKyotenForCompany_(companyVals[i][0]);
       filled++;
     }
     // ★列ごと1回のsetValuesで書き戻す
@@ -3290,4 +3299,7 @@ function backfillKyoten() {
   const msg = result.join(' / ');
   Logger.log(msg);
   return msg;
+  } finally {
+    dataLock.releaseLock();
+  }
 }

@@ -137,6 +137,13 @@ export function validateGasPayload(json) {
       !EXPECTED_HEADERS.every((h, i) => json.headers[i] === h)) {
     return { ok: false, message: 'headersの先頭19列が現行と一致しません: ' + JSON.stringify(json && json.headers) };
   }
+  // ★Codexレビュー[P2]#12: 20列目が増えているなら、それは必ず「拠点」であること。
+  //   別の列が紛れ込んだまま受け入れると、同期は成功しているのに画面は拠点列を
+  //   見つけられず全件が本社扱いになる（静かな誤分類）。止めた方がよい。
+  if (json.headers.length > EXPECTED_HEADERS.length &&
+      json.headers[EXPECTED_HEADERS.length] !== '拠点') {
+    return { ok: false, message: '20列目が「拠点」ではありません: ' + JSON.stringify(json.headers.slice(EXPECTED_HEADERS.length)) };
+  }
   if (!Array.isArray(json.rows) || !Array.isArray(json.members) ||
       !Array.isArray(json.genbaMaster) || !Array.isArray(json.jobsites)) {
     return { ok: false, message: 'rows/members/genbaMaster/jobsitesのいずれかが配列ではありません' };

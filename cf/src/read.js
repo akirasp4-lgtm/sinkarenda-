@@ -57,12 +57,19 @@ const KYOTEN_DEFAULT = '本社';
 //     （出すと「和信カインドの予定が本社の予定として並ぶ」ことになる）。
 export const KYOTEN_COMPANIES = ['グローライズ', 'GRミツマ'];
 
+// 「絞り込まない」を表す語。画面は '全拠点' を使う。'全社' は会社側の語だが
+// 取り違えて渡ってきても素通しにする（★Codexレビュー[P1]#6: 語が食い違うと
+// 「両方」以外が全部消えるという静かな事故になる）。
+const KYOTEN_ALL_WORDS = ['全拠点', '全社'];
+
 export function matchKyoten(rowKyoten, wanted, rowCompany) {
-  if (!wanted || wanted === '全社') return true;
+  const w = String(wanted ?? '').trim();
+  if (!w || KYOTEN_ALL_WORDS.indexOf(w) >= 0) return true;
   // 拠点の軸を持たない会社は、拠点ビューには出さない
+  // （★利用者指定: ラーテル・和信カインドを混ぜない）
   if (KYOTEN_COMPANIES.indexOf(String(rowCompany ?? '').trim()) < 0) return false;
   const v = String(rowKyoten ?? '').trim() || KYOTEN_DEFAULT;
-  return v === wanted || v === KYOTEN_BOTH;
+  return v === w || v === KYOTEN_BOTH;
 }
 
 export function filterSnapshot(payload, company, kyoten) {
@@ -70,16 +77,24 @@ export function filterSnapshot(payload, company, kyoten) {
   const headers = payload.headers;
   const kaishaIdx = headers.indexOf('会社');
   const kyotenIdx = headers.indexOf('拠点');   // 19列のままなら -1
-  const kyotenFilter = !!(kyoten && kyoten !== '全社');
+  const kyotenFilter = !!(String(kyoten ?? '').trim()) && KYOTEN_ALL_WORDS.indexOf(String(kyoten).trim()) < 0;
 
   let rows = filter
     ? payload.rows.filter(r => String((kaishaIdx >= 0 ? r[kaishaIdx] : '') ?? '').trim() === company)
     : payload.rows;
   // ★会社の絞り込みと拠点の絞り込みは独立して両方かかる
   //   （「GRミツマ法人だが本社案件」を正しく扱うため）。
-  //   拠点列そのものが無い取り込み（移行途中）では絞り込まない＝予定を消さない。
-  if (kyotenFilter && kyotenIdx >= 0) {
-    rows = rows.filter(r => matchKyoten(r[kyotenIdx], kyoten, kaishaIdx >= 0 ? r[kaishaIdx] : ''));
+  // ★Codexレビュー[P1]#7: 拠点列がまだ無い取り込み（移行途中の19列）でも、
+  //   拠点で絞られたら「会社の制限」だけは必ずかける。ここを素通しにすると
+  //   Worker API単体では和信カインド・ラーテルが本社ビューに混ざる＝
+  //   利用者が最も嫌がった要件違反になる。
+  //   列が無い＝拠点は全て空欄とみなす（＝本社扱い）。
+  if (kyotenFilter) {
+    rows = rows.filter(r => matchKyoten(
+      kyotenIdx >= 0 ? r[kyotenIdx] : '',
+      kyoten,
+      kaishaIdx >= 0 ? r[kaishaIdx] : ''
+    ));
   }
 
   const members = filter

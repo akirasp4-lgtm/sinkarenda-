@@ -50,6 +50,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;bac
 .kyoten-tag{display:inline-block;font-size:9px;line-height:1;padding:1px 3px;border-radius:3px;margin-right:3px;vertical-align:middle;font-weight:700}
 .kyoten-tag.k-kanto{background:#ffd8a8;color:#8a4b00}
 .kyoten-tag.k-both{background:#d3f9d8;color:#1a6b2e}
+.kyoten-tag.k-honsha{background:#e7ecf5;color:#3a4a63}
 .company-chip{padding:6px 14px;border-radius:20px;font-size:13px;font-weight:500;white-space:nowrap;border:1.5px solid #ddd;background:#fff;color:#666;cursor:pointer;flex-shrink:0;transition:all 0.15s}
 .company-chip.active{background:#1D9E75;color:#fff;border-color:#1D9E75}
 .tab-bar{position:fixed;bottom:0;left:0;right:0;display:flex;background:#fff;border-top:1px solid #ddd;z-index:100;padding-bottom:env(safe-area-inset-bottom)}
@@ -1677,16 +1678,19 @@ function renderKyotenBar(){
   const chips=[KYOTEN_ALL,KYOTEN_HONSHA,KYOTEN_KANTO];
   bar.innerHTML='<span class="lbl">拠点</span>'+chips.map(k=>
     `<div class="kyoten-chip${k===currentKyoten?' active':''}" onclick="switchKyoten('${esc(k)}')">${esc(k)}</div>`).join('');
+  // ★Codexレビュー[P1]#1: 初期表示でも登録フォームの拠点を必ず初期化する。
+  //   これが無いと、HTMLの初期値「本社」のまま送られ、GRミツマの予定が本社として
+  //   保存される（関東ビューで登録した予定が直後に消える）。
+  refreshKyotenField('s');
 }
 function switchKyoten(k){
   if(![KYOTEN_ALL,KYOTEN_HONSHA,KYOTEN_KANTO].includes(k))return;
   currentKyoten=k;
   try{localStorage.setItem('genba-kyoten',k);}catch(e){}
   renderKyotenBar();
-  // 見ている拠点に合わせて入力欄の既定も寄せる（全拠点のときは現場/会社の既定のまま）
-  if(k!==KYOTEN_ALL){
-    ['s','e'].forEach(pp=>{const el=document.getElementById(pp+'-kyoten');if(el){el.value=k;kyotenTouched[pp]=false;}});
-  }else{refreshKyotenField('s',{force:true});refreshKyotenField('e',{force:true});}
+  // ★Codexレビュー[P1]#4: ここでフォームの拠点を書き換えてはいけない。
+  //   入力途中に「両方」を選んだ人が、関東ビューを覗いて戻るだけで
+  //   「関東支店」に変わってしまう。ビューの状態と入力値は分離する。
   if(typeof rerenderAll==='function')rerenderAll();
   else{renderCalendar&&renderCalendar();renderList&&renderList();}
 }
@@ -1696,7 +1700,9 @@ function kyotenTag(n){
   const v=String((n&&n.kyoten)||'').trim();
   if(v===KYOTEN_KANTO)return '<span class="kyoten-tag k-kanto">関東</span>';
   if(v===KYOTEN_BOTH)return '<span class="kyoten-tag k-both">両</span>';
-  return '';
+  // ★Codexレビュー[P2]#13: 本社にも印を付ける。無印だと「本社」なのか
+  //   「拠点の軸を持たない会社（和信カインド等）」なのか区別できない。
+  return '<span class="kyoten-tag k-honsha">本社</span>';
 }
 
 function switchCompany(c){
@@ -2654,16 +2660,32 @@ function refreshKyotenField(p,opts){
   const row=document.getElementById(p+'-kyoten-row');
   const sel=document.getElementById(p+'-kyoten');
   if(!row||!sel)return;
-  if(!hasKyotenAxis(currentCompany)){row.style.display='none';return;}
+  const company=(opts&&opts.company)||currentCompany;
+  if(!hasKyotenAxis(company)){row.style.display='none';return;}
   row.style.display='';
   const force=!!(opts&&opts.force);
   if(kyotenTouched[p]&&!force)return;          // 手で変えた値は上書きしない
   const locEl=document.getElementById(p+'-location');
   const loc=locEl?locEl.value:'';
-  sel.value=jobsiteKyoten(loc)||defaultKyotenForCompany(currentCompany)||KYOTEN_HONSHA;
+  sel.value=jobsiteKyoten(loc)||defaultKyotenForCompany(company)||KYOTEN_HONSHA;
 }
-function readKyoten(p){
-  if(!hasKyotenAxis(currentCompany))return '';
+// ★Codexレビュー[P1]#3: 画面全体の currentCompany ではなく「その行の会社」で判定する。
+//   全社ビューで編集すると currentCompany==='全社' になり、以前は常に空文字を返して
+//   利用者が選んだ「両方」や手修正した拠点が失われていた。
+// ★Codexレビュー[P1]#2: 編集モーダルに既存の拠点を反映する（入口が複数あるので関数化）
+function applyEditKyoten(g){
+  kyotenTouched.e=false;
+  const row=document.getElementById('e-kyoten-row'), sel=document.getElementById('e-kyoten');
+  if(!row||!sel||!g)return;
+  if(!hasKyotenAxis(g.company)){row.style.display='none';return;}
+  row.style.display='';
+  const cur=String(g.kyoten||'').trim();
+  sel.value=KYOTEN_CHOICES.includes(cur)?cur:(jobsiteKyoten(g.loc)||defaultKyotenForCompany(g.company)||KYOTEN_HONSHA);
+}
+
+function readKyoten(p,company){
+  const c=(company===undefined||company===null||company==='')?currentCompany:company;
+  if(!hasKyotenAxis(c))return '';
   const sel=document.getElementById(p+'-kyoten');
   return sel?String(sel.value||'').trim():'';
 }
@@ -2863,6 +2885,9 @@ async function submitNippo(){
     document.getElementById('s-jobno-hint').style.display='none';
     document.getElementById('s-jobno-div-wrap').style.display='none';
     const _jnSel=document.getElementById('s-jobno-division');if(_jnSel){delete _jnSel.dataset.userSet;_jnSel.value='ICT';}
+    // ★Codexレビュー[P1]#5: 拠点も初期化する。ここを忘れると、一度手で
+    //   「両方」にした人の次の予定にもそれが流用される。
+    kyotenTouched.s=false;refreshKyotenField('s',{force:true});
     applyMode('s','');selectedMembers=[];renderMemberChips('member-selector',selectedMembers,toggleMember);
   };
 
@@ -3385,6 +3410,9 @@ function openEditModal(idx,groupsOverride){
   editSelectedMembers=[];const shokunin=getShokunin();
   g.members.filter(m=>m.role==='同行').forEach(m=>{const i=shokunin.indexOf(m.name);if(i>=0)editSelectedMembers.push(i);});
   renderMemberChips('e-member-selector',editSelectedMembers,toggleEditMember);initColorPicker('e',g.color||CAL_COLORS[0]);
+  // ★Codexレビュー[P1]#2#3: 既存の拠点を読み込む（無いと編集で拠点が勝手に変わる）。
+  //   判定は画面の currentCompany ではなく「その予定の会社」で行う。
+  applyEditKyoten(g);
   document.getElementById('edit-modal').classList.add('active');
 }
 // ★2026-08-25 利用者要望: 予定を保存しても、開いたままの「日付の小窓」の中身が
@@ -3490,7 +3518,7 @@ async function saveEdit(){
     }
   }
   const rows=[];
-  dates.forEach(date=>{const newId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:yasumi?0:kosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e')});});});
+  dates.forEach(date=>{const newId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:yasumi?0:kosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company)});});});
   btn.textContent='保存中...';btn.disabled=true;
   try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update',ids:editIds,rows}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){closeEditModal();bulkEditMode=false;removeLocalByIds(editIds);addLocalRows(rows);renderGmList();refreshCalDayIfOpen();refreshInBackground(renderGmList);}
@@ -3621,6 +3649,9 @@ function openBulkEditModal(){
   const leader=g.members.find(m=>m.role==='代表');document.getElementById('e-leader').value=leader?leader.name:'';
   editSelectedMembers=[];const shokunin=getShokunin();g.members.filter(m=>m.role==='同行').forEach(m=>{const i=shokunin.indexOf(m.name);if(i>=0)editSelectedMembers.push(i);});
   renderMemberChips('e-member-selector',editSelectedMembers,toggleEditMember);initColorPicker('e',g.color||CAL_COLORS[0]);
+  // ★Codexレビュー[P1]#2#3: 既存の拠点を読み込む（無いと編集で拠点が勝手に変わる）。
+  //   判定は画面の currentCompany ではなく「その予定の会社」で行う。
+  applyEditKyoten(g);
   document.getElementById('edit-modal').classList.add('active');
 }
 async function deleteGmChecked(){

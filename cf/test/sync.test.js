@@ -71,6 +71,17 @@ describe('validateGasPayload', () => {
   it('★19列のまま（今の本番）も引き続き通る', () => {
     expect(validateGasPayload(makeCompactPayload({ headers: HEADERS })).ok).toBe(true);
   });
+
+  // ★Codexレビュー[P2]#12: 20列目が本当に「拠点」か確かめる。
+  //   別名・誤配置のまま受け入れると、同期は成功しているのに画面は拠点列を見つけられず
+  //   全件が本社扱いになる（静かな誤分類）。
+  it('★20列目が「拠点」でなければ拒否する（別の列が紛れ込んだのを黙って通さない）', () => {
+    expect(validateGasPayload(makeCompactPayload({ headers: [...HEADERS, '担当者'] })).ok).toBe(false);
+  });
+
+  it('★21列以上でも、20列目が「拠点」なら通す（さらに列を足す将来に備える）', () => {
+    expect(validateGasPayload(makeCompactPayload({ headers: [...HEADERS, '拠点', '顧客'] })).ok).toBe(true);
+  });
 });
 
 // ============================================================
