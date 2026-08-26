@@ -1690,6 +1690,16 @@ function refreshVehicleSelect(p){
 
 function getShokunin(){
   if(currentCompany==='全社'){const all=[];allMembers.forEach(m=>{if(!all.includes(m.name))all.push(m.name);});return all;}
+  // ★2026-08-26: グローライズ系を見ているときは、グローライズとGRミツマの職人を
+  //   1つの名簿として扱う（カレンダーを統合したので名簿も揃える）。
+  //   これが無いと、関東支店ビューで「グローライズの人だけが並び、関東の予定は
+  //   除外されるので全員が空きに見える」という食い違いが起きる（実機で発見）。
+  //   ★他事業（和信カインド・ラーテル・GRHD）は従来どおり自社だけ＝混ぜない。
+  if(hasKyotenAxis(currentCompany)){
+    const seen=[];
+    allMembers.forEach(m=>{if(hasKyotenAxis(m.company)&&!seen.includes(m.name))seen.push(m.name);});
+    return seen;
+  }
   return allMembers.filter(m=>m.company===currentCompany).map(m=>m.name);
 }
 
