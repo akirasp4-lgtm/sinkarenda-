@@ -43,10 +43,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;bac
 
 /* ===== 共通スタイル（index.htmlと同じ） ===== */
 .company-bar{position:fixed;top:0;left:0;right:0;z-index:100;background:#fff;border-bottom:1px solid #ddd;padding:8px 12px;display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
-.kyoten-bar{position:fixed;top:41px;left:0;right:0;z-index:99;background:#fbfbfd;border-bottom:1px solid #e4e4ea;padding:6px 12px;display:flex;gap:6px;align-items:center;overflow-x:auto;-webkit-overflow-scrolling:touch}
-.kyoten-bar .lbl{font-size:11px;color:#888;white-space:nowrap;margin-right:2px}
-.kyoten-chip{padding:5px 12px;border-radius:20px;font-size:12px;font-weight:500;white-space:nowrap;border:1.5px solid #ddd;background:#fff;color:#666;cursor:pointer;flex-shrink:0;transition:all 0.15s}
-.kyoten-chip.active{background:#36c;color:#fff;border-color:#36c}
+/* ★2026-08-26 利用者指摘で作り直し:
+   旧: 画面上部に固定（position:fixed; top:41px）→ 見出しと「使い方」ボタンを覆い隠し、
+       さらにスマホでは画面の一番上にあって指が届きにくかった。
+   新: 固定をやめ、各画面の見出しのすぐ下へ置く（JSで移動）。中身と一緒に流れるので
+       何も隠さない。3つを横並びの大きなボタンにして、スマホで押しやすくした。 */
+.kyoten-bar{display:flex;gap:6px;align-items:stretch;margin:0 0 14px}
+.kyoten-bar .lbl{display:none}
+.kyoten-chip{flex:1;min-height:44px;display:flex;align-items:center;justify-content:center;
+  padding:0 10px;border-radius:10px;font-size:15px;font-weight:600;white-space:nowrap;
+  border:1.5px solid #dcdce4;background:#fff;color:#555;cursor:pointer;transition:all 0.15s;
+  -webkit-tap-highlight-color:transparent}
+.kyoten-chip.active{background:#36c;color:#fff;border-color:#36c;box-shadow:0 1px 4px rgba(51,102,204,.3)}
+@media(max-width:600px){
+  .kyoten-chip{min-height:46px;font-size:15px}
+}
 .kyoten-tag{display:inline-block;font-size:9px;line-height:1;padding:1px 3px;border-radius:3px;margin-right:3px;vertical-align:middle;font-weight:700}
 .kyoten-tag.k-kanto{background:#ffd8a8;color:#8a4b00}
 .kyoten-tag.k-both{background:#d3f9d8;color:#1a6b2e}
@@ -1666,6 +1677,22 @@ function initCompanyBar(){
 }
 
 // ★2026-08-26 拠点バー（index.html と同じ挙動）
+// ★2026-08-26 利用者指摘（スマホが特に見にくい／使い方が隠れる／上過ぎて選びにくい）で作り直した。
+//   以前は画面の一番上に固定していたため、
+//     ・見出しと「使い方」ボタンを覆い隠していた
+//     ・スマホでは画面最上部で指が届きにくかった
+//   今は「今見ている画面の見出しのすぐ下」へ移動させる。中身と一緒に流れるので
+//   何も隠さず、親指の届く位置に来る。
+function placeKyotenBar(){
+  const bar=document.getElementById('kyoten-bar');
+  if(!bar)return;
+  const screen=document.querySelector('.screen.active');
+  if(!screen)return;
+  const head=screen.querySelector('.page-title-row')||screen.querySelector('.page-title');
+  if(!head){ if(bar.parentElement!==screen)screen.insertBefore(bar,screen.firstChild); return; }
+  if(head.nextElementSibling!==bar)head.parentNode.insertBefore(bar,head.nextSibling);
+}
+
 function renderKyotenBar(){
   const bar=document.getElementById('kyoten-bar');
   if(!bar)return;
@@ -1680,8 +1707,9 @@ function renderKyotenBar(){
     return;
   }
   bar.style.display='flex';
+  placeKyotenBar();          // ★見ている画面の見出しの下へ移す
   const chips=[KYOTEN_ALL,KYOTEN_HONSHA,KYOTEN_KANTO];
-  bar.innerHTML='<span class="lbl">拠点</span>'+chips.map(k=>
+  bar.innerHTML=chips.map(k=>
     `<div class="kyoten-chip${k===currentKyoten?' active':''}" onclick="switchKyoten('${esc(k)}')">${esc(k)}</div>`).join('');
   // ★Codexレビュー[P1]#1: 初期表示でも登録フォームの拠点を必ず初期化する。
   //   これが無いと、HTMLの初期値「本社」のまま送られ、GRミツマの予定が本社として
@@ -1743,6 +1771,7 @@ function filteredNippos(){
 
 // ===== タブ =====
 function switchTab(t){
+  setTimeout(()=>{try{renderKyotenBar();}catch(e){}},0);   // ★拠点バーを今の画面へ移す
   const tabs=['list','avail','genba','vehicle','jimu','billing'];
   document.querySelectorAll('.tab').forEach((el,i)=>el.classList.toggle('active',tabs[i]===t));
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
