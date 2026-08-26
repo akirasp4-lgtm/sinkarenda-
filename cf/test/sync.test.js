@@ -51,6 +51,26 @@ describe('validateGasPayload', () => {
     expect(validateGasPayload(makeCompactPayload({ genbaMaster: null })).ok).toBe(false);
     expect(validateGasPayload(makeCompactPayload({ jobsites: 'x' })).ok).toBe(false);
   });
+
+  // ★2026-08-26 拠点（本社/関東支店）追加の下準備。
+  //   GAS側に列を足すとき、Workerが「19列ちょうど」を要求していると、
+  //   GASを出した瞬間に取り込みが止まる。先にここを緩めておく（この時点では
+  //   19列しか来ないので挙動は変わらない＝無影響）。
+  //   ただし「先頭19列が現行と完全一致」は維持する。並びが変わったら止める。
+  it('★20列目が増えても、先頭19列が一致していれば通す（列追加を先に許容しておく）', () => {
+    const out = validateGasPayload(makeCompactPayload({ headers: [...HEADERS, '拠点'] }));
+    expect(out.ok).toBe(true);
+  });
+
+  it('★列が増えていても、先頭19列の並びが違えば拒否する', () => {
+    const swapped = [...HEADERS, '拠点'];
+    [swapped[0], swapped[1]] = [swapped[1], swapped[0]];
+    expect(validateGasPayload(makeCompactPayload({ headers: swapped })).ok).toBe(false);
+  });
+
+  it('★19列のまま（今の本番）も引き続き通る', () => {
+    expect(validateGasPayload(makeCompactPayload({ headers: HEADERS })).ok).toBe(true);
+  });
 });
 
 // ============================================================

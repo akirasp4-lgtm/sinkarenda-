@@ -126,9 +126,16 @@ export function validateGasPayload(json) {
   if (!json || json.compact !== 1) {
     return { ok: false, message: 'compact形式の応答ではありません（?compact=1 を付けて取得すること）' };
   }
-  if (!Array.isArray(json.headers) || json.headers.length !== EXPECTED_HEADERS.length ||
-      !json.headers.every((h, i) => h === EXPECTED_HEADERS[i])) {
-    return { ok: false, message: 'headersが現行の19列・並びと一致しません: ' + JSON.stringify(json && json.headers) };
+  // ★2026-08-26: 「19列ちょうど」から「先頭19列が一致していれば通す」へ緩めた。
+  //   理由: 拠点（本社/関東支店）を20列目として足すとき、Workerが19列ちょうどを
+  //   要求していると、GASを出した瞬間に取り込みが止まる（＝画面はGASへ落ちて
+  //   遅くなるだけで壊れはしないが、無用な障害になる）。先に許容しておけば、
+  //   Worker → GAS → 画面 の順で安全に出せる。
+  //   ★緩めるのは「後ろに増えること」だけ。先頭19列の中身と並びは従来どおり
+  //   完全一致を要求する（並びが変わったら列の意味がずれるので必ず止める）。
+  if (!Array.isArray(json.headers) || json.headers.length < EXPECTED_HEADERS.length ||
+      !EXPECTED_HEADERS.every((h, i) => json.headers[i] === h)) {
+    return { ok: false, message: 'headersの先頭19列が現行と一致しません: ' + JSON.stringify(json && json.headers) };
   }
   if (!Array.isArray(json.rows) || !Array.isArray(json.members) ||
       !Array.isArray(json.genbaMaster) || !Array.isArray(json.jobsites)) {

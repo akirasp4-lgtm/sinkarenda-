@@ -12,8 +12,40 @@ const BILLING_RATE_SHEET = '請求単価マスタ';
 const BILLING_CALC_SHEET = '請求計算';
 const ALLOCATION_SHEET = '事業部別按分';
 const OPLOG_SHEET = '操作ログ';
-const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両'];
+const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両','拠点'];
 const GROWISE = 'グローライズ';
+
+// ============================================================
+// 拠点（本社 / 関東支店）— 2026-08-26 追加
+//   依頼書 calendar_request_20260826.md の核心:
+//   「会社名で分けるのではなく、本社／関東支店という管理区分を別で持たせる」
+//   法人（会社）と拠点は別の軸。GRミツマを関東支店として運用していても、
+//   将来GRミツマ法人で本社案件を持つことはありうるため、片方から他方を
+//   導出してはいけない。値は必ず行ごとに保存する（読むときに計算し直さない）。
+// ============================================================
+const KYOTEN_HONSHA = '本社';
+const KYOTEN_KANTO  = '関東支店';
+const KYOTEN_BOTH   = '両方';           // 本社・関東の両方に関係する予定。1件で両方の画面に出る
+const KYOTEN_VALUES = [KYOTEN_HONSHA, KYOTEN_KANTO, KYOTEN_BOTH];
+
+// 会社から拠点の「既定値」を出す。★あくまで初期値を入れるためだけに使う。
+// 保存された値を読むときにこれを使ってはいけない（依頼書の要件）。
+const KYOTEN_DEFAULT_BY_COMPANY = { 'GRミツマ': KYOTEN_KANTO };
+function defaultKyotenForCompany_(company) {
+  return KYOTEN_DEFAULT_BY_COMPANY[String(company || '').trim()] || KYOTEN_HONSHA;
+}
+
+// 保存する拠点を決める。優先順位:
+//   1. 画面から明示的に来た値（利用者がその場で変えた）
+//   2. 現場マスタに登録された拠点（現場を選べば自動で入る＝入力を増やさない）
+//   3. 会社からの既定値
+function resolveKyoten_(explicit, jobsiteKyoten, company) {
+  const e = String(explicit || '').trim();
+  if (KYOTEN_VALUES.indexOf(e) >= 0) return e;
+  const j = String(jobsiteKyoten || '').trim();
+  if (KYOTEN_VALUES.indexOf(j) >= 0) return j;
+  return defaultKyotenForCompany_(company);
+}
 
 // ==============================================================
 // 社長専用カレンダー（極秘）
@@ -409,8 +441,24 @@ function requireDailyRows_(body) {
   return body.rows;
 }
 
+// 現場マスタの「現場名→拠点」を1回だけ読んで辞書にする（行ごとにシートを読まない）。
+function getJobsiteKyotenMap_(ss) {
+  const map = {};
+  try {
+    const sheet = getOrCreateJobSiteSheet_(ss);
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      const loc = String(data[i][1] || '').trim();      // 現場名
+      const kyoten = String(data[i][10] || '').trim();  // 拠点（11列目）
+      if (loc && kyoten) map[loc] = kyoten;
+    }
+  } catch (e) { /* 読めなくても既定値で動く。登録を止めない */ }
+  return map;
+}
+
 function buildDailyValues_(ss, rows, updatedBy) {
   const jobNoCache = {};
+  const kyotenMap = getJobsiteKyotenMap_(ss);
   let leaderDivision = null;
   const leaderRow = rows.find(r => r.role === '代表');
   const leaderName = leaderRow ? leaderRow.name : '';
@@ -447,7 +495,10 @@ function buildDailyValues_(ss, rows, updatedBy) {
       division,
       jobNo,
       row.workType || '',
-      row.vehicle || ''
+      row.vehicle || '',
+      // ★2026-08-26 拠点。画面が明示した値 > 現場マスタの拠点 > 会社からの既定値。
+      //   決まった値をここで必ず保存する（読むときに会社から計算し直さない）。
+      resolveKyoten_(row.kyoten, kyotenMap[String(row.loc || '').trim()], row.company)
     ];
   });
 }
@@ -1272,7 +1323,8 @@ function doGet(e) {
       loc: String(r[1] || ''),
       jobNo: String(r[2] || ''),
       completed: String(r[8] || '').trim() !== '',
-      billingMethod: String(r[9] || '').trim() || '応援'
+      billingMethod: String(r[9] || '').trim() || '応援',
+      kyoten: String(r[10] || '').trim()    // ★2026-08-26 拠点。空なら画面側は会社の既定値を使う
     })).filter(j => j.genba && (!filterByCompany || allowedGenba.has(j.genba))) : [];
 
     if (wantCompact) return ok({compact: 1, headers: outHeaders, rows, members, genbaMaster, jobsites});
@@ -1346,14 +1398,16 @@ function getOrCreateJobSiteSheet_(ss) {
   let sheet = ss.getSheetByName(JOBSITE_SHEET);
   if (!sheet) {
     sheet = ss.insertSheet(JOBSITE_SHEET);
-    sheet.appendRow(['元請名', '現場名', '工番', '事業部', '年度', '連番', '売上', '読み', '完了', '請求方式']);
+    sheet.appendRow(['元請名', '現場名', '工番', '事業部', '年度', '連番', '売上', '読み', '完了', '請求方式', '拠点']);
   } else {
-    ensureColumns_(sheet, 10);
-    const headers = sheet.getRange(1, 1, 1, 10).getValues()[0];
+    ensureColumns_(sheet, 11);
+    const headers = sheet.getRange(1, 1, 1, 11).getValues()[0];
     if (String(headers[6] || '').trim() !== '売上') sheet.getRange(1, 7).setValue('売上');
     if (String(headers[7] || '').trim() !== '読み') sheet.getRange(1, 8).setValue('読み');
     if (String(headers[8] || '').trim() !== '完了') sheet.getRange(1, 9).setValue('完了');
     if (String(headers[9] || '').trim() !== '請求方式') sheet.getRange(1, 10).setValue('請求方式');
+    // ★2026-08-26: 拠点（本社/関東支店）。現場を選べば予定に自動で入る＝入力を増やさない
+    if (String(headers[10] || '').trim() !== '拠点') sheet.getRange(1, 11).setValue('拠点');
   }
   return sheet;
 }
@@ -3173,4 +3227,50 @@ function ok(data) {
 }
 function error(msg) {
   return ContentService.createTextOutput(JSON.stringify({status:'error', message: msg})).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ============================================================
+// 拠点の一括埋め（2026-08-26・利用者承認済み）
+//   すでに入っている過去の予定には拠点が無い。会社から一括で埋める
+//   （GRミツマ→関東支店／他→本社）。これまでの運用実態と一致する。
+//
+//   ★オーナーアカウントのApps Scriptエディタから backfillKyoten() を実行する。
+//   ★何度実行しても安全: 空欄の行だけを埋める（すでに入っている値は触らない）。
+//   ★1行ずつ書かない。setValues で列ごと一括で書く
+//     （アーカイブ処理で「1行ずつだと6分の実行上限に達して落ちる」実績があるため）。
+// ============================================================
+function backfillKyoten() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const kyotenMap = getJobsiteKyotenMap_(ss);
+  const result = [];
+  [SHEET_NAME, ARCHIVE_SHEET].forEach(function (name) {
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) { result.push(name + ': シートなし'); return; }
+    ensureHeaders_(sheet);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) { result.push(name + ': データなし'); return; }
+
+    const kyotenCol = HEADERS.indexOf('拠点') + 1;
+    const companyCol = HEADERS.indexOf('会社') + 1;
+    const locCol = HEADERS.indexOf('現場名') + 1;
+
+    const n = lastRow - 1;
+    const kyotenVals  = sheet.getRange(2, kyotenCol,  n, 1).getValues();
+    const companyVals = sheet.getRange(2, companyCol, n, 1).getValues();
+    const locVals     = sheet.getRange(2, locCol,     n, 1).getValues();
+
+    let filled = 0, kept = 0;
+    for (let i = 0; i < n; i++) {
+      const cur = String(kyotenVals[i][0] || '').trim();
+      if (KYOTEN_VALUES.indexOf(cur) >= 0) { kept++; continue; }   // 既に入っている＝触らない
+      kyotenVals[i][0] = resolveKyoten_('', kyotenMap[String(locVals[i][0] || '').trim()], companyVals[i][0]);
+      filled++;
+    }
+    // ★列ごと1回のsetValuesで書き戻す
+    sheet.getRange(2, kyotenCol, n, 1).setValues(kyotenVals);
+    result.push(name + ': ' + n + '行中 ' + filled + '行を埋めた（既に入っていた ' + kept + '行はそのまま）');
+  });
+  const msg = result.join(' / ');
+  Logger.log(msg);
+  return msg;
 }
