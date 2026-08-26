@@ -288,3 +288,91 @@ describe('readSchedule（正常系）', () => {
     expect(out.members[0].name).toBe('森');
   });
 });
+
+
+// ============================================================
+// 拠点（本社／関東支店）での絞り込み — 2026-08-26
+//   依頼書 calendar_request_20260826.md ②③
+// ============================================================
+const H20 = [...HEADERS, '拠点'];
+function makeRow20(fields) {
+  const row = new Array(20).fill('');
+  for (const [h, v] of Object.entries(fields)) row[H20.indexOf(h)] = v;
+  return row;
+}
+function payload20(rows) {
+  return { headers: H20, rows, members: [], genbaMaster: [], jobsites: [] };
+}
+
+describe('filterSnapshot（拠点での絞り込み）', () => {
+  const rows = [
+    makeRow20({ 会社: 'グローライズ', 現場名: '本社の現場', 拠点: '本社' }),
+    makeRow20({ 会社: 'GRミツマ',     現場名: '関東の現場', 拠点: '関東支店' }),
+    makeRow20({ 会社: 'グローライズ', 現場名: '合同の現場', 拠点: '両方' })
+  ];
+
+  it('拠点を指定しなければ全部返る（全社ビュー）', () => {
+    const out = filterSnapshot(payload20(rows), '', '');
+    expect(out.rows).toHaveLength(3);
+  });
+
+  it('★「両方」は本社ビューにも関東ビューにも出る（1件登録で両方に出す＝二重登録の廃止）', () => {
+    const honsha = filterSnapshot(payload20(rows), '', '本社');
+    const kanto  = filterSnapshot(payload20(rows), '', '関東支店');
+    const loc = o => o.rows.map(r => r[H20.indexOf('現場名')]);
+    expect(loc(honsha)).toContain('合同の現場');
+    expect(loc(kanto)).toContain('合同の現場');
+  });
+
+  it('★他拠点の予定が1件も混ざらない', () => {
+    const honsha = filterSnapshot(payload20(rows), '', '本社');
+    expect(honsha.rows.map(r => r[H20.indexOf('現場名')])).not.toContain('関東の現場');
+    const kanto = filterSnapshot(payload20(rows), '', '関東支店');
+    expect(kanto.rows.map(r => r[H20.indexOf('現場名')])).not.toContain('本社の現場');
+  });
+
+  it('拠点が空欄の行は「本社」として扱う（過去データ埋めの既定値と揃える）', () => {
+    const legacy = [makeRow20({ 会社: 'グローライズ', 現場名: '昔の現場', 拠点: '' })];
+    expect(filterSnapshot(payload20(legacy), '', '本社').rows).toHaveLength(1);
+    expect(filterSnapshot(payload20(legacy), '', '関東支店').rows).toHaveLength(0);
+  });
+
+  // ★★利用者指定（2026-08-26）: 関東はミツマとグローライズだけの話。
+  //   ラーテル・和信カインドを混ぜてはいけない。
+  it('★和信カインド・ラーテル・GRHDの予定は、本社ビューにも関東ビューにも出ない', () => {
+    const others = [
+      makeRow20({ 会社: '和信カインド', 現場名: '和信の現場', 拠点: '' }),
+      makeRow20({ 会社: 'ラーテル',     現場名: 'ラーテルの現場', 拠点: '' }),
+      makeRow20({ 会社: 'GRHD',        現場名: 'GRHDの現場', 拠点: '' })
+    ];
+    expect(filterSnapshot(payload20(others), '', '本社').rows).toHaveLength(0);
+    expect(filterSnapshot(payload20(others), '', '関東支店').rows).toHaveLength(0);
+    // 拠点で絞らなければ（＝これまでどおりの会社別の見方）ちゃんと出る
+    expect(filterSnapshot(payload20(others), '', '').rows).toHaveLength(3);
+    expect(filterSnapshot(payload20(others), '和信カインド', '').rows).toHaveLength(1);
+  });
+
+  it('★他社の行に拠点が誤って入っていても、拠点ビューには出さない（混ざり防止）', () => {
+    const stray = [makeRow20({ 会社: '和信カインド', 現場名: '誤って本社と入った行', 拠点: '本社' })];
+    expect(filterSnapshot(payload20(stray), '', '本社').rows).toHaveLength(0);
+  });
+
+  it('★会社の絞り込みと拠点の絞り込みは両立する（法人と拠点は別の軸）', () => {
+    // GRミツマ法人だが本社案件、という行が正しく扱えること（依頼書の要件）
+    const mixed = [
+      makeRow20({ 会社: 'GRミツマ', 現場名: 'ミツマだが本社案件', 拠点: '本社' }),
+      makeRow20({ 会社: 'GRミツマ', 現場名: 'ミツマの関東案件', 拠点: '関東支店' })
+    ];
+    const out = filterSnapshot(payload20(mixed), 'GRミツマ', '本社');
+    expect(out.rows).toHaveLength(1);
+    expect(out.rows[0][H20.indexOf('現場名')]).toBe('ミツマだが本社案件');
+  });
+
+  it('19列のまま（拠点列が無い古い取り込み）でも落ちず、全部返る', () => {
+    const old = { headers: HEADERS, rows: [makeRow({ 会社: 'グローライズ' })],
+                  members: [], genbaMaster: [], jobsites: [] };
+    const out = filterSnapshot(old, '', '本社');
+    expect(out.status).toBe('ok');
+    expect(out.rows).toHaveLength(1);
+  });
+});

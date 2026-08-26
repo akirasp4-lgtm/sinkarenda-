@@ -108,7 +108,10 @@ export default {
         // URLにたまたま前後の空白が付いても一致しない事故を防ぐ
         // （gas.jsのdoGetもrequestedCompanyを.trim()してから比較している）。
         const company = (url.searchParams.get('company') || '').trim();
-        return json(await readSchedule(env, company));
+        // ★2026-08-26 拠点（本社／関東支店）。未指定なら従来どおり絞り込まない＝
+        //   古い画面から呼ばれても壊れない。
+        const kyoten = (url.searchParams.get('kyoten') || '').trim();
+        return json(await readSchedule(env, company, kyoten));
       } catch (e) {
         // 画面側は status!=='ok' を見てGASへ落ちる
         return json({ status: 'error', message: String(e.message || e) }, 500);

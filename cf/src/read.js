@@ -39,14 +39,48 @@ const FRESHNESS_THRESHOLD_MS = 15 * 60 * 1000;
  *     genbaMasterに現場名(genba)が含まれることを要求する
  *     （gas.js:1256「j.genba && (!filterByCompany || allowedGenba.has(j.genba))」）
  */
-export function filterSnapshot(payload, company) {
+// ★2026-08-26 拠点（本社／関東支店）— 依頼書 calendar_request_20260826.md ②③
+//   法人（会社）とは独立した軸。会社から導出せず、行に保存された値だけを見る。
+//   「両方」は本社ビュー・関東ビューの両方に出す（1件登録で両方に出す＝二重登録の廃止）。
+//   拠点列が無い（19列のままの古い取り込み）／値が空欄の行は「本社」として扱う。
+//   ＝過去データ埋め（gas.js backfillKyoten）の既定値と揃える。
+const KYOTEN_BOTH = '両方';
+const KYOTEN_DEFAULT = '本社';
+
+// ★★2026-08-26 利用者指定（最重要）:
+//   「関東は、今のカレンダーでいうミツマとグローライズだけの話。
+//     ラーテルと和信カインドは混ぜたらあかん」
+//   本社／関東支店 はグローライズという組織の中の話であり、
+//   和信カインド・ラーテル・GRHD は別事業。拠点の軸に混ぜない。
+//   → 拠点で絞ったときは、この2社の行だけを対象にする。
+//     他社の行は本社ビュー・関東ビューのどちらにも出さない
+//     （出すと「和信カインドの予定が本社の予定として並ぶ」ことになる）。
+export const KYOTEN_COMPANIES = ['グローライズ', 'GRミツマ'];
+
+export function matchKyoten(rowKyoten, wanted, rowCompany) {
+  if (!wanted || wanted === '全社') return true;
+  // 拠点の軸を持たない会社は、拠点ビューには出さない
+  if (KYOTEN_COMPANIES.indexOf(String(rowCompany ?? '').trim()) < 0) return false;
+  const v = String(rowKyoten ?? '').trim() || KYOTEN_DEFAULT;
+  return v === wanted || v === KYOTEN_BOTH;
+}
+
+export function filterSnapshot(payload, company, kyoten) {
   const filter = !!(company && company !== '全社');
   const headers = payload.headers;
   const kaishaIdx = headers.indexOf('会社');
+  const kyotenIdx = headers.indexOf('拠点');   // 19列のままなら -1
+  const kyotenFilter = !!(kyoten && kyoten !== '全社');
 
-  const rows = filter
+  let rows = filter
     ? payload.rows.filter(r => String((kaishaIdx >= 0 ? r[kaishaIdx] : '') ?? '').trim() === company)
     : payload.rows;
+  // ★会社の絞り込みと拠点の絞り込みは独立して両方かかる
+  //   （「GRミツマ法人だが本社案件」を正しく扱うため）。
+  //   拠点列そのものが無い取り込み（移行途中）では絞り込まない＝予定を消さない。
+  if (kyotenFilter && kyotenIdx >= 0) {
+    rows = rows.filter(r => matchKyoten(r[kyotenIdx], kyoten, kaishaIdx >= 0 ? r[kaishaIdx] : ''));
+  }
 
   const members = filter
     ? payload.members.filter(m => m.company === company)
@@ -82,7 +116,7 @@ async function getLastSuccessAt(env) {
   return row ? row.at : null;
 }
 
-export async function readSchedule(env, company) {
+export async function readSchedule(env, company, kyoten) {
   const res = await env.DB.prepare('SELECT payload FROM snapshot WHERE id = 1').all();
   const row = (res.results && res.results[0]) || null;
   if (!row) {
@@ -119,5 +153,5 @@ export async function readSchedule(env, company) {
     // 万一壊れていた場合にクラッシュさせず、GASへフォールバックさせる。
     return { status: 'error', message: '保存済みデータの形式が壊れています' };
   }
-  return filterSnapshot(payload, company);
+  return filterSnapshot(payload, company, kyoten);
 }

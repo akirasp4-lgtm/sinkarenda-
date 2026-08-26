@@ -28,10 +28,21 @@ const KYOTEN_KANTO  = '関東支店';
 const KYOTEN_BOTH   = '両方';           // 本社・関東の両方に関係する予定。1件で両方の画面に出る
 const KYOTEN_VALUES = [KYOTEN_HONSHA, KYOTEN_KANTO, KYOTEN_BOTH];
 
+// ★★2026-08-26 利用者指定（最重要）:
+//   「関東は、今のカレンダーでいうミツマとグローライズだけの話。
+//     ラーテルと和信カインドは混ぜたらあかん」
+//   本社／関東支店 はグローライズという組織の中の話。和信カインド・ラーテル・GRHD は
+//   別事業なので拠点の軸に入れない（拠点は空欄のままにする）。
+const KYOTEN_COMPANIES = [GROWISE, 'GRミツマ'];
+function hasKyotenAxis_(company) {
+  return KYOTEN_COMPANIES.indexOf(String(company || '').trim()) >= 0;
+}
+
 // 会社から拠点の「既定値」を出す。★あくまで初期値を入れるためだけに使う。
 // 保存された値を読むときにこれを使ってはいけない（依頼書の要件）。
 const KYOTEN_DEFAULT_BY_COMPANY = { 'GRミツマ': KYOTEN_KANTO };
 function defaultKyotenForCompany_(company) {
+  if (!hasKyotenAxis_(company)) return '';   // 別事業の会社には拠点を入れない
   return KYOTEN_DEFAULT_BY_COMPANY[String(company || '').trim()] || KYOTEN_HONSHA;
 }
 
@@ -39,7 +50,10 @@ function defaultKyotenForCompany_(company) {
 //   1. 画面から明示的に来た値（利用者がその場で変えた）
 //   2. 現場マスタに登録された拠点（現場を選べば自動で入る＝入力を増やさない）
 //   3. 会社からの既定値
+// ★拠点の軸を持たない会社（和信カインド・ラーテル・GRHD）は常に空欄。
+//   画面から値が来ても入れない（取り違えて混ざるのを構造的に防ぐ）。
 function resolveKyoten_(explicit, jobsiteKyoten, company) {
+  if (!hasKyotenAxis_(company)) return '';
   const e = String(explicit || '').trim();
   if (KYOTEN_VALUES.indexOf(e) >= 0) return e;
   const j = String(jobsiteKyoten || '').trim();
@@ -3259,16 +3273,19 @@ function backfillKyoten() {
     const companyVals = sheet.getRange(2, companyCol, n, 1).getValues();
     const locVals     = sheet.getRange(2, locCol,     n, 1).getValues();
 
-    let filled = 0, kept = 0;
+    let filled = 0, kept = 0, skipped = 0;
     for (let i = 0; i < n; i++) {
       const cur = String(kyotenVals[i][0] || '').trim();
       if (KYOTEN_VALUES.indexOf(cur) >= 0) { kept++; continue; }   // 既に入っている＝触らない
+      // ★拠点の軸を持たない会社（和信カインド・ラーテル・GRHD）は空欄のまま
+      if (!hasKyotenAxis_(companyVals[i][0])) { skipped++; continue; }
       kyotenVals[i][0] = resolveKyoten_('', kyotenMap[String(locVals[i][0] || '').trim()], companyVals[i][0]);
       filled++;
     }
     // ★列ごと1回のsetValuesで書き戻す
     sheet.getRange(2, kyotenCol, n, 1).setValues(kyotenVals);
-    result.push(name + ': ' + n + '行中 ' + filled + '行を埋めた（既に入っていた ' + kept + '行はそのまま）');
+    result.push(name + ': ' + n + '行中 ' + filled + '行を埋めた（既に入っていた ' + kept
+      + '行はそのまま／拠点の軸を持たない会社 ' + skipped + '行は空欄のまま）');
   });
   const msg = result.join(' / ');
   Logger.log(msg);

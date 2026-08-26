@@ -116,7 +116,7 @@ console.log('\nALL PASS');
 
 - [ ] **Step 2: テストを走らせて失敗を確認**
 
-Run: `node "G:/マイドライブ/Claude/予定管理アプリ作成/tools/holidays/test_holidays.mjs"`
+Run: `node "G:/マイドライブ/Claude/自社用/予定管理アプリ作成/tools/holidays/test_holidays.mjs"`
 Expected: FAIL（多数の `FAIL:` 行＋ `checks failed`。まだ何も実装していないため）
 
 - [ ] **Step 3: コミット**
@@ -181,7 +181,7 @@ git add tools/holidays/test_holidays.mjs 2>/dev/null && git commit -m "test: 祝
 
 - [ ] **Step 4: テストの index 部分が通ることを確認**
 
-Run: `node "G:/マイドライブ/Claude/予定管理アプリ作成/tools/holidays/test_holidays.mjs"`
+Run: `node "G:/マイドライブ/Claude/自社用/予定管理アプリ作成/tools/holidays/test_holidays.mjs"`
 Expected: `index.html:` から始まる行がすべて `ok :`（admin/president はまだ FAIL のままで可）
 
 - [ ] **Step 5: コミット**
@@ -233,7 +233,7 @@ git add index.html && git commit -m "feat: 職人用カレンダーに祝日表�
 
 - [ ] **Step 4: テストの admin 部分が通ることを確認**
 
-Run: `node "G:/マイドライブ/Claude/予定管理アプリ作成/tools/holidays/test_holidays.mjs"`
+Run: `node "G:/マイドライブ/Claude/自社用/予定管理アプリ作成/tools/holidays/test_holidays.mjs"`
 Expected: `index.html:` と `admin.html:` の行がすべて `ok :`（president はまだ FAIL で可）
 
 - [ ] **Step 5: コミット**
@@ -288,7 +288,7 @@ git add admin.html && git commit -m "feat: 管理者用カレンダーに祝日�
 
 - [ ] **Step 4: テスト全体が通ることを確認**
 
-Run: `node "G:/マイドライブ/Claude/予定管理アプリ作成/tools/holidays/test_holidays.mjs"`
+Run: `node "G:/マイドライブ/Claude/自社用/予定管理アプリ作成/tools/holidays/test_holidays.mjs"`
 Expected: 末尾に `ALL PASS`（全行 `ok :`）
 
 - [ ] **Step 5: コミット**
