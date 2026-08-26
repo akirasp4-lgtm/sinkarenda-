@@ -1835,8 +1835,17 @@ function updateNoticeBar(){
 }
 
 function filteredNippos(){
-  const base=currentCompany==='全社'?allNippos:allNippos.filter(n=>n.company===currentCompany);
-  // ★2026-08-26 拠点ビュー。全拠点なら素通り＝従来どおりの見え方。
+  // ★2026-08-26: グローライズ系を見ているときは、グローライズとGRミツマの
+  //   両方を1つのカレンダーとして扱う（依頼書「グローライズとしてのカレンダー」）。
+  //   その上で拠点（本社/関東支店）で切り替える。これが無いと関東支店ビューが
+  //   常に0件になり、依頼書の核心「片方に登録した予定をもう片方から確認できない」が
+  //   解決しない（実機で発見）。
+  //   ★他事業（和信カインド・ラーテル・GRHD）はこの束に入れない＝混ぜない。
+  let base;
+  if(currentCompany==='全社')base=allNippos;
+  else if(hasKyotenAxis(currentCompany))base=allNippos.filter(n=>hasKyotenAxis(n.company));
+  else base=allNippos.filter(n=>n.company===currentCompany);
+  // ★拠点ビュー。全拠点なら素通り＝グループ全部が見える。
   if(currentKyoten===KYOTEN_ALL)return base;
   return base.filter(n=>matchKyoten(n,currentKyoten));
 }
@@ -2694,7 +2703,12 @@ async function loadData(forceGas){
   const requestCompany=currentCompany;
   setLoading(true);dataLoadOk=false;
   try{
-    const companyParam=requestCompany&&requestCompany!=='全社'?requestCompany:'';
+    // ★2026-08-26 拠点の統合（依頼書の核心「片方に登録した予定をもう片方から確認できない」）
+    //   グローライズ系（グローライズ／GRミツマ）を見ているときは、片方だけでなく
+    //   グループ両方を取りに行く。そうしないと関東支店ビューが常に0件になる。
+    //   会社ごとの絞り込みは filteredNippos がグループ単位で行う。
+    const companyParam=(requestCompany&&requestCompany!=='全社'&&!hasKyotenAxis(requestCompany))
+      ?requestCompany:'';
     // 2026-08-22: 読み取り先を backend.json で切り替える。
     // ★書き込みは常にGAS。ここで切り替わるのは「読むだけ」。
     // ★Workerが失敗したら黙ってGASへ落ちる。利用者にはエラーを見せない。
