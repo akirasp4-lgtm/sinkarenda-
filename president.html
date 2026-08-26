@@ -297,6 +297,10 @@ button{font-family:inherit}
 
 <!-- ★2026-08-26 ④: 未送信の登録を貯める箱。社員用(index.html)と同一ファイルを共有。
      DOM・fetchに触らない純ロジックなので cf/test/send-queue.test.js でテスト済み。 -->
+<!-- ★2026-08-26: 読み取り先をCloudflareへ切り替えるための判定ロジック。
+     社員用(index.html/admin.html)が使っているものと同じファイルをそのまま読む
+     （ファイル自体は1文字も変更していない＝社員用の挙動に影響しない）。 -->
+<script src="sync-guard.js"></script>
 <script src="send-queue.js"></script>
 <script>
 // send-queue.js が読めなかったとき（配置漏れ・キャッシュ不整合）に画面が
@@ -380,6 +384,51 @@ const COLORS = ['#1a1a2e','#36c','#1D9E75','#e8a317','#d33','#9b59b6','#777','#f
 
 // GASのWebアプリは混むと応答が大きくばらつく（社員用で実測 3.9〜56秒）。
 // 上限を決めないと、失敗しても「読み込み中」のまま永久に固まる。
+// ============================================================
+// 2026-08-26 読み取り先をCloudflare(D1)へ切り替える（社員用と同じ形）
+//
+//   なぜ: 同じ測り方で本番を3回ずつ測ったところ、社員用の読み取りは0.12〜0.35秒
+//   （Cloudflare）だったのに対し、社長用は2.65〜4.14秒（GAS）で約15倍遅かった。
+//   開いた瞬間の表示（起動時キャッシュ）と保存の体感（楽観的保存）は既に同等なので、
+//   残っていた差はこの「裏で最新を取ってくる速さ」だけ。両画面とも「最新が届くまで
+//   保存させない」安全装置を持つため、この差はそのまま社長の待ち時間になっていた。
+//
+//   書き込みは今までどおりGASへ直接。D1はあくまで読み取り用の写し。
+//   D1が少しでもおかしければ自動でGASへ落ちる（社長には何も見えない＝遅くなるだけ）。
+// ============================================================
+
+// ★sync-guard.js が読めなかった場合の保険（社員用 index.html と同じ考え方）。
+//   未定義のまま下で参照すると例外で画面全体が止まるため、必ずGASを使う安全側の
+//   ダミーを生やしておく。
+if (typeof createPreferGasTracker === 'undefined') {
+  window.createPreferGasTracker = function(){
+    return {
+      mark: function(){}, status: function(){ return 'block'; },
+      beginAttempt: function(){ return 0; }, clear: function(){ return false; },
+      isActive: function(){ return true; }
+    };
+  };
+  window.decideSyncOutcome = function(){ return { forceGas:true, confirmed:false }; };
+  window.forceGasWhenBackendUnknown = function(){ return true; };
+}
+
+// ★storageKey を社員用と別にする。既定のままだと同じオリジンの localStorage を
+//   社員用の tracker と共有してしまい、職人の書き込みで社長用がGAS優先に倒れる
+//   （逆も同様）。害は「遅くなる」だけだが、原因の分からない挙動になるので分ける。
+const presPreferGasTracker = createPreferGasTracker({ storageKey: 'pres-prefer-gas-v1' });
+
+const PRES_D1_READ_TIMEOUT_MS = 10000;   // Cloudflareは速い。待たされるならGASへ行く方が早い
+const PRES_SYNC_TIMEOUT_MS = 20000;      // /api/pres-sync（GASからD1へ取り込む）用
+
+// backend.json（社員用と共用の設定ファイル）。取得できなければ null＝「不明」。
+async function presLoadBackendCfg(){
+  try{
+    const r = await fetch('backend.json?t=' + Date.now(), { signal: timeoutSignal(5000) });
+    if (r.ok) return await r.json();
+  }catch(e){ /* 取れなければGASのまま＝安全側 */ }
+  return null;
+}
+
 const GAS_READ_TIMEOUT_MS = 60000;   // 実測最大56秒＋安全マージン
 function timeoutSignal(ms){
   try{
@@ -479,7 +528,47 @@ function applyLocalDelete(id){
 }
 // 裏でサーバーと突き合わせる。待たない・利用者にエラーを見せない。
 function refreshInBackground(){
-  setTimeout(() => { loadEvents({ silent:true }); }, 0);
+  // ★2026-08-26: 書き込みはGASへ行くので、D1へ取り込ませてから読み直す。
+  //   これを挟まずに読み直すと、最大5分古いD1を読んで
+  //   「保存したのに目の前で予定が消える」ことが起きる（社員用で実証済みの欠陥）。
+  //
+  //   同期が「確実に成功した」と確認できたときだけD1を読む。それ以外は必ずGASを読む。
+  //   判定は社員用と同じ sync-guard.js（decideSyncOutcome / preferGasTracker）に任せる。
+  //
+  //   beginAttempt/clear に開始時刻を渡しているのは、連続保存で複数の
+  //   refreshInBackground が並行したときに「後から始まった方の mark を、先に始まった
+  //   方の遅れてきた成功が消してしまう」事故を防ぐため（社員用の5回目レビュー修正7）。
+  const attemptStartedAt = presPreferGasTracker.beginAttempt();
+  setTimeout(async () => {
+    let forceGas = true;
+    try{
+      const cfg = await presLoadBackendCfg();
+      const unknown = forceGasWhenBackendUnknown(cfg);
+      if (unknown !== null) {
+        // backend が 'd1' でない、または取得できず「不明」。
+        if (unknown) presPreferGasTracker.mark();
+        forceGas = unknown;
+      } else {
+        // ここに来るのは cfg.backend==='d1' かつ workerUrl があるときだけ。
+        let outcome;
+        try{
+          const res = await fetch(cfg.workerUrl + '/api/pres-sync', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ pin: PIN }), signal: timeoutSignal(PRES_SYNC_TIMEOUT_MS)
+          });
+          const j = await res.json().catch(()=>null);
+          outcome = decideSyncOutcome(res.ok, j);
+        }catch(e){ outcome = decideSyncOutcome(false, null); }
+        if (outcome.confirmed) presPreferGasTracker.clear(attemptStartedAt);
+        else presPreferGasTracker.mark();
+        forceGas = outcome.forceGas;
+      }
+    }catch(e){
+      presPreferGasTracker.mark();
+      forceGas = true;
+    }
+    loadEvents({ silent:true, forceGas });
+  }, 0);
 }
 
 // ============================================================
@@ -800,17 +889,82 @@ function setupColorPicker(){
 //   1回きりだと利用者に即エラーが出るため、黙って2回まで取り直す。
 //   それでも駄目なときは、前回の内容を残したまま赤い帯を出す
 //   （従来は画面が空になり、社長には「予定が消えた」ように見えていた）。
+/**
+ * 社長予定の一覧を取ってくる。Cloudflare(D1) → GAS → GAS の順に試す。
+ * ★例外を投げず {data, err} を返す（呼び出し側の作りを変えないため）。
+ *
+ * D1を候補から外す条件:
+ *   - backend.json が取れない＝「不明」（forceGasWhenBackendUnknown が true を返す）
+ *   - backend が 'd1' でない、workerUrl が無い
+ *   - 直前の書き込みの同期が「確実に成功した」と確認できていない（presPreferGasTracker）
+ *   - 呼び出し側が forceGas を指定した
+ */
+async function presFetchList(forceGas){
+  const cfg = await presLoadBackendCfg();
+
+  let effectiveForceGas = !!forceGas || forceGasWhenBackendUnknown(cfg);
+  if (!effectiveForceGas) {
+    const st = presPreferGasTracker.status();
+    if (st === 'block') {
+      effectiveForceGas = true;
+    } else if (st === 'recheck') {
+      // 時間が経っただけでは絶対に解除しない。この場で実際に同期させ、
+      // 「確実に成功した」と確認できたときだけ解除する（社員用と同じ）。
+      effectiveForceGas = true;
+      if (cfg && cfg.backend === 'd1' && cfg.workerUrl) {
+        const startedAt = presPreferGasTracker.beginAttempt();
+        try{
+          const sRes = await fetch(cfg.workerUrl + '/api/pres-sync', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ pin: PIN }), signal: timeoutSignal(PRES_SYNC_TIMEOUT_MS)
+          });
+          const sJson = await sRes.json().catch(()=>null);
+          const outcome = decideSyncOutcome(sRes.ok, sJson);
+          if (outcome.confirmed && presPreferGasTracker.clear(startedAt)) effectiveForceGas = false;
+        }catch(e){ /* 確認できなければGAS優先を継続＝安全側 */ }
+      }
+    }
+  }
+
+  const targets = [];
+  if (!effectiveForceGas && cfg && cfg.backend === 'd1' && cfg.workerUrl) {
+    targets.push({ kind:'d1', url: cfg.workerUrl + '/api/president', timeout: PRES_D1_READ_TIMEOUT_MS });
+  }
+  targets.push({ kind:'gas', url: GAS_URL, timeout: GAS_READ_TIMEOUT_MS });
+  targets.push({ kind:'gas', url: GAS_URL, timeout: GAS_READ_TIMEOUT_MS });
+
+  let data = null, err = null;
+  for (const t of targets) {
+    try{
+      // ★PINはURLではなく本文で送る（アクセスログ・履歴に残さない）。
+      //   D1側もGAS側も同じ形で受けられるよう action と pin を両方載せる。
+      const res = await fetch(t.url + (t.kind === 'gas' ? '' : ''), {
+        method:'POST',
+        headers:{ 'Content-Type': t.kind === 'gas' ? 'text/plain' : 'application/json' },
+        body: JSON.stringify({ action:'pres_list', pin: PIN }),
+        signal: timeoutSignal(t.timeout)
+      });
+      const j = await res.json();
+      if (!j || j.status !== 'ok') throw new Error((j && j.message) || '取得に失敗しました');
+      if (!Array.isArray(j.rows)) throw new Error('応答の形が想定と違います');
+      data = j; err = null; break;
+    }catch(e){ err = e; data = null; }
+  }
+  return { data, err };
+}
+
 async function loadEvents(opts){
   const silent = !!(opts && opts.silent);
   const seq = ++presLoadSeq;
   presLoadOk = false;
   if(!silent) showLoading(true);
   try {
-    let data = null, lastErr = null;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try { data = await callGas({ action: 'pres_list', pin: PIN }, { silent:true }); lastErr = null; break; }
-      catch (err) { lastErr = err; data = null; }
-    }
+    // ★2026-08-26: Cloudflare(D1) → GAS → GAS の順に試す。
+    //   D1が使えない・古い・おかしいときは自動でGASへ落ちるので、社長には
+    //   「遅くなる」以外の変化が見えない。GASを2回試すのは従来どおり
+    //   （混雑時のHTTP404対策。社員用で「5回に1回」を実測している）。
+    const { data: fetched, err: lastErr } = await presFetchList(!!(opts && opts.forceGas));
+    const data = fetched;
     // 後から始まった読み込みがあるなら、古い結果で画面を上書きしない
     if (seq !== presLoadSeq) return;
     if (lastErr) throw lastErr;

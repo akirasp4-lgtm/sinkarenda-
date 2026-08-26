@@ -1,5 +1,7 @@
 import { readSchedule } from './read.js';
 import { syncAll, cleanupSyncLog } from './sync.js';
+import { readPresident } from './pres-read.js';
+import { syncPresident, cleanupPresSyncLog } from './pres-sync.js';
 
 // 画面（GitHub Pages）だけが正規の呼び出し元。/api/syncのOrigin検証・CORSの両方で使う。
 const ALLOWED_ORIGIN = 'https://akirasp4-lgtm.github.io';
@@ -44,6 +46,48 @@ async function isSyncRateLimited(env) {
     // tryAcquireLockと同じ方針＝この機構はあくまでbest-effortの緩和策のため）。
     return false;
   }
+}
+
+// 社長予定の同期にも、社員用と同じ考え方のレート制限をかける（pres_sync_logの
+// 直近1分の行数を数える）。社員用の sync_log とは別テーブルなので、互いのしきい値に
+// 影響しない。
+const PRES_SYNC_RATE_LIMIT = 12;
+
+async function isPresSyncRateLimited(env) {
+  try {
+    const cutoff = new Date(Date.now() - SYNC_RATE_WINDOW_MS).toISOString();
+    const res = await env.DB.prepare('SELECT COUNT(*) AS c FROM pres_sync_log WHERE at > ?').bind(cutoff).all();
+    const count = (res.results && res.results[0] && Number(res.results[0].c)) || 0;
+    return count >= PRES_SYNC_RATE_LIMIT;
+  } catch (_e) {
+    return false;   // 判定できないときは同期を止めない（フェイルオープン）
+  }
+}
+
+/**
+ * 社長用APIのPIN照合。★D1へ触る前に必ずここを通す。
+ * 文言はGAS（gas.js:205）と揃える。画面側の分岐を増やさないため。
+ */
+async function checkPresPin(request, env) {
+  const configured = String(env.PRES_PIN || '');
+  if (!configured) {
+    // ★シークレット未設定のとき、空文字どうしの比較で誰でも通ってしまうのを防ぐ。
+    // 設定されるまでは社長用APIは一切使えない（画面は自動でGASへ落ちるだけ）。
+    return {
+      ok: false,
+      response: json({ status: 'error', message: 'PRES_PINが未設定のため社長用APIは無効です' }, 503)
+    };
+  }
+  let body = null;
+  try {
+    body = await request.json();
+  } catch (_e) {
+    return { ok: false, response: json({ status: 'error', message: '認証に失敗しました' }, 403) };
+  }
+  if (String((body && body.pin) || '') !== configured) {
+    return { ok: false, response: json({ status: 'error', message: '認証に失敗しました' }, 403) };
+  }
+  return { ok: true, body };
 }
 
 const json = (obj, status = 200) =>
@@ -131,6 +175,49 @@ export default {
       return json({ status: r.ok ? 'ok' : 'error', rows: r.rows, message: r.message, skipped: !!r.skipped, skipReason: r.skipReason });
     }
 
+    // ── 社長予定（2026-08-26追加）─────────────────────────────────
+    // ★PINはURLのクエリではなくPOSTのbodyで受け取る（アクセスログ・Referer・
+    //   ブラウザ履歴にPINが残るのを避けるため）。
+    // ★Origin検証はしない。社長用はホーム画面PWAからの利用があり、Originが
+    //   ALLOWED_ORIGIN にならない経路が有りうるため、締め出す害の方が大きい。
+    // ★PIN試行の回数制限は入れていない。PIN(1203)はgas.jsに直書きされたまま公開
+    //   リポジトリに入っており（利用者へ報告済み・その上で「変えない」判断）、
+    //   総当たりする必要がそもそも無い。回数制限のために失敗回数をD1へ書くと、
+    //   むしろ無料枠を削る新しい弱点を作るだけになる。
+    //   代わりに「PIN照合をD1に触る前に置く」ことで、不正なリクエストがD1の
+    //   読み取り枠を1件も消費しないようにしてある。
+    if (url.pathname === '/api/president' && request.method === 'POST') {
+      const auth = await checkPresPin(request, env);
+      if (!auth.ok) return auth.response;
+      try {
+        // readPresidentは失敗を投げず {status:'error'} を返すこともある。
+        // 画面側は status!=='ok' を見て自動的にGASへ落ちる。
+        return json(await readPresident(env));
+      } catch (e) {
+        return json({ status: 'error', message: String(e.message || e) }, 500);
+      }
+    }
+
+    // 社長が予定を書いた直後に画面から呼ぶ。取り込んでから返す。
+    if (url.pathname === '/api/pres-sync' && request.method === 'POST') {
+      const auth = await checkPresPin(request, env);
+      if (!auth.ok) return auth.response;
+      if (await isPresSyncRateLimited(env)) {
+        return json({
+          status: 'ok', rows: 0, skipped: true,
+          message: '直近の同期回数が多いため今回はスキップしました（無料枠保護のためのレート制限）'
+        });
+      }
+      const r = await syncPresident(env);
+      // ★skipReasonをそのまま返す。画面側(sync-guard.js)が「確実成功」と扱えるのは
+      //   'unchanged'（GASを実際に取得してD1と一致することを確認できた）だけ。
+      //   'stale-generation' は確認になっていないので確実成功として扱わせない。
+      return json({
+        status: r.ok ? 'ok' : 'error', rows: r.rows, message: r.message,
+        skipped: !!r.skipped, skipReason: r.skipReason
+      });
+    }
+
     if (url.pathname === '/api/health') {
       // DBが落ちているときこそhealthを見たいので、ここも失敗したら
       // 素の500ではなくJSONでエラーを返す。
@@ -158,5 +245,11 @@ export default {
     // ★修正8（低・sync_logの掃除）: 同期本体とは独立に、古いsync_log行を掃除する。
     // 失敗しても同期そのものには影響しない（cleanupSyncLogは例外を投げない契約）。
     ctx.waitUntil(cleanupSyncLog(env));
+    // ★2026-08-26追加: 社長予定の取り込み。syncAllとは独立に走らせる
+    // （どちらも例外を投げない契約なので、片方が失敗しても他方に影響しない）。
+    // PRES_PIN未設定の間は syncPresident 自身が手前で失敗を記録して終わるため、
+    // GASへの余計なアクセスは発生しない。
+    ctx.waitUntil(syncPresident(env));
+    ctx.waitUntil(cleanupPresSyncLog(env));
   }
 };
