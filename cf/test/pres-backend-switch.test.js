@@ -17,6 +17,19 @@ const guardJs = readFileSync(join(ROOT, 'sync-guard.js'), 'utf8');
 const queueJs = readFileSync(join(ROOT, 'send-queue.js'), 'utf8');
 const REAL_IDS = new Set([...html.matchAll(/id="([^"]+)"/g)].map(m => m[1]));
 
+
+// ★呼ぶたびに1ms進む時計。Date.now() がたまたま同じ値を返すことで隠れる不具合
+//   （beginAttempt と mark が同一ミリ秒なら偶然うまくいく等）を確実に暴くために使う。
+function makeTickingDate() {
+  let t = Date.now();
+  const D = function (...a) { return a.length ? new Date(...a) : new Date(t); };
+  D.now = () => ++t;
+  D.parse = Date.parse;
+  D.UTC = Date.UTC;
+  D.prototype = Date.prototype;
+  return D;
+}
+
 function mkEl(id) {
   const e = { id, _cls: new Set(), value: '', textContent: '', innerHTML: '', dataset: {},
               style: { cssText: '' }, children: [], offsetHeight: 44 };
@@ -63,7 +76,7 @@ function makeApp(o = {}) {
     document, console, localStorage: mkStorage(), sessionStorage: mkStorage(),
     location: { search: '' }, navigator: { userAgent: 'node' },
     setTimeout, clearTimeout, setInterval, clearInterval,
-    URLSearchParams, AbortController, AbortSignal, Date, Math, JSON, Map, Set,
+    URLSearchParams, AbortController, AbortSignal, Date: (o.tickingClock ? makeTickingDate() : Date), Math, JSON, Map, Set,
     Array, Object, String, Number, Promise, Error, TextEncoder,
     crypto: { randomUUID: () => 'x'.repeat(32) },
     confirm: () => true, prompt: () => null, alert: () => {},
@@ -374,5 +387,63 @@ describe('書き込みがD1へ確実に伝わること（Codexレビュー[P1]#1
     await settle();
     // 着地確認(pres_list)のあと、D1への取り込みを必ず呼ぶ
     expect(app.hits).toContain('pres-sync');
+  });
+});
+
+// ★2026-08-26 Codex再レビューで、上の修正そのものに見つかった欠陥の再発防止。
+describe('GAS優先の立て方・外し方（Codex再レビュー[P1]）', () => {
+  const settle = () => new Promise(r => setTimeout(r, 40));
+
+  it('★同期が確実に成功したら必ず解除される（解除できないと社長用が15分間ずっと遅いまま）', async () => {
+    const app = makeApp({
+      tickingClock: true,     // beginAttempt と mark が別ミリ秒になる＝実機で普通に起きる状況
+      backendJson: D1_CFG,
+      presSync: (b, respond) => respond({ status:'ok', rows:2, skipped:false }),   // 確実成功
+      d1: (b, respond) => respond({ status:'ok', rows: [] }),
+      gas: (b, respond) => respond({ status:'ok', rows: [] })
+    });
+    app.s.refreshInBackground();
+    await settle();
+    expect(app.T.tracker.status()).toBe('trust');   // 解除されている
+    app.hits.length = 0;
+    await app.s.presFetchList(false);
+    expect(app.hits.some(h => h.startsWith('d1:'))).toBe(true);   // 次からD1を読める＝速い
+  });
+
+  it('★backendがgasのときは無用なブロックを残さない（あとでd1へ切り替えた時に遅いままにしない）', async () => {
+    const app = makeApp({
+      backendJson: { backend: 'gas' },
+      gas: (b, respond) => respond({ status:'ok', rows: [] })
+    });
+    app.s.refreshInBackground();
+    await settle();
+    expect(app.T.tracker.status()).toBe('trust');
+  });
+
+  it('★未送信を消す前にGAS優先を立てる（消してから立てるまでの隙にタブが閉じても安全側）', async () => {
+    const app = makeApp({
+      backendJson: D1_CFG,
+      gas: (b, respond) => {
+        if (b.action === 'pres_list') return respond({ status:'ok', rows:[{ ID:'PORD1', 'タイトル':'先に届いていた', '開始日':'2026-08-27' }] });
+        return respond({ status:'ok' });
+      },
+      presSync: (b, respond) => respond({ status:'ok', rows:1, skipped:false }),
+      d1: (b, respond) => respond({ status:'ok', rows: [] })
+    });
+    const q = app.T.presQueue;
+    q.enqueue({ id:'PORD1', rows:[{ id:'PORD1', title:'先に届いていた', startDate:'2026-08-27' }] }, Date.now());
+    const it0 = q.list()[0];
+    const c0 = q.beginSend(it0.id, Date.now());
+    q.markFailed(it0.id, c0.token, 'HTTP 404', Date.now() - 60000);
+
+    // markSent が呼ばれた瞬間の tracker の状態を記録する
+    let statusAtMarkSent = null;
+    const origMarkSent = q.markSent.bind(q);
+    q.markSent = (...args) => { statusAtMarkSent = app.T.tracker.status(); return origMarkSent(...args); };
+
+    await app.s.presDrainQueue();
+    await settle();
+    expect(statusAtMarkSent).not.toBe(null);
+    expect(statusAtMarkSent).not.toBe('trust');   // 消す時点で既にGAS優先が立っている
   });
 });

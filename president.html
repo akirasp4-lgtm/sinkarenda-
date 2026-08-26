@@ -527,7 +527,7 @@ function applyLocalDelete(id){
   savePresSnapshot(state.events);
 }
 // 裏でサーバーと突き合わせる。待たない・利用者にエラーを見せない。
-function refreshInBackground(){
+function refreshInBackground(attemptStartedAtIn){
   // ★2026-08-26: 書き込みはGASへ行くので、D1へ取り込ませてから読み直す。
   //   これを挟まずに読み直すと、最大5分古いD1を読んで
   //   「保存したのに目の前で予定が消える」ことが起きる（社員用で実証済みの欠陥）。
@@ -538,14 +538,25 @@ function refreshInBackground(){
   //   beginAttempt/clear に開始時刻を渡しているのは、連続保存で複数の
   //   refreshInBackground が並行したときに「後から始まった方の mark を、先に始まった
   //   方の遅れてきた成功が消してしまう」事故を防ぐため（社員用の5回目レビュー修正7）。
-  const attemptStartedAt = presPreferGasTracker.beginAttempt();
+  // ★呼び出し側（presDrainQueue）が既に世代を取って mark() 済みなら、それを引き継ぐ。
+  //   未送信を消す前にGAS優先を立てるため（Codex再レビュー[P1]）。
+  const attemptStartedAt = (typeof attemptStartedAtIn === 'number')
+    ? attemptStartedAtIn
+    : presPreferGasTracker.beginAttempt();
   // ★2026-08-26 Codexレビュー[P1]#1: 以前はここで mark() せず、同期の結果が返ってから
   //   失敗時にだけ mark() していた。するとGASへの書き込みが終わってから同期の結果が
   //   返るまでの数秒間、GAS優先が立っていない。その隙に別タブが開かれたり画面が
   //   再読込されると、まだ取り込まれていない古いD1を「正常」として読み、
   //   **今保存したばかりの予定が消えて見える**。
   //   → 先に立てて、確実な成功を観測したときだけ下で clear() する（安全側から入る）。
-  presPreferGasTracker.mark();
+  //
+  // ★★Codex再レビュー[P1]: mark() に必ず attemptStartedAt を渡すこと。
+  //   引数なしの mark() は markedAt=Date.now() を書くため、beginAttempt() より
+  //   1ms でも後になると clear(attemptStartedAt) が
+  //   「自分の開始より後に付いた mark は消さない」規則（sync-guard.js）に引っかかり、
+  //   **成功しても永久に解除できない**。しかも同一ミリ秒なら偶然解除できてしまうため、
+  //   気づきにくい不定動作になる。同じ世代を記録すれば clear が必ず通る。
+  presPreferGasTracker.mark(attemptStartedAt);
   setTimeout(async () => {
     let forceGas = true;
     try{
@@ -553,7 +564,12 @@ function refreshInBackground(){
       const unknown = forceGasWhenBackendUnknown(cfg);
       if (unknown !== null) {
         // backend が 'd1' でない、または取得できず「不明」。
-        if (unknown) presPreferGasTracker.mark();
+        // ★Codex再レビュー[P2]: unknown===false は「backendが明確にgas」＝D1を一切
+        //   使わないと確定した場合。ここで上の mark() を残すと、あとでD1へ切り替えた
+        //   ときに理由もなくGAS固定のまま（＝遅いまま）になる。使わないと分かった
+        //   時点で外す。
+        if (unknown) presPreferGasTracker.mark(attemptStartedAt);
+        else presPreferGasTracker.clear(attemptStartedAt);
         forceGas = unknown;
       } else {
         // ここに来るのは cfg.backend==='d1' かつ workerUrl があるときだけ。
@@ -567,11 +583,11 @@ function refreshInBackground(){
           outcome = decideSyncOutcome(res.ok, j);
         }catch(e){ outcome = decideSyncOutcome(false, null); }
         if (outcome.confirmed) presPreferGasTracker.clear(attemptStartedAt);
-        else presPreferGasTracker.mark();
+        else presPreferGasTracker.mark(attemptStartedAt);
         forceGas = outcome.forceGas;
       }
     }catch(e){
-      presPreferGasTracker.mark();
+      presPreferGasTracker.mark(attemptStartedAt);
       forceGas = true;
     }
     loadEvents({ silent:true, forceGas });
@@ -735,9 +751,13 @@ async function presDrainQueue(){
           //   「GASには入っているのにD1には無い」状態が最大5分続き、社長の画面から
           //   保存したばかりの予定が消えて見える（そして作り直して重複する）。
           if(landed){
+            // ★Codex再レビュー[P1]: 消してから立てるまでの隙にタブが閉じると
+            //   「未送信も無い・GAS優先も立っていない」状態が端末に残る。先に立てる。
+            const t = presPreferGasTracker.beginAttempt();
+            presPreferGasTracker.mark(t);
             presQueue.markSent(item.id, claim.token);
             renderPresPendingUi();
-            refreshInBackground();
+            refreshInBackground(t);
             continue;
           }
         }
@@ -747,9 +767,12 @@ async function presDrainQueue(){
         //   楽観的保存をやめる（IDが違うと再送時に二重登録を防げないため）。
         if(res && res.id && String(res.id) !== String(ev.id)) rememberSrvCap(false);
         else rememberSrvCap(true);
+        // ★Codex再レビュー[P1]: 通常の送信成功パスも同じ順序にする（消す前に立てる）。
+        const t2 = presPreferGasTracker.beginAttempt();
+        presPreferGasTracker.mark(t2);
         presQueue.markSent(item.id, claim.token);
         renderPresPendingUi();
-        refreshInBackground();
+        refreshInBackground(t2);
       }catch(err){
         presQueue.markFailed(item.id, claim.token, String((err && err.message) || err), Date.now());
         renderPresPendingUi();
