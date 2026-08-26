@@ -295,6 +295,30 @@ button{font-family:inherit}
 <!-- トースト -->
 <div id="toast" class="toast"></div>
 
+<!-- ★2026-08-26 ④: 未送信の登録を貯める箱。社員用(index.html)と同一ファイルを共有。
+     DOM・fetchに触らない純ロジックなので cf/test/send-queue.test.js でテスト済み。 -->
+<script src="send-queue.js"></script>
+<script>
+// send-queue.js が読めなかったとき（配置漏れ・キャッシュ不整合）に画面が
+// 壊れないための最小フォールバック。社員用と同じ方針＝「箱が使えない」と
+// 答えるだけの空実装にして、保存は従来どおり（送信を待つ）へ倒す。
+if(typeof createSendQueue==='undefined'){
+  try{console.error('[社長予定] send-queue.jsの読み込みに失敗しました。保存は従来どおり（送信を待つ）で動作します');}catch(e){}
+  window.createSendQueue=function(){return{
+    isStorageUsable:function(){return false;},
+    enqueue:function(){return false;},
+    list:function(){return [];},
+    count:function(){return 0;},
+    pendingRows:function(){return [];},
+    nextDue:function(){return null;},
+    beginSend:function(){return null;},
+    markSent:function(){return false;},
+    markFailed:function(){return false;},
+    retryNow:function(){return false;},
+    gaveUpCount:function(){return 0;}
+  };};
+}
+</script>
 <script>
 // ============================================================
 // 設定
@@ -347,6 +371,304 @@ const STORAGE_PIN_OK = 'pres-pin-ok-v1';
 const COLORS = ['#1a1a2e','#36c','#1D9E75','#e8a317','#d33','#9b59b6','#777','#ff6b9d'];
 
 // ============================================================
+// 2026-08-26 レスポンス改善（社員用 index.html と同じ考え方を移植）
+//   社長用は 2026-06-15 以降ここが手つかずで、8月に社員用へ入れた
+//   ①保存後の全件読み直し廃止 ②起動時キャッシュ ③失敗時の取り直し
+//   がどれも入っていなかった。gas.js には一切触っていない＝GASの
+//   デプロイ不要・GitHub Pages に出すだけ・git revert で1分で戻せる。
+// ============================================================
+
+// GASのWebアプリは混むと応答が大きくばらつく（社員用で実測 3.9〜56秒）。
+// 上限を決めないと、失敗しても「読み込み中」のまま永久に固まる。
+const GAS_READ_TIMEOUT_MS = 60000;   // 実測最大56秒＋安全マージン
+function timeoutSignal(ms){
+  try{
+    if(typeof AbortSignal!=='undefined' && AbortSignal.timeout) return AbortSignal.timeout(ms);
+    const c = new AbortController(); setTimeout(()=>c.abort(), ms); return c.signal;
+  }catch(e){ return undefined; }
+}
+
+// 最新データを読めているか。false の間は保存・削除を止める。
+// （社員用の dataLoadOk と同じ役割。古い内容のまま保存して予定がダブるのを防ぐ）
+let presLoadOk = false;
+// 会社切替のような遅れて返る通信で、新しい表示を古い結果が上書きしないための番号
+let presLoadSeq = 0;
+
+// ── ② 開いた瞬間に前回の内容を出す ────────────────────────
+// 端末に前回の読み込み結果を残しておき、起動時にまず描いてから最新を取りに行く。
+// ★安全装置は外さない: キャッシュ表示中も presLoadOk は false のまま＝「見るだけ」。
+//   本物のデータが届いて初めて保存・削除できるようになる。
+const PRES_CACHE_KEY = 'pres-cache-v1';
+function savePresSnapshot(events){
+  try{
+    // ★未送信（まだサーバーに無い予定）はキャッシュに混ぜない。混ぜると、送信が
+    //   終わって箱から消えた後もキャッシュ側に残り続け、次に開いたとき実在しない
+    //   予定が表示される。未送信は箱(presQueue)が持っており applyPendingRows で
+    //   載せ直すので、ここで落としても画面から消えることはない。
+    const clean = (events || []).filter(e => !(e && e.isPending));
+    localStorage.setItem(PRES_CACHE_KEY, JSON.stringify({ v:1, savedAt:Date.now(), events:clean }));
+  }catch(e){ /* 容量超過等は無視。キャッシュは無くても動く */ }
+}
+function hydratePresSnapshot(){
+  try{
+    const raw = localStorage.getItem(PRES_CACHE_KEY); if(!raw) return false;
+    const snap = JSON.parse(raw);
+    if(!snap || snap.v !== 1 || !Array.isArray(snap.events) || !snap.events.length) return false;
+    state.events = snap.events;
+    applyPendingRows();          // ★未送信の予定を載せ直す
+    renderCalendar(); renderList();
+    return true;
+  }catch(e){ return false; }
+}
+
+// ── ③ 「前回の内容を表示中」の帯 ──────────────────────────
+// ★社員用(index.html)はこの帯を position:fixed; top:0 で出しているが、
+//   この画面は .app-header 自体が fixed; top:0 のため、そのまま真似ると
+//   ヘッダーを覆ってしまう。ここではヘッダーの真下に置き、本文の上余白を
+//   その分だけ広げる（社員用の「帯がヘッダーと重なるかもしれない」という
+//   未確認事項を、この画面では最初から避けている）。
+function setStaleBadge(on, failed){
+  try{
+    let el = document.getElementById('pres-stale-badge');
+    if(!el){
+      el = document.createElement('div'); el.id = 'pres-stale-badge';
+      el.style.cssText = 'position:fixed;left:0;right:0;z-index:99;font-size:12px;line-height:1.4;'
+        + 'padding:6px 10px;text-align:center;font-weight:700;color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.2)';
+      document.body.appendChild(el);
+    }
+    if(!on){ el.style.display = 'none'; layoutBanners(); return; }
+    el.style.background = failed ? '#E8384F' : '#F59E0B';
+    el.textContent = failed
+      ? '⚠️ 最新の予定を取得できませんでした。これは前回の内容です（保存はできません。「更新」を押してください）'
+      : '🔄 前回の内容を表示中です。最新に更新しています…（更新が終わるまで保存はできません）';
+    el.style.display = 'block';
+    layoutBanners();   // ★帯の縦位置と本文の余白はここで一括して決める
+  }catch(e){}
+}
+
+// ── ① 保存・削除のあと、画面だけ先に直す ────────────────────
+// 従来は毎回 loadEvents() で全件読み直していたため「書き込み待ち＋読み直し待ち」の
+// 二重待ちになっていた。サーバーは既に正常応答を返しているので、その内容で画面を
+// 直し、サーバーとの突き合わせは裏で走らせる（社員用 index.html と同じ）。
+function syncOpenDayModal(){
+  // ★社員用 commit 726d3df と同じ: 日付の小窓を開いたまま保存すると
+  //   小窓の中身が古いままになるので作り直す。
+  try{
+    const dm = $('dayModal');
+    if(dm && !dm.classList.contains('hidden') && dm.dataset.date) openDayModal(dm.dataset.date);
+  }catch(e){}
+}
+function applyLocalUpsert(ev, opts){
+  if(!ev || !ev.id) return;
+  const row = {
+    id: String(ev.id), title: ev.title||'', startDate: ev.startDate||'', startTime: ev.startTime||'',
+    endDate: ev.endDate||ev.startDate||'', endTime: ev.endTime||'', location: ev.location||'',
+    memo: ev.memo||'', category: ev.category||'', color: ev.color||COLORS[0],
+    isPending: !!(opts && opts.pending)      // ★④: まだサーバーに届いていない印
+  };
+  const i = state.events.findIndex(x => String(x.id) === String(ev.id));
+  if(i >= 0) state.events[i] = row; else state.events.push(row);
+  renderCalendar(); renderList(); syncOpenDayModal();
+  savePresSnapshot(state.events);
+}
+function applyLocalDelete(id){
+  if(!id) return;
+  state.events = state.events.filter(x => String(x.id) !== String(id));
+  renderCalendar(); renderList(); syncOpenDayModal();
+  savePresSnapshot(state.events);
+}
+// 裏でサーバーと突き合わせる。待たない・利用者にエラーを見せない。
+function refreshInBackground(){
+  setTimeout(() => { loadEvents({ silent:true }); }, 0);
+}
+
+// ============================================================
+// 2026-08-26 ④ 保存を「押した瞬間」に（楽観的表示＋裏送信）
+//   社員用 index.html と同じ仕組み。対象は新規追加のみ。
+//   編集・削除は従来どおり返事を待つ（社員用と同じ）。
+// ============================================================
+
+// 送信権のリース時間。1回の保持のうちに「確認の読み取り」→「送信」を行うため
+// 最長 GAS_READ_TIMEOUT_MS×2 かかる。既定30秒だと途中で他タブに横取りされる。
+const PRES_SEND_LEASE_MS = GAS_READ_TIMEOUT_MS * 2 + 30000;   // 150秒
+// タブごとに違うID。「初回送信は登録したタブだけが行う」判定に使う。
+const PRES_TAB_ID = 't' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+const presQueue = createSendQueue({
+  storage: (function(){ try{ return window.localStorage; }catch(e){ return null; } })(),
+  storageKey: 'pres-pending-add-v1',    // ★社員用の箱とは必ず別にする（混ざると事故）
+  tabId: PRES_TAB_ID,
+  leaseMs: PRES_SEND_LEASE_MS
+});
+let presDrainRunning = false;
+let presDrainTimer = null;
+
+// ── サーバーが「画面側の作ったID」を受け付けるか ──────────────────
+// 受け付けないサーバー（gas.jsが古い）では、送り直しのときに「もう入っているか」を
+// IDで確認できない＝二重登録を防げない。その場合は楽観的保存を使わず、従来どおり
+// 返事を待つ保存に倒す。判定は実際の保存の結果で行い、端末に覚えておく。
+const PRES_CAP_KEY = 'pres-srv-accepts-id-v1';
+function srvAcceptsClientId(){
+  try{ return localStorage.getItem(PRES_CAP_KEY) === '1'; }catch(e){ return false; }
+}
+function rememberSrvCap(ok){
+  try{ localStorage.setItem(PRES_CAP_KEY, ok ? '1' : '0'); }catch(e){}
+}
+// gas.js 側の受け入れ条件 /^P[0-9a-zA-Z]{8,64}$/ に必ず合う形で作る
+function presNewId(){
+  let s = '';
+  try{ if(window.crypto && crypto.randomUUID) s = crypto.randomUUID().replace(/-/g, ''); }catch(e){}
+  if(!s) s = Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  s = s.replace(/[^0-9a-zA-Z]/g, '');
+  while(s.length < 12) s += Math.random().toString(36).slice(2).replace(/[^0-9a-z]/g, '');
+  return 'P' + s.slice(0, 40);
+}
+
+// ── 帯の置き場所をまとめて決める ────────────────────────────
+// ★社員用は「鮮度の帯(fixed top:0)」と「未送信の帯(sticky)」を別々に置いており、
+//   同時に出ると重なる可能性が未確認事項として残っている。この画面は最初から
+//   ヘッダーの下に縦に積み、本文の上余白もその分だけ広げて重なりを構造で防ぐ。
+function layoutBanners(){
+  try{
+    const hdr = $('appHeader');
+    const base = (hdr && !hdr.classList.contains('hidden')) ? hdr.offsetHeight : 0;
+    let y = base;
+    const stale = document.getElementById('pres-stale-badge');
+    if(stale && stale.style.display !== 'none'){ stale.style.top = y + 'px'; y += stale.offsetHeight; }
+    const pend = document.getElementById('pres-pending-badge');
+    if(pend && pend.style.display !== 'none'){ pend.style.top = y + 'px'; y += pend.offsetHeight; }
+    const main = $('mainArea');
+    if(main) main.style.paddingTop = (y > base) ? (y + 8) + 'px' : '';
+  }catch(e){}
+}
+
+// ── 未送信の帯 ─────────────────────────────────────────
+let _presPendingLastN = -1;
+function renderPresPendingUi(){
+  let n = 0, gave = 0;
+  try{ n = presQueue.count(); gave = presQueue.gaveUpCount(); }catch(e){ return; }
+  let el = document.getElementById('pres-pending-badge');
+  if(n === 0){
+    if(el) el.style.display = 'none';
+    if(_presPendingLastN !== 0){ renderCalendar(); renderList(); syncOpenDayModal(); }
+    _presPendingLastN = 0;
+    layoutBanners();
+    return;
+  }
+  if(!el){
+    el = document.createElement('div'); el.id = 'pres-pending-badge';
+    el.style.cssText = 'position:fixed;left:0;right:0;z-index:98;font-size:12px;line-height:1.4;'
+      + 'padding:6px 10px;text-align:center;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.15)';
+    document.body.appendChild(el);
+    // ★社員用の修正と同じ: 全部を再送すると、他タブが送信中（リース有効）の分まで
+    //   横取りして二重送信になりうる。諦めた分だけ・他タブがリース中でない分だけ触る。
+    el.onclick = () => {
+      try{
+        const now = Date.now();
+        presQueue.list().forEach(it => {
+          if(!it.gaveUp) return;
+          if(it.claimedAt && now < it.claimedAt + PRES_SEND_LEASE_MS && it.owner !== PRES_TAB_ID) return;
+          presQueue.retryNow(it.id, now);
+        });
+        presDrainQueue();
+      }catch(e){}
+    };
+  }
+  if(gave > 0){
+    el.style.background = '#ffdad6'; el.style.color = '#8c0009'; el.style.fontWeight = '700';
+    el.textContent = '⚠ ' + gave + '件が送信できていません。タップして再送してください';
+  }else{
+    el.style.background = '#fff4d6'; el.style.color = '#7a5b00'; el.style.fontWeight = '400';
+    el.textContent = '⏳ 未送信 ' + n + '件（自動で送信中）';
+  }
+  el.style.display = 'block';
+  if(_presPendingLastN !== n){ renderCalendar(); renderList(); syncOpenDayModal(); }
+  _presPendingLastN = n;
+  layoutBanners();
+}
+
+// ── 未送信の予定を画面に載せ直す ──────────────────────────
+// loadEvents / hydratePresSnapshot は state.events を丸ごと入れ替えるため、
+// そのままだと未送信の予定が画面から消える。入れ替えのたびに載せ直す。
+function applyPendingRows(){
+  let rows;
+  try{ rows = presQueue.pendingRows(''); }catch(e){ return; }
+  if(!rows || !rows.length) return;
+  const have = new Set(state.events.map(e => String(e.id)));
+  rows.forEach(r => {
+    if(!r || !r.id || have.has(String(r.id))) return;
+    state.events.push({
+      id:String(r.id), title:r.title||'', startDate:r.startDate||'', startTime:r.startTime||'',
+      endDate:r.endDate||r.startDate||'', endTime:r.endTime||'', location:r.location||'',
+      memo:r.memo||'', category:r.category||'', color:r.color||COLORS[0], isPending:true
+    });
+  });
+}
+
+// ── 送り直しの前に「もう入っていないか」を確かめる ────────────────
+// 本番で「送信側にエラーが返ったのに実際は書き込まれていた」が起きている（社員用で実測）。
+// 確認せず送り直すと社長の予定が二重になる。初回送信では確認しない（毎回の保存に
+// 余計な待ちを足さないため。初回はまだ一度も送っていないので重複しようがない）。
+async function presCheckAlreadyLanded(item){
+  const data = await callGas({ action:'pres_list', pin: PIN }, { silent:true });
+  const seen = new Set((data.rows || []).map(r => String((r && r['ID']) || '')));
+  // ★空文字は「一致」と見なさない。事務がシートを直接触ってID空欄の行を作ることが
+  //   あり、空同士で誤一致すると送っていないのに送信済み扱いで予定が黙って消える。
+  seen.delete('');
+  return (item.rows || []).some(r => {
+    const k = String((r && r.id) || '');
+    return k !== '' && seen.has(k);
+  });
+}
+
+// ── 送信係: 箱から1件ずつ取り出して送る。例外を投げない・多重起動しない ──
+async function presDrainQueue(){
+  if(presDrainRunning) return;
+  presDrainRunning = true;
+  try{
+    for(;;){
+      const item = presQueue.nextDue(Date.now());
+      if(!item) break;
+      const claim = presQueue.beginSend(item.id, Date.now());
+      if(!claim) break;   // 他タブが持っている／記録を残せなかった＝安全側で何もしない
+      try{
+        if(claim.wasRetry){
+          const landed = await presCheckAlreadyLanded(item);
+          if(landed){ presQueue.markSent(item.id, claim.token); renderPresPendingUi(); continue; }
+        }
+        const ev = (item.rows && item.rows[0]) || {};
+        const res = await callGas({ action:'pres_add', pin: PIN, event: ev }, { silent:true });
+        // ★サーバーが画面側のIDを採用したか毎回確かめる。食い違ったら以後は
+        //   楽観的保存をやめる（IDが違うと再送時に二重登録を防げないため）。
+        if(res && res.id && String(res.id) !== String(ev.id)) rememberSrvCap(false);
+        else rememberSrvCap(true);
+        presQueue.markSent(item.id, claim.token);
+        renderPresPendingUi();
+        refreshInBackground();
+      }catch(err){
+        presQueue.markFailed(item.id, claim.token, String((err && err.message) || err), Date.now());
+        renderPresPendingUi();
+        break;
+      }
+    }
+  }finally{
+    presDrainRunning = false;
+    try{
+      if(presQueue.isStorageUsable()){
+        // 諦めた分しか残っていないなら再スケジュールしない（二度と送れないのに
+        // 5秒おきにタイマーが回り続けてスマホの電池を食うため）
+        if(presQueue.count() > presQueue.gaveUpCount()) schedulePresDrain(5000);
+      }else{
+        renderPresPendingUi();
+      }
+    }catch(e){}
+  }
+}
+function schedulePresDrain(ms){
+  if(presDrainTimer) clearTimeout(presDrainTimer);
+  presDrainTimer = setTimeout(() => { presDrainTimer = null; presDrainQueue(); }, Math.max(1000, ms || 5000));
+}
+
+// ============================================================
 // ステート
 // ============================================================
 let state = {
@@ -370,15 +692,20 @@ function showToast(msg){
 function showLoading(b){$('loadingOverlay').classList.toggle('hidden',!b)}
 function escHtml(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 
-async function callGas(payload){
-  showLoading(true);
+async function callGas(payload, opts){
+  // ★2026-08-26: 待ち上限(signal)を追加。付けないと、GASが応答を返さないときに
+  //   「読み込み中」のまま永久に固まる。silent は裏で走らせるときに使う
+  //   （砂時計を出さない＝利用者の操作を邪魔しない）。
+  const silent = !!(opts && opts.silent);
+  if(!silent) showLoading(true);
   try{
-    const res = await fetch(GAS_URL,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify(payload)});
+    const res = await fetch(GAS_URL,{method:'POST',headers:{'Content-Type':'text/plain'},
+      body:JSON.stringify(payload), signal:timeoutSignal(GAS_READ_TIMEOUT_MS)});
     const data = await res.json();
     if (data.status !== 'ok') throw new Error(data.message || '通信エラー');
     return data;
   } finally {
-    showLoading(false);
+    if(!silent) showLoading(false);
   }
 }
 
@@ -441,6 +768,13 @@ function initApp(){
   const now = new Date();
   state.viewYM = { y: now.getFullYear(), m: now.getMonth() };
   setupColorPicker();
+  // ★2026-08-26 ②: 先に端末の前回内容を描いてから最新を取りに行く。
+  //   従来は取得が終わるまで（実測で数秒〜数十秒）真っ白のまま待たされていた。
+  if(hydratePresSnapshot()) setStaleBadge(true, false);
+  // ★2026-08-26 ④: 前回アプリを閉じたときに送れていなかった分を表示し、自動で送信を再開する。
+  //   （機内モードで登録 → 閉じる → 電波が戻って開く、という流れで予定が失われないように）
+  renderPresPendingUi();
+  presDrainQueue();
   loadEvents();
 }
 
@@ -461,9 +795,25 @@ function setupColorPicker(){
   });
 }
 
-async function loadEvents(){
+// ★2026-08-26 ③: 社員用(index.html)と同じ作りにした。
+//   GASは混むと HTTP404 やロック時間切れを返す（社員用で「5回に1回」を実測）。
+//   1回きりだと利用者に即エラーが出るため、黙って2回まで取り直す。
+//   それでも駄目なときは、前回の内容を残したまま赤い帯を出す
+//   （従来は画面が空になり、社長には「予定が消えた」ように見えていた）。
+async function loadEvents(opts){
+  const silent = !!(opts && opts.silent);
+  const seq = ++presLoadSeq;
+  presLoadOk = false;
+  if(!silent) showLoading(true);
   try {
-    const data = await callGas({ action: 'pres_list', pin: PIN });
+    let data = null, lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { data = await callGas({ action: 'pres_list', pin: PIN }, { silent:true }); lastErr = null; break; }
+      catch (err) { lastErr = err; data = null; }
+    }
+    // 後から始まった読み込みがあるなら、古い結果で画面を上書きしない
+    if (seq !== presLoadSeq) return;
+    if (lastErr) throw lastErr;
     state.events = (data.rows || []).map(r => ({
       id: r['ID'] || '',
       title: r['タイトル'] || '',
@@ -476,10 +826,27 @@ async function loadEvents(){
       category: r['カテゴリ'] || '',
       color: r['色'] || COLORS[0]
     })).filter(e => e.id);
+    applyPendingRows();          // ★未送信の予定を載せ直す
     renderCalendar();
     renderList();
+    syncOpenDayModal();
+    savePresSnapshot(state.events);
+    setStaleBadge(false);
+    presLoadOk = true;
   } catch (err) {
-    showToast('読み込み失敗: ' + err.message);
+    if (seq !== presLoadSeq) return;
+    presLoadOk = false;
+    const msg = (err && err.message) ? err.message : String(err);
+    if ((state.events && state.events.length) || hydratePresSnapshot()) {
+      // 前回の内容を残す。空にしない。presLoadOk は false のままなので保存は不可＝安全。
+      setStaleBadge(true, true);
+      if(!silent) showToast('最新を取得できませんでした（表示は前回の内容です）');
+    } else {
+      setStaleBadge(false);
+      showToast('読み込み失敗: ' + msg);
+    }
+  } finally {
+    if (seq === presLoadSeq && !silent) showLoading(false);
   }
 }
 
@@ -580,7 +947,7 @@ function renderCalendar(){
       chip.className = 'evt-chip';
       chip.style.background = ev.color || COLORS[0];
       // タイトルを優先表示（時刻はタップして詳細で確認）
-      chip.textContent = ev.title || (ev.startTime || '予定');
+      chip.textContent = (ev.isPending ? '⏳ ' : '') + (ev.title || (ev.startTime || '予定'));
       chip.title = (ev.startTime ? ev.startTime + ' ' : '') + (ev.title || '');
       list.appendChild(chip);
     });
@@ -652,7 +1019,7 @@ function renderList(){
     item.style.borderLeftColor = ev.color || COLORS[0];
     item.innerHTML = `
       <div class="list-date">${formatPeriod(ev)}</div>
-      <div class="list-title">${escHtml(ev.title)}</div>
+      <div class="list-title">${ev.isPending ? '⏳ ' : ''}${escHtml(ev.title)}</div>
       <div class="list-meta">
         ${ev.location ? '<span>📍 ' + escHtml(ev.location) + '</span>' : ''}
         ${ev.category ? '<span>🏷️ ' + escHtml(ev.category) + '</span>' : ''}
@@ -700,7 +1067,7 @@ function openDayModal(dateStr){
       item.className = 'list-item';
       item.style.borderLeftColor = ev.color || COLORS[0];
       item.innerHTML = `
-        <div class="list-title">${escHtml(ev.title)}</div>
+        <div class="list-title">${ev.isPending ? '⏳ ' : ''}${escHtml(ev.title)}</div>
         <div class="list-meta">
           ${ev.startTime ? '<span>⏰ ' + escHtml(ev.startTime) + (ev.endTime ? '〜' + escHtml(ev.endTime) : '') + '</span>' : ''}
           ${ev.location ? '<span>📍 ' + escHtml(ev.location) + '</span>' : ''}
@@ -730,6 +1097,9 @@ $('dayModalAdd').addEventListener('click', () => {
 // 編集モーダル
 // ============================================================
 function openEdit(ev, defaultDate){
+  // ★2026-08-26 ④: 未送信（まだサーバーに届いていない）予定は編集させない。
+  //   編集すると別の行として直送され、あとから未送信も届いて予定が二重になる。
+  if (ev && ev.isPending) { showToast('この予定はまだ送信中です。送信が終わってから編集してください'); return; }
   state.editing = ev;
   $('editModalTitle').textContent = ev ? '予定を編集' : '予定を追加';
   $('evTitle').value = ev?.title || '';
@@ -768,17 +1138,47 @@ async function saveEvent(){
     category: $('evCategory').value,
     color: state.selectedColor
   };
+  // ★2026-08-26 ③: 最新を読めていない（＝前回の内容を表示中）ときは保存させない。
+  //   古い内容の上に保存すると予定が二重になる。社員用の dataLoadOk と同じ安全装置。
+  if (!presLoadOk) { showToast('最新の予定を読み込めていないため保存できません。「更新」を押してください'); return; }
+  // ── ★2026-08-26 ④: 新規追加は「押した瞬間に完了」に見せる ────────────
+  // 箱が使える かつ サーバーが画面側のIDを受け付けると分かっている ときだけ楽観化する。
+  // どちらか欠けるときは下の従来どおり（返事を待つ）へ倒す＝安全側。
+  // 編集(state.editing)は対象外。社員用と同じ。
+  if (!state.editing && presQueue.isStorageUsable() && srvAcceptsClientId()) {
+    ev.id = presNewId();
+    if (presQueue.enqueue({ id: ev.id, rows: [ev], company: '' }, Date.now())) {
+      applyLocalUpsert(ev, { pending: true });
+      showToast('追加しました');
+      closeEdit();
+      renderPresPendingUi();
+      presDrainQueue();          // ★await しない＝ここで待たせない
+      return;
+    }
+  }
+
   try {
     if (state.editing) {
       ev.id = state.editing.id;
       await callGas({ action: 'pres_update', pin: PIN, event: ev });
+      applyLocalUpsert(ev);
       showToast('更新しました');
     } else {
-      await callGas({ action: 'pres_add', pin: PIN, event: ev });
+      // 従来どおり返事を待つ保存。あわせて「サーバーが画面側のIDを受け付けるか」を
+      // ここで判定し、次回以降 楽観化してよいかを端末に覚える。
+      ev.id = presNewId();
+      const res = await callGas({ action: 'pres_add', pin: PIN, event: ev });
+      const srvId = (res && res.id) ? String(res.id) : '';
+      rememberSrvCap(srvId !== '' && srvId === String(ev.id));
+      ev.id = srvId || ev.id;
+      applyLocalUpsert(ev);
       showToast('追加しました');
     }
     closeEdit();
-    await loadEvents();
+    // ★①: 従来はここで await loadEvents() ＝全件読み直しを待っていた
+    //   （書き込み待ち＋読み直し待ちの二重待ち）。画面は上で直したので、
+    //   サーバーとの突き合わせは待たずに裏で走らせる。
+    refreshInBackground();
   } catch (err) {
     showToast('保存失敗: ' + err.message);
   }
@@ -786,13 +1186,18 @@ async function saveEvent(){
 
 async function deleteFromEdit(){
   if (!state.editing) return;
+  // ★未送信はサーバーにまだ無い。消しても何も起きず、あとから未送信が届いて復活する。
+  if (state.editing.isPending) { showToast('この予定はまだ送信中です。送信が終わってから削除してください'); return; }
+  if (!presLoadOk) { showToast('最新の予定を読み込めていないため削除できません。「更新」を押してください'); return; }
   if (!confirm('この予定を削除しますか？')) return;
+  const delId = state.editing.id;
   try {
-    await callGas({ action: 'pres_delete', pin: PIN, id: state.editing.id });
+    await callGas({ action: 'pres_delete', pin: PIN, id: delId });
+    applyLocalDelete(delId);
     showToast('削除しました');
     closeEdit();
     closeDetail();
-    await loadEvents();
+    refreshInBackground();   // ★①: await loadEvents() をやめて裏で照合
   } catch (err) {
     showToast('削除失敗: ' + err.message);
   }
@@ -831,12 +1236,16 @@ $('detEdit').addEventListener('click', () => {
 });
 $('detDelete').addEventListener('click', async () => {
   if (!detailEv) return;
+  if (detailEv.isPending) { showToast('この予定はまだ送信中です。送信が終わってから削除してください'); return; }
+  if (!presLoadOk) { showToast('最新の予定を読み込めていないため削除できません。「更新」を押してください'); return; }
   if (!confirm('この予定を削除しますか？')) return;
+  const delId = detailEv.id;
   try {
-    await callGas({ action: 'pres_delete', pin: PIN, id: detailEv.id });
+    await callGas({ action: 'pres_delete', pin: PIN, id: delId });
+    applyLocalDelete(delId);
     showToast('削除しました');
     closeDetail();
-    await loadEvents();
+    refreshInBackground();   // ★①: await loadEvents() をやめて裏で照合
   } catch (err) {
     showToast('削除失敗: ' + err.message);
   }
@@ -846,7 +1255,7 @@ $('detDelete').addEventListener('click', async () => {
 // FAB / タブ / 更新
 // ============================================================
 $('fab').addEventListener('click', () => openEdit(null));
-$('btnReload').addEventListener('click', loadEvents);
+$('btnReload').addEventListener('click', () => loadEvents());
 
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => {
@@ -896,6 +1305,9 @@ function shiftDayModal(delta){
   const next = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
   openDayModal(next);
 }
+
+// ★帯はヘッダーの高さを見て置いているので、回転・サイズ変更で置き直す
+window.addEventListener('resize', layoutBanners);
 
 // カレンダー本体: 左→次月 / 右→前月
 attachSwipe($('tabCal'), () => shiftMonth(1), () => shiftMonth(-1));

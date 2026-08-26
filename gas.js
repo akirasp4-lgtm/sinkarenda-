@@ -228,7 +228,27 @@ function handlePresidentAction_(body, action, updatedBy) {
 
     if (action === 'pres_add') {
       const ev = body.event || {};
-      const id = 'P' + Utilities.getUuid().replace(/-/g, '');
+      // ── 2026-08-26: 画面側が作ったIDを受け付ける（社員用の add と同じ形にする）──
+      // なぜ必要か: 楽観的保存（送信を待たずに画面へ出す）では、送り直しの前に
+      // 「もう入っていないか」をIDで確認する。サーバーが毎回新しいIDを振ると
+      // 画面側はそのIDを知りようがなく、確認できないまま送り直して予定が二重になる。
+      // 受け入れ条件を英数字のみに絞る（式・区切り文字・全角の混入を防ぐ）。
+      // 条件に合わなければ従来どおりサーバーで採番＝古い画面から呼ばれても壊れない。
+      const rawId = String(ev.id || '').trim();
+      const id = /^P[0-9a-zA-Z]{8,64}$/.test(rawId)
+        ? rawId
+        : ('P' + Utilities.getUuid().replace(/-/g, ''));
+      // ── 二段構え: サーバー側でも二重登録を止める ──────────────────
+      // 画面側の「もう入っていないか」確認をすり抜けた再送（確認の通信自体が
+      // 失敗した場合など）が来ても、ここで必ず止まる。既にあるなら足さずに
+      // 成功を返す＝画面側は送信済みとして扱えるので未送信が残り続けない。
+      const presData = presSheet.getDataRange().getValues();
+      const presIdCol = PRES_HEADERS.indexOf('ID');
+      for (let i = 1; i < presData.length; i++) {
+        if (String(presData[i][presIdCol] || '').trim() === id) {
+          return ok({id: id, duplicate: true});
+        }
+      }
       presSheet.appendRow([
         new Date(),
         String(ev.title || ''),
