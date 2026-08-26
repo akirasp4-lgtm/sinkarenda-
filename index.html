@@ -1773,6 +1773,11 @@ function renderKyotenBar(){
   if(!bar)return;
   if(!kyotenBarVisible()){
     bar.style.display='none';
+    // ★実機確認で発見: ここで早期に return するため、和信カインド等へ切り替えても
+    //   フォームの拠点欄が出たまま残っていた（保存値は空なので実害は無いが、
+    //   意味のない欄が見える）。バーを消すときは欄も必ず閉じる。
+    refreshKyotenField('s');
+    refreshKyotenField('e');
     document.body.classList.remove('has-kyoten-bar');
     if(currentKyoten!==KYOTEN_ALL){currentKyoten=KYOTEN_ALL;try{localStorage.setItem('genba-kyoten',KYOTEN_ALL);}catch(e){}}
     return;
