@@ -64,6 +64,11 @@ async function fetchPresList(gasUrl, pin, cacheBuster) {
   throw last || new Error('取得に失敗しました');
 }
 
+// 社長予定1件が必ず持つキー。doGet（社員の日報データ）の行はこれを持たない。
+const PRES_ROW_KEYS = ['タイトル', '開始日'];
+// 社員の日報データだけが持つキー。1つでもあれば社長予定ではない。
+const NIPPO_ROW_KEYS = ['作業日', '氏名', '元請名', '人工', '会社', '拠点'];
+
 function validate(json) {
   if (!json || typeof json !== 'object') {
     return { ok: false, message: '応答がJSONではありません' };
@@ -73,6 +78,32 @@ function validate(json) {
   }
   if (!Array.isArray(json.rows)) {
     return { ok: false, message: 'rowsが配列ではありません' };
+  }
+
+  // ★★2026-08-26 本番障害の再発防止（社長のカレンダーに予定が出なくなった）
+  //   GASへのPOSTがときどき doGet に届き、その応答（社員の日報データ2,652件）が
+  //   {status:'ok', rows:[...]} という社長予定と同じ形をしているため、ここを
+  //   素通りして「社長予定」として保存されていた。さらにその後の正しい202件が
+  //   急減ガードに「2652→202」と判定されて拒否され続け、間違ったデータが居座った。
+  //   → 「形が合っている」だけでは足りない。中身が本当に社長予定かを確かめる。
+
+  // (1) doGetの応答だけが持つ目印。1つでもあれば社長予定ではない。
+  for (const k of ['members', 'genbaMaster', 'jobsites', 'headers', 'compact']) {
+    if (json[k] !== undefined) {
+      return { ok: false, message: `社長予定ではない応答です（${k} が付いている＝doGetの応答）。保存を中止しました` };
+    }
+  }
+  // (2) 行の中身を確かめる。0件（本当に予定が無い）は正常なので通す。
+  for (const r of json.rows) {
+    if (!r || typeof r !== 'object') {
+      return { ok: false, message: '行がオブジェクトではありません' };
+    }
+    if (NIPPO_ROW_KEYS.some(k => r[k] !== undefined)) {
+      return { ok: false, message: '社員の日報データが混ざっています（作業日・氏名等の列がある）。保存を中止しました' };
+    }
+    if (!PRES_ROW_KEYS.some(k => r[k] !== undefined)) {
+      return { ok: false, message: '社長予定の列（タイトル・開始日）が見当たりません。保存を中止しました' };
+    }
   }
   return { ok: true, message: '' };
 }

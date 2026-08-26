@@ -272,3 +272,67 @@ describe('syncPresident（社員用と混ざっていないこと）', () => {
     expect(r.ok).toBe(true);
   });
 });
+
+// ★★2026-08-26 本番障害の再発防止（最重要）
+//   社長のカレンダーに予定が出なくなった。原因は、GASへのPOSTがときどき doGet に
+//   届いてしまい、その応答（社員の日報データ）が {status:'ok', rows:[...]} という
+//   同じ形をしているため validate を通過し、社長予定として保存されていたこと。
+//   さらに、その後の正しい202件が急減ガードに「2652→202」と判定されて拒否され続け、
+//   間違ったデータが居座り続けた。
+describe('syncPresident（社員の日報データを社長予定として保存しない）', () => {
+  // GASの doGet が返す形（compact指定なし）。status:'ok' と rows:[] を持つので
+  // 形だけ見ると pres_list と区別が付かない。
+  const doGetLike = {
+    status: 'ok',
+    rows: [{ '登録日時': '2026-05-01', '作業日': '2026-05-25', '元請名': 'カワセツ',
+             '現場名': '京都縦貫道', '氏名': '東', '役割': '代表', '会社': 'グローライズ',
+             'ID': '56b2-299', '拠点': '本社' }],
+    members: [{ name: '東', company: 'グローライズ' }],
+    genbaMaster: [{ name: 'カワセツ' }],
+    jobsites: [{ genba: 'カワセツ', loc: '京都縦貫道' }]
+  };
+
+  it('★doGetの応答（社員の日報データ）は絶対に保存しない', async () => {
+    mockGas(() => doGetLike);
+    const db = makeMockDB();
+    const r = await syncPresident(baseEnv(db));
+    expect(r.ok).toBe(false);
+    expect(db.state.snapshot).toBe(null);
+  });
+
+  it('★既に社長予定が入っているとき、doGetの応答で上書きしない', async () => {
+    mockGas(() => ({ status: 'ok', rows: events(202) }));
+    const db = makeMockDB();
+    const t0 = Date.now();
+    await syncPresident(baseEnv(db), { fetchStartedAtOverride: t0 });
+    expect(db.state.snapshot.rows).toBe(202);
+
+    mockGas(() => doGetLike);
+    const r = await syncPresident(baseEnv(db), { fetchStartedAtOverride: t0 + 1000 });
+    expect(r.ok).toBe(false);
+    expect(db.state.snapshot.rows).toBe(202);     // 社長予定のまま
+  });
+
+  it('★doGetの目印（members/genbaMaster/jobsites）が付いていたら拒否する', async () => {
+    mockGas(() => ({ status: 'ok', rows: events(3), members: [], genbaMaster: [], jobsites: [] }));
+    const db = makeMockDB();
+    const r = await syncPresident(baseEnv(db));
+    expect(r.ok).toBe(false);
+    expect(db.state.snapshot).toBe(null);
+  });
+
+  it('★社員用の列（作業日・氏名）を持つ行が混ざっていたら拒否する', async () => {
+    mockGas(() => ({ status: 'ok', rows: [{ 'ID': 'P1', 'タイトル': 'x', '作業日': '2026-08-01', '氏名': '東' }] }));
+    const db = makeMockDB();
+    const r = await syncPresident(baseEnv(db));
+    expect(r.ok).toBe(false);
+  });
+
+  it('本物の社長予定（0件でも）は通る', async () => {
+    mockGas(() => ({ status: 'ok', rows: [] }));
+    const db = makeMockDB();
+    const r = await syncPresident(baseEnv(db));
+    expect(r.ok).toBe(true);
+    expect(db.state.snapshot.rows).toBe(0);
+  });
+});
