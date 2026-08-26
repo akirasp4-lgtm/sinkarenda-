@@ -410,14 +410,39 @@ describe('GAS優先の立て方・外し方（Codex再レビュー[P1]）', () =
     expect(app.hits.some(h => h.startsWith('d1:'))).toBe(true);   // 次からD1を読める＝速い
   });
 
-  it('★backendがgasのときは無用なブロックを残さない（あとでd1へ切り替えた時に遅いままにしない）', async () => {
+  // ★このテストの期待値は Codex 再レビュー2回目で反転させた。
+  //   当初は「backendがgasなら無用なブロックを残さない(trust)」を正しいとしたが、
+  //   clear すると「D1がまだこの書き込みを取り込んでいない」証拠を捨てることになり、
+  //   あとで d1 へ切り替えた直後に古いD1を即信用してしまう。gas運用中は読み先が
+  //   そもそもGASなので、ブロックが残っていても実害はゼロ。安全側を採る。
+  it('★backendがgasのときはブロックを解除しない（D1未取り込みの証拠を捨てない）', async () => {
     const app = makeApp({
+      tickingClock: true,
       backendJson: { backend: 'gas' },
       gas: (b, respond) => respond({ status:'ok', rows: [] })
     });
     app.s.refreshInBackground();
     await settle();
-    expect(app.T.tracker.status()).toBe('trust');
+    expect(app.T.tracker.status()).not.toBe('trust');
+    // ただし読み先はGASなので、この状態でも普通に読める（実害ゼロの確認）
+    app.hits.length = 0;
+    const { data } = await app.s.presFetchList(false);
+    expect(data.status).toBe('ok');
+    expect(app.hits.some(h => h.startsWith('d1:'))).toBe(false);
+  });
+
+  it('★並行する2つの保存で、古い方の失敗が新しい方の記録を巻き戻さない', async () => {
+    // A(先に開始)は同期失敗、B(後に開始)は成功。Bの成功でブロックが解けてはいけない。
+    const app = makeApp({ tickingClock: true, backendJson: D1_CFG });
+    const tr = app.T.tracker;
+    tr.mark();                      // A: 先に立てる
+    const a = tr.beginAttempt();
+    tr.mark();                      // B: あとから立てる（前へ進む）
+    const b = tr.beginAttempt();
+    tr.mark();                      // A の失敗（今の時刻で前へ進む）
+    expect(tr.clear(b)).toBe(false);        // Bの成功では解除できない
+    expect(tr.status()).not.toBe('trust');
+    expect(tr.clear(a)).toBe(false);        // Aの成功でも当然解除できない
   });
 
   it('★未送信を消す前にGAS優先を立てる（消してから立てるまでの隙にタブが閉じても安全側）', async () => {
