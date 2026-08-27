@@ -20,7 +20,8 @@ const EXPORT_SNIPPET = `
   normalizeButai_, resolveButai_, normalizeMemberActive_,
   SITE_STATUSES, SITE_STATUS_DONE, normalizeSiteStatus_, isSiteStatusDone_, isCompletedCell_,
   HISTORY_SHEET, HISTORY_HEADERS, HISTORY_MAX_ROWS,
-  diffDailyRows_, rowSummary_, rowFullJson_, sortHistoryRows_
+  diffDailyRows_, rowSummary_, rowFullJson_, sortHistoryRows_,
+  KNOWN_COMPANIES, fixMojibakeCompany_, mergeMemberRows_
 };`;
 
 let ctx;   // sandbox.__gas
@@ -349,5 +350,97 @@ describe('履歴の取り出し', () => {
   it('空でも落ちない', () => {
     expect(ctx.sortHistoryRows_([])).toEqual([]);
     expect(ctx.sortHistoryRows_(null)).toEqual([]);
+  });
+});
+
+describe('データ掃除', () => {
+  const MOJI = '�';   // 文字化けを表す記号
+
+  it('文字化けした会社名を直す', () => {
+    expect(ctx.fixMojibakeCompany_('グロ' + MOJI + 'ライズ')).toBe('グローライズ');
+    expect(ctx.fixMojibakeCompany_('グロ?ライズ')).toBe('グローライズ');
+  });
+
+  it('正しい会社名はそのまま返す', () => {
+    ['グローライズ', '和信カインド', 'GRミツマ', 'GRHD', 'ラーテル'].forEach(c =>
+      expect(ctx.fixMojibakeCompany_(c)).toBe(c));
+  });
+
+  it('関係ない文字列は触らない', () => {
+    expect(ctx.fixMojibakeCompany_('よその会社')).toBe('よその会社');
+    expect(ctx.fixMojibakeCompany_('')).toBe('');
+  });
+
+  it('★手がかりが半分も残っていなければ触らない（推測しない）', () => {
+    // 全部化けている＝1文字も手がかりが無い。長さが偶然一致するだけで
+    // 会社を決めてはいけない（'?????' は GRミツマ と同じ5文字）。
+    const v = MOJI.repeat(5);
+    expect(ctx.fixMojibakeCompany_(v)).toBe(v);
+    const v2 = 'G' + MOJI.repeat(4);
+    expect(ctx.fixMojibakeCompany_(v2)).toBe(v2);
+  });
+
+  it('手がかりが半分以上残っていれば直す', () => {
+    // 本番で実際に起きた形: 6文字中1文字だけ化けている
+    expect(ctx.fixMojibakeCompany_('グロ' + MOJI + 'ライズ')).toBe('グローライズ');
+    expect(ctx.fixMojibakeCompany_('和信カイン' + MOJI)).toBe('和信カインド');
+  });
+
+  it('★重複行は非空の値を寄せて統合する（先勝ちで捨てない）', () => {
+    const r = ctx.mergeMemberRows_([
+      ['元', 'グローライズ', '', 0, '', ''],
+      ['元', 'グローライズ', 'INF', 25000, '2部隊', '']
+    ]);
+    expect(r.conflicts.length).toBe(0);
+    expect(r.merged.length).toBe(1);
+    expect(r.merged[0][2]).toBe('INF');
+    expect(r.merged[0][3]).toBe(25000);      // ★単価を失わない
+    expect(r.merged[0][4]).toBe('2部隊');
+  });
+
+  it('★値が食い違ったら統合せず conflicts に出す（勝手に決めない）', () => {
+    const r = ctx.mergeMemberRows_([
+      ['元', 'グローライズ', 'INF', 25000, '', ''],
+      ['元', 'グローライズ', 'ICT', 30000, '', '']
+    ]);
+    expect(r.conflicts.length).toBeGreaterThan(0);
+    expect(r.conflicts[0].name).toBe('元');
+  });
+
+  it('★単価の食い違いは必ず conflicts に出す（給料の元数字を機械が選ばない）', () => {
+    const r = ctx.mergeMemberRows_([
+      ['元', 'グローライズ', 'INF', 25000, '', ''],
+      ['元', 'グローライズ', 'INF', 30000, '', '']
+    ]);
+    expect(r.conflicts.map(c => c.field)).toContain('単価');
+  });
+
+  it('会社が違えば別人として扱う（同姓の別会社を潰さない）', () => {
+    const r = ctx.mergeMemberRows_([
+      ['元', 'グローライズ', 'INF', 25000, '', ''],
+      ['元', '和信カインド', '', 0, '', '']
+    ]);
+    expect(r.merged.length).toBe(2);
+    expect(r.conflicts.length).toBe(0);
+  });
+
+  it('氏名が空の行は捨てる', () => {
+    const r = ctx.mergeMemberRows_([['', 'グローライズ', '', 0, '', ''], ['元', 'グローライズ', '', 0, '', '']]);
+    expect(r.merged.length).toBe(1);
+  });
+
+  it('元の並び順を保つ', () => {
+    const r = ctx.mergeMemberRows_([
+      ['中島', 'グローライズ', '', 0, '', ''],
+      ['元', 'グローライズ', '', 0, '', ''],
+      ['中島', 'グローライズ', 'INF', 0, '', '']
+    ]);
+    expect(r.merged.map(x => x[0])).toEqual(['中島', '元']);
+  });
+
+  it('★「人でない枠」を機械で判定する関数は存在しない（推測しない設計）', () => {
+    // 予定が0件の14人には 川端・井上・作本・児玉・杉本仁（兄）・いくや など
+    // 実在の職人が多数含まれる。予定が無いことと人でないことは別の話。
+    expect(ctx.looksLikeNonPerson_).toBeUndefined();
   });
 });

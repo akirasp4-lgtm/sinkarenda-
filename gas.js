@@ -3650,3 +3650,187 @@ function backfillKyoten() {
     dataLock.releaseLock();
   }
 }
+
+
+// ==============================================================
+// ★2026-08-27 フェーズ1: データ掃除
+//   本番実データで見つかった汚れ（設計書 §1.3）を直す。行数は変えない。
+//
+//   ★方針（Codexレビュー[P1]#4 で全面的に作り直した）:
+//     機械が確実に判断できることだけ直す。人の判断が要るものは一覧を出すだけ。
+//   当初案の誤り:
+//     (1) 重複を「先勝ちで捨てる」実装だった → 2行目の単価（給料の元数字）を失う
+//     (2) /応援/ という正規表現で「人でない枠」を推測していた →
+//         予定0件の14人には 川端・井上・作本・児玉・杉本仁（兄）・いくや など
+//         実在の職人が多数含まれる。推測で無効化すると実在の職人が空きリストから消える
+// ==============================================================
+
+const KNOWN_COMPANIES = ['グローライズ', '和信カインド', 'GRミツマ', 'GRHD', 'ラーテル'];
+const MOJIBAKE_RE = /[�?]/;
+
+// 文字化けした会社名を、既知の会社名のどれかに寄せる。
+// 判定は「化けていない文字だけで一意に決まるか」。決まらなければ触らない。
+//
+// ★2026-08-27 テストで発覚: 「文字数が合えば一意」だけを条件にすると、
+//   全文字が化けている（＝手がかりが1文字も無い）場合でも、たまたま同じ長さの
+//   会社名が1つしか無ければそこへ寄せてしまう（'?????' → 'GRミツマ'）。
+//   それは推測であって復元ではない。手がかりが半分以上残っている場合だけ直す。
+function fixMojibakeCompany_(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!s) return s;
+  if (KNOWN_COMPANIES.indexOf(s) >= 0) return s;
+  if (!MOJIBAKE_RE.test(s)) return s;              // 化けていないなら触らない
+  const intact = s.split('').filter(function (ch) { return !MOJIBAKE_RE.test(ch); }).length;
+  if (intact < Math.ceil(s.length / 2)) return s;  // 手がかりが足りない＝触らない
+  const pattern = new RegExp('^' + s.split('').map(function (ch) {
+    return MOJIBAKE_RE.test(ch) ? '.' : ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }).join('') + '$');
+  const hits = KNOWN_COMPANIES.filter(function (c) {
+    return c.length === s.length && pattern.test(c);
+  });
+  return hits.length === 1 ? hits[0] : s;          // 1つに決まるときだけ直す
+}
+
+/**
+ * 職人マスタの重複行を統合する。
+ * ★先勝ちで捨てず、非空の値だけを寄せる。
+ *   同じ項目に違う値が入っていたら統合せず conflicts に出して人の判断に回す
+ *   （特に単価は給料の元数字なので機械が選んではいけない）。
+ * 鍵は (会社, 氏名)。会社が違えば別人。
+ * 戻り値: {merged: [[6列], ...], conflicts: [{name, company, field, values}]}
+ */
+function mergeMemberRows_(rows) {
+  const MERGE_FIELDS = [2, 3, 4, 5];               // 事業部 / 単価 / 既定部隊 / 有効
+  const FIELD_NAMES = { 2: '事業部', 3: '単価', 4: '既定部隊', 5: '有効' };
+  const order = [];
+  const byKey = {};
+  const conflicts = [];
+  const isEmpty = function (v, i) {
+    if (v == null || String(v).trim() === '') return true;
+    return i === 3 && Number(v) === 0;             // 単価0は「未設定」とみなす
+  };
+
+  (rows || []).forEach(function (r) {
+    const name = String(r[0] == null ? '' : r[0]).trim();
+    if (!name) return;
+    const company = String(r[1] == null ? '' : r[1]).trim();
+    const key = company + '|' + name;
+    if (!byKey[key]) {
+      byKey[key] = [name, company, r[2], r[3], r[4], r[5]];
+      order.push(key);
+      return;
+    }
+    const cur = byKey[key];
+    MERGE_FIELDS.forEach(function (i) {
+      const a = cur[i], b = r[i];
+      if (isEmpty(b, i)) return;                   // 足す値が空なら何もしない
+      if (isEmpty(a, i)) { cur[i] = b; return; }   // 今が空なら埋める
+      if (String(a).trim() !== String(b).trim()) { // 両方に値があって食い違う
+        conflicts.push({ name: name, company: company, field: FIELD_NAMES[i],
+                         values: [String(a), String(b)] });
+      }
+    });
+  });
+  return { merged: order.map(function (k) { return byKey[k]; }), conflicts: conflicts };
+}
+
+/**
+ * Apps Scriptのエディタから手で実行する。
+ *   cleanupMastersPhase1()      … dry-run。何も書かずに結果だけログに出す
+ *   cleanupMastersPhase1(true)  … 実行
+ *
+ * (1) 職人マスタの重複を統合（食い違いがあれば中止）
+ * (2) 予定に出るのにマスタに無い人を (会社,氏名) で判定して追加
+ * (3) 日報データの文字化けした会社名を直す
+ * (4) 「予定が0件の人」の一覧を出す（★無効化はしない。人が画面で決める）
+ * 行数は1行も増減しない。
+ */
+function cleanupMastersPhase1(apply) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('他の処理が動いています。少し待ってからもう一度実行してください。');
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const report = { dryRun: !apply, 重複統合: 0, 追加: 0, 会社名修正: 0,
+                     食い違い: [], 予定0件の候補: [] };
+
+    // (1) 重複の統合
+    const mSheet = getOrCreateMemberSheet_(ss);          // ここで6列に拡張される
+    const mData = mSheet.getDataRange().getValues();
+    const bodyRows = mData.slice(1).map(function (r) { return r.slice(0, 6); });
+    const beforeCount = bodyRows.filter(function (r) { return String(r[0] || '').trim(); }).length;
+    const m = mergeMemberRows_(bodyRows);
+    report.重複統合 = beforeCount - m.merged.length;
+    report.食い違い = m.conflicts;
+    if (m.conflicts.length) {
+      // ★勝手に決めない。人が直してからもう一度実行してもらう。
+      Logger.log('中止: 値が食い違う重複があります\n' + JSON.stringify(m.conflicts, null, 2));
+      return report;
+    }
+
+    // (2) 予定に出るのにマスタに無い人（★会社も見る）
+    const nSheet = ss.getSheetByName(SHEET_NAME);
+    const nData = nSheet.getDataRange().getValues();
+    const nameIdx = HEADERS.indexOf('氏名');
+    const compIdx = HEADERS.indexOf('会社');
+    const keep = m.merged.slice();
+    const known = {};
+    keep.forEach(function (r) { known[String(r[1]).trim() + '|' + String(r[0]).trim()] = true; });
+    const seenInNippo = {};
+    for (let i = 1; i < nData.length; i++) {
+      const nm = String(nData[i][nameIdx] || '').trim();
+      if (!nm) continue;
+      const co = fixMojibakeCompany_(nData[i][compIdx]);
+      seenInNippo[nm] = true;
+      const key = co + '|' + nm;
+      if (known[key]) continue;
+      known[key] = true;
+      keep.push([nm, co, '', 0, '', '○']);            // ★既定は必ず有効
+      report.追加++;
+    }
+
+    // (4) 「予定が0件」の候補を出すだけ（無効化はしない）
+    keep.forEach(function (r) {
+      if (!seenInNippo[String(r[0]).trim()]) {
+        report.予定0件の候補.push(String(r[0]).trim() + '（' + String(r[1]).trim() + '）');
+      }
+    });
+
+    // (3) 日報データの会社名の文字化け
+    let changed = 0;
+    const col = [];
+    for (let i = 1; i < nData.length; i++) {
+      const raw = String(nData[i][compIdx] == null ? '' : nData[i][compIdx]);
+      const fixed = fixMojibakeCompany_(raw);
+      if (fixed !== raw.trim()) changed++;
+      col.push([fixed]);
+    }
+    report.会社名修正 = changed;
+
+    if (!apply) {
+      Logger.log('【dry-run】書き込みはしていません\n' + JSON.stringify(report, null, 2));
+      return report;
+    }
+
+    // 書き込み（★上書き→余りを消す順。逆にすると途中で落ちたとき空になる）
+    const oldLastRow = mSheet.getLastRow();
+    if (keep.length) mSheet.getRange(2, 1, keep.length, 6).setValues(keep);
+    const extraRows = oldLastRow - 1 - keep.length;
+    if (extraRows > 0) mSheet.getRange(2 + keep.length, 1, extraRows, 6).clearContent();
+    if (changed > 0 && col.length) {
+      nSheet.getRange(2, compIdx + 1, col.length, 1).setValues(col);
+    }
+    SpreadsheetApp.flush();
+
+    logOperation_(ss, 'cleanup_masters_phase1', '職人マスタ/日報データ',
+      JSON.stringify({ 重複統合: report.重複統合, 追加: report.追加, 会社名修正: report.会社名修正 }), 'system');
+    Logger.log(JSON.stringify(report, null, 2));
+    return report;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// dry-runの結果を見て問題なければ、こちらをエディタから実行する
+function cleanupMastersPhase1_APPLY() {
+  return cleanupMastersPhase1(true);
+}
