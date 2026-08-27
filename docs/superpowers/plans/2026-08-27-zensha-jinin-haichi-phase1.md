@@ -226,18 +226,35 @@ import vm from 'node:vm';
 const here = dirname(fileURLToPath(import.meta.url));
 const GAS_PATH = join(here, '..', '..', 'gas.js');
 
-let ctx;
+// ★2026-08-27 実測で判明した注意点（この方式でないと動かない）:
+//   vm に読み込んでも `const HEADERS = ...` は**コンテキストの属性にならない**
+//   （const/let は字句束縛でグローバルオブジェクトに載らない。var と function だけが載る）。
+//   そのため gas.js の末尾に「同じ字句スコープのまま外へ出す」1行を足してから実行する。
+//   ここに列挙し忘れた名前はテストから見えないので、関数を足したら必ずここにも足すこと。
+const EXPORT_SNIPPET = `
+;globalThis.__gas = {
+  HEADERS, BUTAI_VALUES, SITE_STATUSES, SITE_STATUS_DONE,
+  HISTORY_SHEET, HISTORY_HEADERS, HISTORY_SKIP_FIELDS, HISTORY_MAX_ROWS,
+  KNOWN_COMPANIES,
+  normalizeButai_, resolveButai_, normalizeMemberActive_,
+  normalizeSiteStatus_, isSiteStatusDone_,
+  diffDailyRows_, rowSummary_, sortHistoryRows_, historyTimeValue_,
+  fixMojibakeCompany_, looksLikeNonPerson_
+};`;
+
+let ctx;   // ctx.__gas から取り出す
 beforeAll(() => {
   const code = readFileSync(GAS_PATH, 'utf8');
   // Apps Script のグローバルを最低限だけ用意する（純粋関数の試験が目的）
-  ctx = vm.createContext({
+  const sandbox = vm.createContext({
     SpreadsheetApp: { getActiveSpreadsheet: () => null },
     Session: { getScriptTimeZone: () => 'Asia/Tokyo' },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
     Utilities: {}, ContentService: {}, PropertiesService: {},
     UrlFetchApp: {}, Logger: { log() {} }, console
   });
-  vm.runInContext(code, ctx, { filename: 'gas.js' });
+  vm.runInContext(code + EXPORT_SNIPPET, sandbox, { filename: 'gas.js' });
+  ctx = sandbox.__gas;
 });
 
 describe('HEADERS', () => {
@@ -395,6 +412,39 @@ function getOrCreateMemberSheet_(ss) {
       resolveKyoten_(row.kyoten, kyotenMap[String(row.loc || '').trim()], row.company),
       // ★2026-08-27 フェーズ1: 部隊。画面が明示した値 > 職人マスタの既定部隊。
       resolveButai_(row, butaiMap[String(row.name || '').trim()])
+```
+
+**★自分の事前確認で見つけた欠陥（アーカイブのヘッダが伸びない）**
+
+`archiveOldData_`（`gas.js:3123`）は元シートに `ensureHeaders_(sheet)` を呼ぶが、
+**アーカイブシートには呼んでいない**（`gas.js:3132`）。列は
+`insertColumnsAfter` で21列に伸びるものの、**21列目の見出しセルが空のまま**になる。
+
+`sheetToRecords`（`gas.js:1563-1569`）は `headers.forEach((h,j)=>colIdx[h]=j)` と
+**見出しの文字で列を引いている**ため、見出しが空だとアーカイブ側の部隊は永久に読めない。
+フェーズ1の集計は部隊を使わないので今は表面化しないが、**フェーズ2の絞り込みで
+「3ヶ月より前の予定だけ部隊が付かない」という分かりにくい不具合になる。**
+
+`gas.js:3132` を次のように直す:
+
+```js
+  let archiveSheet = ss.getSheetByName(ARCHIVE_SHEET);
+  if (!archiveSheet) { archiveSheet = ss.insertSheet(ARCHIVE_SHEET); archiveSheet.appendRow(HEADERS); }
+  // ★2026-08-27 フェーズ1: 既にあるアーカイブも見出しを最新の列数に揃える。
+  //   これが無いと列だけ21に伸びて見出しが空のままになり、
+  //   sheetToRecords（見出しの文字で列を引く）がアーカイブの部隊を読めない。
+  ensureHeaders_(archiveSheet);
+```
+
+**`add_member` も6列で書くようにする（`gas.js:800`）**
+
+今は `memberSheet.appendRow([name, company, division, rate]);` と4つしか書いていない。
+このままでも「有効」が空欄＝有効扱いになるので壊れはしないが、
+掃除のあとに追加した人だけ空欄が並んで分かりにくいので揃える:
+
+```js
+      // ★2026-08-27 フェーズ1: 既定部隊は空、有効は○で作る
+      memberSheet.appendRow([name, company, division, rate, '', '○']);
 ```
 
 `gas.js:1292-1297` の members 出力を差し替える:
@@ -696,6 +746,37 @@ describe('変更履歴 diffDailyRows_', () => {
     expect(del.before).toContain('中島');
   });
 
+  it('★同じ人が同じ日に2件ある場合も、2件目の変更を取りこぼさない', () => {
+    // 本番に250件ある形（現場＋事務所 など）。連番を鍵に混ぜていないと握りつぶされる。
+    const oldRows = [
+      mkRow({ ID: 'A1', '現場名': 'A現場', '作業区分': '現場作業' }),
+      mkRow({ ID: 'A2', '現場名': '事務所', '作業区分': '事務所' })
+    ];
+    const newRows = [
+      mkRow({ ID: 'B1', '現場名': 'A現場', '作業区分': '現場作業' }),
+      mkRow({ ID: 'B2', '現場名': '事務所', '作業区分': '事務所', '人工': 0.5 })
+    ];
+    const d = ctx.diffDailyRows_(H(), oldRows, newRows);
+    const k = d.find(x => x.field === '人工');
+    expect(k).toBeTruthy();
+    expect(k.oldId).toBe('A2');
+    expect(k.newId).toBe('B2');
+    // 2件目を「削除された」と誤記録していないこと
+    expect(d.find(x => x.field === '(削除)')).toBeUndefined();
+  });
+
+  it('★同じ人が同じ日に2件→1件に減ったら、減った1件だけを削除として記録する', () => {
+    const oldRows = [
+      mkRow({ ID: 'A1', '現場名': 'A現場' }),
+      mkRow({ ID: 'A2', '現場名': '事務所' })
+    ];
+    const newRows = [mkRow({ ID: 'B1', '現場名': 'A現場' })];
+    const d = ctx.diffDailyRows_(H(), oldRows, newRows);
+    const del = d.filter(x => x.field === '(削除)');
+    expect(del.length).toBe(1);
+    expect(del[0].oldId).toBe('A2');
+  });
+
   it('部隊の変更も拾う', () => {
     const d = ctx.diffDailyRows_(H(), [mkRow({ '部隊': '1部隊' })],
       [mkRow({ ID: 'X2', '部隊': '3部隊' })]);
@@ -772,7 +853,15 @@ function rowSummary_(headers, arr) {
 
 /**
  * 編集前後の行を突き合わせ、変わった項目だけを返す。
- * 突き合わせの鍵は「作業日＋氏名」。IDは編集のたびに変わるので鍵に使えない。
+ * 突き合わせの鍵は「作業日＋氏名＋その中での何番目か」。
+ * IDは編集のたびに変わるので鍵に使えない。
+ *
+ * ★「何番目か」を鍵に混ぜる理由（実データで確認・2026-08-27）:
+ *   同じ人が同じ日に複数行を持つ組み合わせが本番に250件ある
+ *   （現場＋事務所、昼＋夜勤 など）。単純に「作業日＋氏名」を鍵にすると
+ *   2件目以降が握りつぶされ、2件目を直した履歴が残らないうえ、
+ *   件数が変わったときに「削除された」と誤って記録してしまう。
+ *
  * 戻り値: [{oldId, newId, field, before, after}]
  */
 function diffDailyRows_(headers, oldRows, newRows) {
@@ -780,11 +869,19 @@ function diffDailyRows_(headers, oldRows, newRows) {
   const dIdx = headers.indexOf('作業日');
   const nIdx = headers.indexOf('氏名');
   const cell = (arr, i) => String(arr && arr[i] != null ? arr[i] : '').trim();
-  const keyOf = (arr) => cell(arr, dIdx) + '|' + cell(arr, nIdx);
 
-  const oldMap = {}, newMap = {};
-  (oldRows || []).forEach(r => { const k = keyOf(r); if (!oldMap[k]) oldMap[k] = r; });
-  (newRows || []).forEach(r => { const k = keyOf(r); if (!newMap[k]) newMap[k] = r; });
+  // 同じ「作業日＋氏名」が複数あっても取りこぼさないよう連番を振る
+  const indexRows = (rows) => {
+    const map = {}, seen = {};
+    (rows || []).forEach(r => {
+      const base = cell(r, dIdx) + '|' + cell(r, nIdx);
+      seen[base] = (seen[base] || 0) + 1;
+      map[base + '#' + seen[base]] = r;
+    });
+    return map;
+  };
+  const oldMap = indexRows(oldRows);
+  const newMap = indexRows(newRows);
 
   const out = [];
   Object.keys(oldMap).forEach(k => {
@@ -1027,9 +1124,18 @@ function cleanupMastersPhase1() {
       report.追加++;
     }
 
-    // 職人マスタを書き戻す（ヘッダ＋本体を一度に）
-    mSheet.getRange(2, 1, Math.max(mSheet.getLastRow() - 1, 1), 6).clearContent();
-    if (keep.length) mSheet.getRange(2, 1, keep.length, 6).setValues(keep);
+    // 職人マスタを書き戻す。
+    // ★順番が重要: 「先に消してから書く」にしてはいけない。
+    //   消した直後に実行時間の上限や通信エラーで落ちると、職人マスタが空のまま残る
+    //   （＝全画面から職人が消える）。先に上書きし、余った行だけを後から消す。
+    const oldLastRow = mSheet.getLastRow();
+    if (keep.length) {
+      mSheet.getRange(2, 1, keep.length, 6).setValues(keep);
+    }
+    const extraRows = oldLastRow - 1 - keep.length;   // 統合で減った分だけ末尾に余りが出る
+    if (extraRows > 0) {
+      mSheet.getRange(2 + keep.length, 1, extraRows, 6).clearContent();
+    }
 
     // ── ④ 日報データの会社名の文字化け（列ごとに1回のsetValuesで書く）
     if (compIdx >= 0 && nData.length > 1) {
@@ -1181,12 +1287,28 @@ CSS（拠点タグの定義の近くに）:
 
 代表者の `<select>` の `onchange`（`index.html:398` の `checkLocationJobNo()`）に `refreshButaiField('s')` を足す。
 
-- [ ] **Step 5: カレンダーに部隊の印を出す**
+- [ ] **Step 5: ★起動時キャッシュにも既定部隊を残す（見落とすと初回だけ動く不具合になる）**
+
+`index.html:2403`（`saveSnapshot`）と `admin.html:2163` は、端末に残す職人データを
+**`name` / `company` / `division` の3つに絞り込んでいる**（単価を意図的に捨てるため）。
+Worker側の `sanitizeForStorage` とまったく同じ罠。ここに書き足さないと、
+**2回目以降の起動（キャッシュから描くとき）だけ既定部隊が空になる**。
+再現しにくく、原因も分かりにくい種類の不具合になる。
+
+両ファイルの該当行を置き換える:
+
+```js
+      // ★2026-08-27 フェーズ1: 既定部隊と有効も端末に残す（無いとキャッシュ起動時だけ部隊が入らない）。
+      //   単価(rate)は引き続き残さない（給料情報のため意図的に捨てている）。
+      members:(json.members||[]).map(m=>({name:m.name,company:m.company,division:m.division,butai:m.butai,active:m.active!==false})),
+```
+
+- [ ] **Step 6: カレンダーに部隊の印を出す**
 
 `index.html:3046` 付近（`memberTags` を組み立てている箇所）と `index.html:3140-3142`（詳細表示）で、
 拠点タグを出している場所の隣に `butaiTag(...)` を足す。
 
-- [ ] **Step 6: admin.html に同じ変更を入れる**
+- [ ] **Step 7: admin.html に同じ変更を入れる**
 
 ```bash
 grep -n "s-kyoten-row\|e-kyoten-row\|kyotenTouched\|function kyotenTag\|role:'代表'" admin.html
@@ -1194,7 +1316,7 @@ grep -n "s-kyoten-row\|e-kyoten-row\|kyotenTouched\|function kyotenTag\|role:'�
 
 同じ位置に同じものを入れる。
 
-- [ ] **Step 7: 構文チェック**
+- [ ] **Step 8: 構文チェック**
 
 ```bash
 node -e "const s=require('fs').readFileSync('index.html','utf8');const m=[...s.matchAll(/<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/g)];m.forEach((x,i)=>{try{new Function(x[1])}catch(e){console.log('index.html block',i,e.message)}});console.log('index.html blocks:',m.length)"
@@ -1202,11 +1324,165 @@ node -e "const s=require('fs').readFileSync('index.html','utf8');const m=[...s.m
 
 `admin.html` にも同じチェックを実行する。エラーが出なければ OK。
 
-- [ ] **Step 8: コミット**
+- [ ] **Step 9: コミット**
 
 ```bash
 git add index.html admin.html
 git commit -m "feat(画面): 予定に部隊（1〜4部隊）を追加。代表者から既定部隊が自動で入る"
+```
+
+---
+
+### Task 6B: 職人管理モーダルで「既定部隊」と「有効」を編集できるようにする
+
+**★これが無いと Task 6 の「自動で入る」が一生発動しない。**
+既定部隊はスプレッドシートを直接触るしか設定手段が無くなり、
+利用者（非エンジニア）が使えない。現場マスタの拠点で同じ状態を作ってしまった反省。
+
+`admin.html:810` に既存の**職人管理モーダル**があり、事業部と単価を編集できる。
+`update_member_division`（`gas.js:805`）とまったく同じ形で2つ足すだけ。
+
+**Files:**
+- Modify: `gas.js`（`update_member_division` の隣にアクションを2つ追加）
+- Modify: `admin.html:4789` 以降（職人管理の行に列を2つ追加）
+- Test: `cf/test/gas-phase1.test.js`（追記）
+
+**Interfaces:**
+- Consumes: Task 2 の `normalizeButai_` / 職人マスタ6列
+- Produces: GASアクション `update_member_butai`（`{name, company, butai}`）
+- Produces: GASアクション `update_member_active`（`{name, company, active}`）
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`EXPORT_SNIPPET` に `normalizeMemberActive_` を足したうえで、`cf/test/gas-phase1.test.js` に追記:
+
+```js
+describe('職人の有効/無効', () => {
+  it('×だけが無効。それ以外は全部有効', () => {
+    expect(ctx.normalizeMemberActive_('×')).toBe(false);
+    expect(ctx.normalizeMemberActive_('x')).toBe(false);
+    expect(ctx.normalizeMemberActive_('✕')).toBe(false);
+    ['○', 'o', '', '　', undefined, null, true].forEach(v =>
+      expect(ctx.normalizeMemberActive_(v)).toBe(true));
+  });
+
+  it('★空欄は有効（既存71件を巻き込まないための既定）', () => {
+    expect(ctx.normalizeMemberActive_('')).toBe(true);
+  });
+});
+```
+
+- [ ] **Step 2: テストを実行して失敗を確認する**
+
+```bash
+cd cf && npx vitest run test/gas-phase1.test.js
+```
+
+- [ ] **Step 3: gas.js に実装する**
+
+`normalizeButai_` の下に追加:
+
+```js
+// 「×」だけを無効とみなす。空欄・未記入は有効（既存の職人を巻き込まないため）。
+function normalizeMemberActive_(v) {
+  const s = String(v == null ? '' : v).trim();
+  return !(s === '×' || s === 'x' || s === 'X' || s === '✕');
+}
+```
+
+Task 2 で書いた doGet の `active:` を、この関数を使う形に揃える:
+
+```js
+      active: normalizeMemberActive_(r[5])
+```
+
+`update_member_division` アクションの直後に2つ追加:
+
+```js
+    if (action === 'update_member_butai') {
+      const memberSheet = getOrCreateMemberSheet_(ss);
+      const name = String(body.name || '').trim();
+      const company = String(body.company || '').trim();
+      const butai = normalizeButai_(body.butai);   // 知らない値は空になる
+      const data = memberSheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][0]).trim() === name && String(data[i][1]).trim() === company) {
+          memberSheet.getRange(i + 1, 5).setValue(butai);
+          logOperation_(ss, 'update_member_butai', name + '/' + company, '既定部隊=' + (butai || '(なし)'), updatedBy);
+          return ok({updated: name, butai: butai});
+        }
+      }
+      return ok({updated: null});
+    }
+
+    if (action === 'update_member_active') {
+      const memberSheet = getOrCreateMemberSheet_(ss);
+      const name = String(body.name || '').trim();
+      const company = String(body.company || '').trim();
+      const active = body.active !== false && String(body.active) !== 'false';
+      const data = memberSheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][0]).trim() === name && String(data[i][1]).trim() === company) {
+          memberSheet.getRange(i + 1, 6).setValue(active ? '○' : '×');
+          logOperation_(ss, 'update_member_active', name + '/' + company, active ? '有効' : '無効', updatedBy);
+          return ok({updated: name, active: active});
+        }
+      }
+      return ok({updated: null});
+    }
+```
+
+- [ ] **Step 4: admin.html の職人管理に列を2つ足す**
+
+`admin.html:4789` からの `// ===== 職人管理 =====` を読み、
+職人1人の行を描いている箇所に、事業部のプルダウンと同じ形で足す:
+
+```js
+const BUTAI_OPTIONS=['','1部隊','2部隊','3部隊','4部隊'];
+function memberButaiSelect(name,cur){
+  return `<select onchange="setMemberButai('${esc(name)}',this.value)">`+
+    BUTAI_OPTIONS.map(b=>`<option value="${b}"${b===(cur||'')?' selected':''}>${b||'（なし）'}</option>`).join('')+
+    `</select>`;
+}
+async function setMemberButai(name,butai){
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_butai',name,company:currentCompany,butai}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status!=='ok')throw new Error(json.message||'保存できませんでした');
+    memberCache=null;                       // 職人管理の自前キャッシュを捨てる
+    showAlert(`${name} の既定部隊を「${butai||'なし'}」にしました`,'ok');
+  }catch(e){showAlert('保存できませんでした','err');}
+}
+async function setMemberActive(name,active){
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_active',name,company:currentCompany,active}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status!=='ok')throw new Error(json.message||'保存できませんでした');
+    memberCache=null;
+    showAlert(`${name} を${active?'有効':'無効'}にしました`,'ok');
+  }catch(e){showAlert('保存できませんでした','err');}
+}
+```
+
+有効の切替はチェックボックスにする:
+
+```js
+`<label><input type="checkbox" ${active?'checked':''} onchange="setMemberActive('${esc(name)}',this.checked)"> 有効</label>`
+```
+
+⚠️ 職人管理は**自前のキャッシュ**（`admin.html:4790` 付近の職人マスタキャッシュ）を持っている。
+変数名を `grep -n "memberCache\|職人マスタキャッシュ" admin.html` で確認し、
+保存後に必ず捨てること。捨てないと画面が古いまま残る。
+
+- [ ] **Step 5: 構文チェックとテスト**
+
+Task 6 Step 8 と同じコマンド＋ `cd cf && npx vitest run`。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add gas.js admin.html cf/test/gas-phase1.test.js
+git commit -m "feat(admin): 職人管理で既定部隊と有効/無効を編集できるようにする"
 ```
 
 ---
@@ -1255,14 +1531,15 @@ grep -n "代表\|同行" index.html | grep -v "==='代表'\|==='同行'\|role:'�
 - [ ] **Step 3: 保存値を1つも変えていないことを確認する**
 
 ```bash
-grep -n "role:'代表'\|role:'同行'\|role==='代表'\|role==='同行'\|=== '代表'" index.html admin.html gas.js | wc -l
+grep -o "role:'代表'\|role:'同行'\|role==='代表'\|role==='同行'\|role === '代表'\|=== '代表'\|=== '同行'\|==='代表'\|==='同行'" gas.js index.html admin.html | wc -l
 ```
 
-想定: **変更前と同じ件数**であること。減っていたら保存値を壊している。
+想定: **39**（2026-08-27 実測の基準値。内訳: gas.js 2 / index.html 19 / admin.html 18）。
+**1つでも減っていたら保存値を壊している。** 増えるのも想定外なので調べ直すこと。
 
 - [ ] **Step 4: 構文チェック**
 
-Task 6 Step 7 と同じコマンドを両ファイルに実行する。
+Task 6 Step 8 と同じコマンドを両ファイルに実行する。
 
 - [ ] **Step 5: 自動テストを流して壊していないことを確認する**
 
@@ -1332,7 +1609,7 @@ async function setSiteStatus(el){
 
 - [ ] **Step 4: 構文チェック**
 
-Task 6 Step 7 と同じコマンド。
+Task 6 Step 8 と同じコマンド。
 
 - [ ] **Step 5: コミット**
 
@@ -1497,10 +1774,21 @@ cd cf && npx vitest run
 
 想定: 全件 PASS。1件でも落ちていたら次へ進まない。
 
-- [ ] **Step 3: Codexレビューを通す**
+- [ ] **Step 3: Codexレビューを通す（2回目・実装後の差分）**
+
+設計と計画のレビューは**着手前に実施済み**（2026-08-27。結果は
+`_local/review/codex_out3_20260827.txt`）。ここでは**書いたコードの差分**をかける。
+
+```bash
+git diff main --stat
+```
 
 `gas.js` / `cf/src/sync.js` / `index.html` / `admin.html` の差分をレビューにかける。
 **指摘が出たら直してから次へ進む**（2026-08-26 は出した後にレビューして5件の欠陥が出た）。
+
+⚠️ Codexに投げるときは **「graphify を使わない・python も pip も実行しない」を必ず先頭に書く**。
+書かないと知識グラフの構築に寄り道して時間とAPI費用を浪費する（2026-08-27 に実際に発生）。
+サンドボックスは `-s danger-full-access` を付けないとこのPCではファイルを読めない。
 
 - [ ] **Step 4: Worker を出す（無影響）**
 
