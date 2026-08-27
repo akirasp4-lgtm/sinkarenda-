@@ -719,6 +719,14 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <button class="btn btn-secondary" style="margin-top:8px" onclick="loadData()">更新</button>
 </div>
 
+<!-- ★2026-08-27 フェーズ1: 変更履歴（依頼⑦「元の予定も確認できる」） -->
+<div id="screen-history" class="screen">
+<div class="page-title">変更履歴</div>
+<div style="font-size:12px;color:#666;margin-bottom:10px">誰が・いつ・何を・何から何に変えたかの記録。1回の編集ごとにまとめて表示します。</div>
+<div id="history-body">読み込み中…</div>
+<button class="btn btn-secondary" style="margin-top:8px" onclick="loadHistory()">更新</button>
+</div>
+
 <!-- タブバー -->
 <div class="tab-bar">
   <button class="tab" onclick="switchTab('list')"><span class="tab-icon">📅</span>カレンダー</button>
@@ -728,6 +736,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <button class="tab active" onclick="switchTab('jimu')"><span class="tab-icon">📊</span>事務</button>
   <!-- 💤 請求計算タブは寝かせ中（2026-06-11 お金はGR管理画面📊経営タブに一本化）。復活させる時は display:none を外すだけ。※ボタンを消すとswitchTabの並び順が壊れるので必ず「隠す」こと -->
   <button class="tab" style="display:none" onclick="switchTab('billing')"><span class="tab-icon">💰</span>請求計算</button>
+  <button class="tab" onclick="switchTab('history')"><span class="tab-icon">🕘</span>履歴</button>
 </div>
 
 <!-- 操作者名変更モーダル -->
@@ -1795,7 +1804,7 @@ function filteredNippos(){
 // ===== タブ =====
 function switchTab(t){
   setTimeout(()=>{try{renderKyotenBar();}catch(e){}},0);   // ★拠点バーを今の画面へ移す
-  const tabs=['list','avail','genba','vehicle','jimu','billing'];
+  const tabs=['list','avail','genba','vehicle','jimu','billing','history'];   // ★並びはタブボタンの順と必ず一致させる
   document.querySelectorAll('.tab').forEach((el,i)=>el.classList.toggle('active',tabs[i]===t));
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   const target=document.getElementById('screen-'+t);
@@ -1806,6 +1815,7 @@ function switchTab(t){
   if(t==='vehicle'){if(!vehicleWeekStart)initVehicleWeek();renderVehicleWeek();renderVehicleList();}
   if(t==='avail')renderAvailList();
   if(t==='billing')initBillingTab();
+  if(t==='history')loadHistory();
   hapticTap();
 }
 
@@ -2793,6 +2803,78 @@ function siteStatusOf_(genba,loc){
   // 古いWorker応答（statusを持たない）でも壊れないよう completed から導く
   return String(j.status||'').trim()||(j.completed?'完工':'施工中');
 }
+// ==============================================================
+// ★2026-08-27 フェーズ1: 変更履歴の画面（依頼⑦）
+//   「誰が登録・変更・削除したか」＋「元の予定も確認できる」。
+//   ★Codexレビュー[P1]#3: 平坦な明細表だけでは「予定を選ぶと変更前が見える」を
+//     満たさない。1回の編集ごとにまとめ、削除は21列すべてを開けるようにする。
+// ==============================================================
+const ACTION_LABEL={add:'登録',update:'変更',delete:'削除',site_status:'案件ステータス'};
+const ACTION_COLOR={add:'#1D9E75',update:'#2563eb',delete:'#dc2626',site_status:'#7c3aed'};
+
+// 同じ日時・同じ操作・同じ実行者の明細を「1回の編集」としてくくる
+function groupHistory(rows){
+  const groups=[];const idx={};
+  (rows||[]).forEach(x=>{
+    const key=x[0]+'|'+x[1]+'|'+x[7];
+    if(idx[key]===undefined){idx[key]=groups.length;groups.push({at:x[0],action:x[1],by:x[7],items:[]});}
+    groups[idx[key]].items.push({oldId:x[2],newId:x[3],field:x[4],before:x[5],after:x[6]});
+  });
+  return groups;
+}
+
+// 削除の「変更前」は21列すべてのJSON。人が読める表に開く。
+function renderDeletedRecord(json){
+  let o;
+  try{o=JSON.parse(json);}catch(e){return `<div style="font-size:12px">${esc(String(json||''))}</div>`;}
+  const skip=['登録日時','色','ID'];
+  const rows=Object.keys(o).filter(k=>!skip.includes(k)&&String(o[k]).trim()!=='');
+  if(!rows.length)return '<div style="font-size:12px;color:#999">（中身が記録されていません）</div>';
+  return '<table class="tbl" style="font-size:12px;margin-top:6px">'+
+    rows.map(k=>`<tr><th style="text-align:left;white-space:nowrap;width:80px">${esc(k)}</th><td>${esc(String(o[k]))}</td></tr>`).join('')+
+    '</table>';
+}
+
+async function loadHistory(){
+  const el=document.getElementById('history-body');
+  if(!el)return;
+  el.innerHTML='<div style="color:#999;padding:20px;text-align:center">読み込み中…</div>';
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'get_history',limit:500}),headers:{'Content-Type':'text/plain'},signal:timeoutSignal(GAS_READ_TIMEOUT_MS)});
+    const json=await res.json();
+    if(!json||json.status!=='ok'){el.innerHTML='<div style="color:#c00;padding:12px">読み込めませんでした：'+esc(json&&json.message||'不明')+'</div>';return;}
+    const rows=json.rows||[];
+    if(!rows.length){el.innerHTML='<div style="color:#999;padding:20px;text-align:center">まだ履歴はありません<br><span style="font-size:12px">この機能を入れたあとの登録・変更・削除から記録されます</span></div>';return;}
+    el.innerHTML=groupHistory(rows).map(g=>{
+      const isDel=g.action==='delete';
+      const color=ACTION_COLOR[g.action]||'#666';
+      const body=isDel
+        ? g.items.map(it=>
+            `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:13px;color:#dc2626">削除された予定を見る${it.oldId?`（ID: ${esc(it.oldId)}）`:''}</summary>${renderDeletedRecord(it.before)}</details>`
+          ).join('')
+        : '<div style="overflow-x:auto"><table class="tbl" style="font-size:12px;margin-top:6px"><thead><tr><th>項目</th><th>変更前</th><th>変更後</th></tr></thead><tbody>'+
+          g.items.map(it=>`<tr><td style="white-space:nowrap">${esc(it.field)}</td>`+
+            `<td style="color:#c0392b">${esc(it.before)||'<span style="color:#ccc">（なし）</span>'}</td>`+
+            `<td style="color:#1D9E75">${esc(it.after)||'<span style="color:#ccc">（なし）</span>'}</td></tr>`).join('')+
+          '</tbody></table></div>';
+      // 旧ID→新ID を出す（編集するとIDが変わるので、これが無いと過去へ遡れない）
+      const ids=[...new Set(g.items.filter(it=>it.oldId&&it.newId&&it.oldId!==it.newId)
+        .map(it=>`${it.oldId} → ${it.newId}`))];
+      return `<div class="card" style="margin-bottom:10px;padding:10px 12px">
+        <div style="font-weight:600;font-size:13px;margin-bottom:4px">
+          <span style="color:${color}">${esc(ACTION_LABEL[g.action]||g.action)}</span>
+          <span style="color:#666;font-weight:400;margin-left:8px">${esc(g.at)}</span>
+          <span style="color:#666;font-weight:400;margin-left:8px">${esc(g.by)||'（不明）'}</span>
+        </div>
+        ${ids.length?`<div style="font-size:11px;color:#999">ID: ${esc(ids.join(' / '))}</div>`:''}
+        ${body}
+      </div>`;
+    }).join('');
+  }catch(e){
+    el.innerHTML='<div style="color:#c00;padding:12px">読み込めませんでした：'+esc(e.message)+'</div>';
+  }
+}
+
 async function setSiteStatus(genba,loc,el){
   const status=el.value;
   const prev=siteStatusOf_(genba,loc);
