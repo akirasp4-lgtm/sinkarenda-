@@ -5072,6 +5072,19 @@ async function openSettings(){
   renderSettings();
 }
 function closeSettings(){document.getElementById('settings-modal').classList.remove('active');initMemberUI();settingsOpenedForSelect=null;}
+// ★2026-08-27: 職人管理の行を職人マスタへ引き当てる。
+//   getShokunin() はグローライズ表示時にGRミツマの職人も返す（§3.9の統合名簿）。
+//   会社を currentCompany で固定して探すと、GRミツマの人が毎回見つからず
+//   「既定部隊を選んでも黙って何も起きない」状態になる（実際にそうなっていた）。
+//   まず自社で探し、見つからなければ拠点の軸を持つ会社（グローライズ／GRミツマ）
+//   の中から探す。他事業（和信カインド等）は従来どおり混ぜない。
+function findSettingsMember(name){
+  if(!settingsMembers)return null;
+  const exact=settingsMembers.find(m=>m.name===name&&m.company===currentCompany);
+  if(exact)return exact;
+  if(!hasKyotenAxis(currentCompany))return null;
+  return settingsMembers.find(m=>m.name===name&&hasKyotenAxis(m.company))||null;
+}
 function renderSettings(){
   document.getElementById('settings-company-name').textContent=currentCompany;
   const isGrowise=currentCompany==='グローライズ';
@@ -5098,7 +5111,7 @@ function renderSettings(){
       :'';
   document.getElementById('shokunin-list').innerHTML=warnHtml+shokuninList.map((s,i)=>{
     // 単価は settingsMembers（GASから取り直した専用キャッシュ）を使う。allMembers は使わない。
-    const member=settingsMembers?settingsMembers.find(m=>m.name===s&&m.company===currentCompany):null;
+    const member=findSettingsMember(s);
     // ★修正5: 全体成功(settingsMembersOk)だけでなく、この人が実際に取得結果に
     // いたか(member)も見る。部分応答で欠けている人はここがfalseになる。
     // ★3回目レビュー修正7: 行が存在しても単価セルが非数値・欠落なら(member.rateOk===false)
@@ -5114,12 +5127,13 @@ function renderSettings(){
       ?`<input type="number" value="${rate||''}" placeholder="単価" onchange="updateMemberRate('${esc(s)}',this.value)" style="width:80px;margin:0;padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:6px">`
       :`<input type="text" value="取得できませんでした" disabled title="単価を取得できませんでした" style="width:130px;margin:0;padding:4px 6px;font-size:11px;border:1px solid #fca5a5;border-radius:6px;background:#fef2f2;color:#c00;cursor:not-allowed">`;
     // ★2026-08-27 フェーズ1: 既定部隊（予定入力の初期値）と 有効（空き人員に出すか）
-    const mCompany=(member&&member.company)||currentCompany;
+    // ★見つからないときは保存しても空振りするので、部隊・有効の操作を出さない
+    const mCompany=(member&&member.company)||'';
     const curButai=(member&&member.butai)||'';
     const isActive=member?member.active!==false:true;
-    const butaiSelect=`<select onchange="updateMemberButai('${esc(s)}','${esc(mCompany)}',this.value)" title="既定部隊（予定を作るときの初期値）" style="width:auto;margin:0;padding:4px 8px;font-size:12px;border:1px solid #ddd;border-radius:6px;background:#f9f9f9">
+    const butaiSelect=!mCompany?'':`<select onchange="updateMemberButai('${esc(s)}','${esc(mCompany)}',this.value)" title="既定部隊（予定を作るときの初期値）" style="width:auto;margin:0;padding:4px 8px;font-size:12px;border:1px solid #ddd;border-radius:6px;background:#f9f9f9">
       <option value=""${!curButai?' selected':''}>部隊なし</option>${BUTAI_VALUES.map(b=>`<option value="${b}"${b===curButai?' selected':''}>${b}</option>`).join('')}</select>`;
-    const activeChk=`<label title="外すと空き人員のリストに出なくなります（過去の予定は消えません）" style="display:flex;align-items:center;gap:3px;font-size:11px;color:#666;white-space:nowrap;margin:0">
+    const activeChk=!mCompany?'':`<label title="外すと空き人員のリストに出なくなります（過去の予定は消えません）" style="display:flex;align-items:center;gap:3px;font-size:11px;color:#666;white-space:nowrap;margin:0">
       <input type="checkbox" ${isActive?'checked':''} onchange="updateMemberActive('${esc(s)}','${esc(mCompany)}',this.checked)" style="margin:0">有効</label>`;
     return`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee;gap:6px;flex-wrap:wrap">
       <span style="font-size:15px;flex:1;min-width:80px">${esc(s)}</span>
@@ -5157,6 +5171,7 @@ async function updateMemberButai(name,company,butai){
     if(sm)sm.butai=butai;
     const am=(allMembers||[]).find(m=>m.name===name&&m.company===company);
     if(am)am.butai=butai;
+    renderSettings();
     refreshInBackground();
   }catch(e){alert('エラー：'+e.message);renderSettings();}
 }
