@@ -1935,6 +1935,16 @@ function updateNoticeBar(){
   if(btn){btn.disabled=isAll;btn.textContent=isAll?'会社を選択してください':'登録する';}
 }
 
+// ★2026-08-27 フェーズ2: 重複チェックと空き人員の母集団。
+//   filteredNippos() との違いは「拠点の絞り込みを通さない」こと。
+//   本社ビューで見ていても、その人が関東の現場と重なっていれば重複だから。
+//   会社（法人）は尊重する。和信カインドの「元」とラーテルの「元」は別人。
+function companyNippos(){
+  if(currentCompany==='全社')return allNippos;
+  if(hasKyotenAxis(currentCompany))return allNippos.filter(n=>hasKyotenAxis(n.company));
+  return allNippos.filter(n=>n.company===currentCompany);
+}
+
 function filteredNippos(){
   // ★2026-08-26: グローライズ系を見ているときは、グローライズとGRミツマの
   //   両方を1つのカレンダーとして扱う（依頼書「グローライズとしてのカレンダー」）。
@@ -2430,23 +2440,26 @@ async function submitNippo(){
   const color=selectedColor.s||CAL_COLORS[0];
   const dates=getDateRange(dateStart,dateEnd);
 
-  const conflicts=[];
-  dates.forEach(date=>{
-    members.forEach(m=>{
-      const existing=allNippos.filter(n=>!n.isGhost&&n.date===date&&n.name===m.name&&n.company===currentCompany&&!n.yotei);
-      if(existing.length>0&&!conflicts.find(c=>c.date===date&&c.name===m.name)){
-        conflicts.push({date,name:m.name});
-      }
-    });
-  });
+  // ★2026-08-27 フェーズ2: 判定を設計書§1.1のルールへ差し替えた。
+  //   今までは「同じ日に何か1件でもあれば警告」で、実データでは250件が該当していた。
+  //   その大半は「現場＋安全会議」「現場＋事務所」で正常。毎回出る警告は読まれない。
+  //   workType の定義をここへ上げたのは、新ルールが作業区分を見るため。
+  const jobNoDivision=(currentCompany==='グローライズ'&&document.getElementById('s-jobno-div-wrap').style.display!=='none')?document.getElementById('s-jobno-division').value:'';
+  const workType=(document.getElementById('s-work-type')||{}).value||'現場作業';
+  const _cand=[];
+  dates.forEach(date=>{members.forEach(m=>_cand.push({
+    date,name:m.name,company:currentCompany,genba,loc,workType,
+    yakin,yasumi,yotei,souko,isGhost:false,id:''
+  }));});
+  const conflicts=conflictsIfAdded(companyNippos(),_cand);
   if(conflicts.length>0){
-    const lines=conflicts.map(c=>`・${formatDate(c.date)}　${c.name}`).join('\n');
-    const proceed=confirm(`以下のメンバーは既に予定が入っています。\n\n${lines}\n\nそれでも登録しますか？`);
+    const lines=conflicts.map(c=>
+      `・${formatDate(c.date)}　${c.name}\n　　${c.jobs.map(j=>j.genba+'／'+j.loc).join('\n　　')}`
+    ).join('\n');
+    const proceed=confirm(`同じ日に別の現場に入っています。\n\n${lines}\n\nそれでも登録しますか？`);
     if(!proceed)return;
   }
 
-  const jobNoDivision=(currentCompany==='グローライズ'&&document.getElementById('s-jobno-div-wrap').style.display!=='none')?document.getElementById('s-jobno-division').value:'';
-  const workType=(document.getElementById('s-work-type')||{}).value||'現場作業';
   const vehicle=(document.getElementById('s-vehicle')||{}).value||'';
   // 車両のダブルブッキング再チェック（他のユーザーが同時に登録した場合の保険）
   // 複数車両に対応: 選択された各車両を 1 台ずつチェック
@@ -3808,22 +3821,23 @@ async function saveEdit(){
     dates=[editedDate];
   }
   const excludeIds=new Set(editIds||[]);
-  // メンバー被りチェック（編集中グループ自身は除外、予定モードレコードは除外）
-  if(!yotei){
-    const conflicts=[];
-    dates.forEach(date=>{
-      members.forEach(m=>{
-        const existing=allNippos.filter(n=>!n.isGhost&&!excludeIds.has(n.id)&&n.date===date&&n.name===m.name&&!n.yotei&&(company?n.company===company:true));
-        if(existing.length>0&&!conflicts.find(c=>c.date===date&&c.name===m.name)){
-          conflicts.push({date,name:m.name});
-        }
-      });
-    });
-    if(conflicts.length>0){
-      const lines=conflicts.map(c=>`・${formatDate(c.date)}　${c.name}`).join('\n');
-      const proceed=confirm(`以下のメンバーは既に他の予定が入っています。\n\n${lines}\n\nそれでも保存しますか？`);
-      if(!proceed)return;
-    }
+  // ★2026-08-27 フェーズ2: 判定を設計書§1.1のルールへ差し替えた（新規登録側と同じ）。
+  //   「予定」の行はルール側で落ちるので、外側の if(!yotei) はやめた。
+  const _base=companyNippos().filter(n=>!excludeIds.has(n.id));
+  // 全社ビューで元の会社が分からないときだけ、会社を見ずに判定する（旧実装と同じ）
+  const _cmp=company?_base:_base.map(n=>Object.assign({},n,{company:''}));
+  const _cand=[];
+  dates.forEach(date=>{members.forEach(m=>_cand.push({
+    date,name:m.name,company,genba,loc,workType,
+    yakin,yasumi,yotei,souko,isGhost:false,id:''
+  }));});
+  const conflicts=conflictsIfAdded(_cmp,_cand);
+  if(conflicts.length>0){
+    const lines=conflicts.map(c=>
+      `・${formatDate(c.date)}　${c.name}\n　　${c.jobs.map(j=>j.genba+'／'+j.loc).join('\n　　')}`
+    ).join('\n');
+    const proceed=confirm(`同じ日に別の現場に入っています。\n\n${lines}\n\nそれでも保存しますか？`);
+    if(!proceed)return;
   }
   // 車両ダブルブッキング再チェック（編集中グループのIDは除外）
   // 複数車両に対応

@@ -173,3 +173,35 @@ describe('二重登録の統合に画面が追随していること（2026-08-27
     expect(src).not.toContain("{action:'update_member_rate',name,company:currentCompany,rate}");
   });
 });
+
+describe('保存時の重複警告が新ルールを使っていること（2026-08-27 フェーズ2）', () => {
+  FILES.forEach(f => {
+    const src = read(f);
+
+    it(f + ': 古い「同じ日に1件でもあれば警告」が残っていない', () => {
+      // 旧ルールは実データ250件が該当し、その大半が「現場＋事務所」等の正常。
+      // 毎回出る警告は読まれなくなるので、文言ごと消えていることを固定する
+      expect(src).not.toContain('既に予定が入っています');
+      expect(src).not.toContain('既に他の予定が入っています');
+    });
+
+    it(f + ': 判定ブロックが入っている', () => {
+      expect(src).toContain('// ===== PHASE2-CONFLICT-RULE:BEGIN =====');
+      expect(src).toContain('// ===== PHASE2-CONFLICT-RULE:END =====');
+    });
+
+    it(f + ': ★新規登録と編集の両方が新ルールを通る（片方だけ直すのを防ぐ）', () => {
+      expect((src.match(/conflictsIfAdded\(/g) || []).length).toBe(3); // 定義1 + 呼び出し2
+    });
+
+    it(f + ': ★重複の母集団は拠点で絞らない', () => {
+      // filteredNippos() を使うと、本社ビューのとき関東の現場と重なっても気付けない
+      expect(src).toContain('function companyNippos(');
+      expect(src).not.toMatch(/conflictsIfAdded\(filteredNippos\(\)/);
+    });
+
+    it(f + ': 車両のダブルブッキング判定は今までどおり残っている', () => {
+      expect(src).toContain('既に予約があります');
+    });
+  });
+});
