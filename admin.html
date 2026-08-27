@@ -949,9 +949,9 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <p style="color:#1D9E75;font-weight:600;margin-top:8px">✅ 完了フラグ（プルダウン非表示）</p>
     <ul>
       <li>終わった工事を <b>新規入力時のプルダウンから隠す</b> 機能。データは残るので集計・粗利は維持</li>
-      <li>予定詳細を開く → <b>「この現場を完了にする」</b> ボタン</li>
+      <li>現場管理の一覧 → <b>ステータスのプルダウン</b>（見積中／受注／準備中／施工中／残工事／完工／延期／中止）</li>
       <li>権限: その現場の <b>責任者</b> または <b>管理者</b> のみ操作可</li>
-      <li>「進行中に戻す」ボタンで完了解除も可能</li>
+      <li>いつでも別のステータスに変えられる。<b>完工・中止</b>を選ぶと現場名プルダウンから外れる</li>
       <li>工番・売上・過去データは完了後も保持される（参照は可能）</li>
     </ul>
   </div>
@@ -2775,6 +2775,47 @@ function butaiTag(v){
   return '<span class="butai-tag">'+esc(b.replace('部隊','部'))+'</span>';
 }
 
+// ==============================================================
+// ★2026-08-27 フェーズ1: 案件ステータス（8段階）
+//   ステータスが正で、既存の「完了」列は従属（GAS側で自動的に揃える）。
+//   変更はこの管理者画面に一本化する。職人用は表示のみ（Codexレビュー[P2]#7:
+//   職人側の「完了にする」を残すと、管理者の「延期」が「完工」に化ける）。
+// ==============================================================
+const SITE_STATUSES=['見積中','受注','準備中','施工中','残工事','完工','延期','中止'];
+const SITE_STATUS_STYLE={
+  '見積中':['📝','#6b7280'],'受注':['🤝','#2563eb'],'準備中':['📦','#7c3aed'],
+  '施工中':['🚧','#dc2626'],'残工事':['🔧','#d97706'],'完工':['✅','#1D9E75'],
+  '延期':['⏸️','#0891b2'],'中止':['🛑','#4b5563']
+};
+function siteStatusOf_(genba,loc){
+  const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
+  if(!j)return '';
+  // 古いWorker応答（statusを持たない）でも壊れないよう completed から導く
+  return String(j.status||'').trim()||(j.completed?'完工':'施工中');
+}
+async function setSiteStatus(genba,loc,el){
+  const status=el.value;
+  const prev=siteStatusOf_(genba,loc);
+  if(status===prev)return;
+  const warn=(status==='延期'||status==='中止')
+    ?`
+
+※「${status}」にすると、この現場に入っていた人員を空き候補として見直す対象になります。`:'';
+  if(!confirm(`「${loc||genba}」を「${status}」にしますか？${warn}`)){el.value=prev;return;}
+  el.disabled=true;
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'set_site_status',genba,loc,status,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status!=='ok'){alert('エラー：'+(json.message||'不明'));el.value=prev;return;}
+    const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
+    if(j){j.status=status;j.completed=!!json.completed;}
+    showAlert(`「${loc||genba}」を「${status}」にしました`,'ok');
+    await refreshInBackground();
+    if(typeof renderDoneManager==='function')renderDoneManager();
+  }catch(e){alert('エラー：'+e.message);el.value=prev;}
+  finally{el.disabled=false;}
+}
+
 const kyotenTouched={s:false,e:false};
 function onKyotenChanged(p){kyotenTouched[p]=true;}
 function refreshKyotenField(p,opts){
@@ -3341,41 +3382,22 @@ function renderEventDetail(){
 function renderSiteCompletionRow_(g){
   if(!g.genba||!g.loc)return '';
   const j=(allJobsites||[]).find(x=>x.genba===g.genba&&x.loc===g.loc);
-  const completed=!!(j&&j.completed);
-  if(completed){
-    return `<div class="detail-row"><div class="detail-row-icon">✅</div><div class="detail-row-content"><div class="detail-row-label">現場ステータス</div><span style="color:#1D9E75;font-weight:600">完了済み</span><button class="btn btn-secondary btn-sm" onclick="toggleSiteCompletion_('${esc(g.genba)}','${esc(g.loc)}',false)" style="margin-left:8px;font-size:12px;padding:4px 10px">進行中に戻す</button></div></div>`;
-  }
-  return `<div class="detail-row"><div class="detail-row-icon">🚧</div><div class="detail-row-content"><div class="detail-row-label">現場ステータス</div>進行中<button class="btn btn-secondary btn-sm" onclick="toggleSiteCompletion_('${esc(g.genba)}','${esc(g.loc)}',true)" style="margin-left:8px;font-size:12px;padding:4px 10px">この現場を完了にする</button></div></div>`;
+  // ★2026-08-27 フェーズ1: 表示のみ。変更は現場管理のプルダウンに一本化（[P2]#7）
+  const st=siteStatusOf_(g.genba,g.loc);
+  if(!st)return '';
+  const sty=SITE_STATUS_STYLE[st]||['🚧','#666'];
+  return `<div class="detail-row"><div class="detail-row-icon">${sty[0]}</div><div class="detail-row-content"><div class="detail-row-label">案件ステータス</div><span style="color:${sty[1]};font-weight:600">${esc(st)}</span><span style="font-size:11px;color:#999;margin-left:8px">変更は「現場管理」から</span></div></div>`;
 }
 
-async function toggleSiteCompletion_(genba,loc,completed){
-  const msg=completed?`「${loc}」を完了にしますか？\n以後、新規の予定登録で現場プルダウンに出なくなります。\n（工番・既存の日報・集計には影響しません）`:`「${loc}」を進行中に戻しますか？`;
-  if(!confirm(msg))return;
-  // 押下中は連打防止
-  const detailBody=document.getElementById('detail-fs-body');
-  if(detailBody)detailBody.querySelectorAll('button').forEach(b=>{if(b.textContent.includes('完了にする')||b.textContent.includes('進行中に戻す'))b.disabled=true;});
-  try{
-    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_site_status',genba,loc,completed,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();
-    if(json.status==='ok'){
-      // 楽観更新
-      const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
-      if(j)j.completed=completed;
-      else allJobsites.push({genba,loc,jobNo:'',completed});
-      hapticSuccess();
-      // 即時に詳細画面を再描画
-      if(typeof renderEventDetail==='function')renderEventDetail();
-      showAlert(completed?`✓ 「${loc}」を完了にしました`:`↩ 「${loc}」を進行中に戻しました`,'ok');
-      // サーバから最新データ取得・全体再描画（D1切替後もrefreshInBackgroundでsync→再取得の順を守る）
-      await refreshInBackground();
-      // 詳細画面がまだ開いていれば最終データで再描画
-      if(document.getElementById('cal-detail-modal')?.classList.contains('active')&&typeof renderEventDetail==='function')renderEventDetail();
-    }else alert('エラー：'+(json.message||'不明'));
-  }catch(e){alert('エラー：'+e.message);}
-}
+// ★2026-08-27 フェーズ1: toggleSiteCompletion_ は削除した（Codexレビュー[P2]#7）。
+//   完了/進行中の2択で現場マスタを書く経路を残すと、管理者が設定した
+//   「延期」「中止」を別経路で「完工」「施工中」へ戻せてしまう。
+//   ステータスの変更は setSiteStatus（8段階）に一本化した。
 
 // 既存 toggleSiteCompletion_ の薄いラッパー（切替後に完了管理一覧を再描画）
-async function doneToggle(genba,loc,completed){await toggleSiteCompletion_(genba,loc,completed);renderDoneManager();}
+// ★2026-08-27 フェーズ1: doneToggle は削除（8段階の setSiteStatus に一本化）。
+//   完了/進行中の2択を残すと、管理者が設定した「延期」「中止」を
+//   別経路で「完工」「施工中」へ戻せてしまう（Codexレビュー[P2]#7）。
 
 // 🏁 完了管理：全現場（元請×現場）の完了状態を一覧して切り替える
 function renderDoneManager(){
@@ -3408,11 +3430,13 @@ function renderDoneManager(){
   });
   if(!list.length){wrap.innerHTML='<div style="color:#666;font-size:13px;padding:8px">該当する現場がありません</div>';return;}
   wrap.innerHTML=list.map(x=>{
-    const badge=x.completed?'<span style="color:#1D9E75;font-weight:600">✅完了</span>':'<span style="color:#dc2626;font-weight:600">🚧進行中</span>';
-    const btn=x.completed
-      ?`<button class="btn btn-secondary btn-sm" onclick="doneToggle('${esc(x.genba)}','${esc(x.loc)}',false)" style="font-size:12px;padding:4px 10px">進行中に戻す</button>`
-      :`<button class="btn btn-secondary btn-sm" onclick="doneToggle('${esc(x.genba)}','${esc(x.loc)}',true)" style="font-size:12px;padding:4px 10px">完了にする</button>`;
-    return `<div class="detail-row" style="align-items:center"><div class="detail-row-content"><div style="font-size:12px;color:#666">${esc(x.genba)}</div><div style="font-weight:600">${esc(x.loc)}</div><div style="font-size:12px;color:#666">最終予定日: ${esc(x.last||'-')} ／ ${badge}</div></div><div style="margin-left:auto">${btn}</div></div>`;
+    // ★2026-08-27 フェーズ1: 完了/進行中の2択を、8段階のプルダウンに置き換えた。
+    //   ステータスが正で「完了」列は従属（GAS側で自動的に揃える）。
+    const st=siteStatusOf_(x.genba,x.loc);
+    const sty=SITE_STATUS_STYLE[st]||['🚧','#666'];
+    const sel=`<select onchange="setSiteStatus('${esc(x.genba)}','${esc(x.loc)}',this)" style="width:auto;margin:0;padding:5px 8px;font-size:13px;border:1px solid #ddd;border-radius:6px;background:#fff">
+      ${SITE_STATUSES.map(v=>`<option value="${v}"${v===st?' selected':''}>${v}</option>`).join('')}</select>`;
+    return `<div class="detail-row" style="align-items:center"><div class="detail-row-content"><div style="font-size:12px;color:#666">${esc(x.genba)}</div><div style="font-weight:600">${esc(x.loc)}</div><div style="font-size:12px;color:#666">最終予定日: ${esc(x.last||'-')} ／ <span style="color:${sty[1]};font-weight:600">${sty[0]}${esc(st)}</span></div></div><div style="margin-left:auto">${sel}</div></div>`;
   }).join('');
 }
 
@@ -4768,7 +4792,10 @@ async function toggleJnfixCompleted(checkbox,genba,loc,idx){
   const msg=completed?`「${loc||'（現場名なし）'}」を完了にしますか？\n以後、現場名プルダウンに表示されなくなります。\n（工番・売上・既存の日報には影響しません）`:`「${loc||'（現場名なし）'}」を進行中に戻しますか？`;
   if(!confirm(msg)){checkbox.checked=!completed;return;}
   try{
-    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_site_status',genba,loc,completed,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
+    // ★2026-08-27 フェーズ1: 8段階のステータスへ寄せる。
+    //   旧 update_site_status は「ステータス設定済みなら拒否」になったため、
+    //   こちらも set_site_status を使わないと、延期・中止の現場でエラーになる。
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'set_site_status',genba,loc,status:completed?'完工':'施工中',updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'){
       // allJobsites 更新

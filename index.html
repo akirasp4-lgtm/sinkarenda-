@@ -3285,42 +3285,36 @@ function shiftDetailEvent(delta){
 }
 
 // 現場の「完了」状態を表示＋切替UIを返す
+// ★2026-08-27 フェーズ1（Codexレビュー[P2]#7）: 職人用は「見るだけ」にした。
+//   以前はここに「完了にする／進行中に戻す」ボタンがあり、completed の真偽値だけを
+//   送っていた。8段階ステータスを入れたあとにこれを残すと、
+//     管理者が「延期」にする → 職人が「完了にする」を押す → 「完工」に化ける
+//   という形で管理者の設定が勝手に消える。変更は管理者画面（現場管理）に一本化する。
+const SITE_STATUS_STYLE={
+  '見積中':['📝','#6b7280'],'受注':['🤝','#2563eb'],'準備中':['📦','#7c3aed'],
+  '施工中':['🚧','#dc2626'],'残工事':['🔧','#d97706'],'完工':['✅','#1D9E75'],
+  '延期':['⏸️','#0891b2'],'中止':['🛑','#4b5563']
+};
+function siteStatusOf_(genba,loc){
+  const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
+  if(!j)return '';
+  // 古いWorker応答（statusを持たない）でも壊れないよう completed から導く
+  return String(j.status||'').trim()||(j.completed?'完工':'施工中');
+}
 function renderSiteCompletionRow_(g){
   if(!g.genba||!g.loc)return ''; // 元請・現場名がそろっている時だけ
-  // 完了ボタンは誰でも押せる（現場が終わったら誰でもマークできる運用）
-  const j=(allJobsites||[]).find(x=>x.genba===g.genba&&x.loc===g.loc);
-  const completed=!!(j&&j.completed);
-  if(completed){
-    return `<div class="detail-row"><div class="detail-row-icon">✅</div><div class="detail-row-content"><div class="detail-row-label">現場ステータス</div><span style="color:#1D9E75;font-weight:600">完了済み</span><button class="btn btn-secondary btn-sm" onclick="toggleSiteCompletion_('${esc(g.genba)}','${esc(g.loc)}',false)" style="margin-left:8px;font-size:12px;padding:4px 10px">進行中に戻す</button></div></div>`;
-  }
-  return `<div class="detail-row"><div class="detail-row-icon">🚧</div><div class="detail-row-content"><div class="detail-row-label">現場ステータス</div>進行中<button class="btn btn-secondary btn-sm" onclick="toggleSiteCompletion_('${esc(g.genba)}','${esc(g.loc)}',true)" style="margin-left:8px;font-size:12px;padding:4px 10px">この現場を完了にする</button></div></div>`;
+  const st=siteStatusOf_(g.genba,g.loc);
+  if(!st)return '';
+  const sty=SITE_STATUS_STYLE[st]||['🚧','#666'];
+  return `<div class="detail-row"><div class="detail-row-icon">${sty[0]}</div><div class="detail-row-content"><div class="detail-row-label">案件ステータス</div><span style="color:${sty[1]};font-weight:600">${esc(st)}</span><span style="font-size:11px;color:#999;margin-left:8px">変更は管理者画面から</span></div></div>`;
 }
 
-async function toggleSiteCompletion_(genba,loc,completed){
-  const msg=completed?`「${loc}」を完了にしますか？\n以後、新規の予定登録で現場プルダウンに出なくなります。\n（工番・既存の日報・集計には影響しません）`:`「${loc}」を進行中に戻しますか？`;
-  if(!confirm(msg))return;
-  // 押下中表示：button を少しの間だけ無効化（連打防止）
-  const detailBody=document.getElementById('detail-fs-body');
-  if(detailBody)detailBody.querySelectorAll('button').forEach(b=>{if(b.textContent.includes('完了にする')||b.textContent.includes('進行中に戻す'))b.disabled=true;});
-  try{
-    const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update_site_status',genba,loc,completed,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();
-    if(json.status==='ok'){
-      // 楽観更新 → サーバとも同期するため loadData() で全体リフレッシュ
-      const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
-      if(j)j.completed=completed;
-      else allJobsites.push({genba,loc,jobNo:'',completed});
-      hapticSuccess();
-      // 詳細画面を即時に再描画（楽観更新の結果が見える）
-      if(typeof renderEventDetail==='function')renderEventDetail();
-      showAlert(completed?`✓ 「${loc}」を完了にしました`:`↩ 「${loc}」を進行中に戻しました`,'ok');
-      // サーバから最新データを再取得して全体を再描画（D1切替後もrefreshInBackgroundでsync→再取得の順を守る）
-      await refreshInBackground();
-      // 詳細画面がまだ開いていれば最終データで再描画
-      if(document.getElementById('cal-detail-modal')?.classList.contains('active')&&typeof renderEventDetail==='function')renderEventDetail();
-    }else alert('エラー：'+(json.message||'不明'));
-  }catch(e){alert('エラー：'+e.message);}
-}
+// ★2026-08-27 フェーズ1（Codexレビュー[P2]#7）: toggleSiteCompletion_ は削除した。
+//   職人用の予定詳細から現場のステータスを変えられると、
+//   管理者が設定した「延期」「中止」が「完工」「施工中」へ勝手に戻ってしまう。
+//   ステータスの変更は管理者画面（admin.html の現場管理）に一本化した。
+//   GAS側でも、ステータス設定済みの現場に対する旧 update_site_status を拒否している。
+
 function editFromDetail(){
   const idx=detailIdx;
   let g=detailGroups[idx];
