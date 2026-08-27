@@ -116,3 +116,32 @@ describe('案件ステータスの旧経路が残っていないこと', () => {
     expect(src).toContain("action:'set_site_status'");
   });
 });
+
+describe('二重登録の統合に画面が追随していること（2026-08-27）', () => {
+  FILES.forEach(f => {
+    it(f + ': 端末に保存された操作者名を読み替える', () => {
+      const src = read(f);
+      // これが無いと、名前を変えた人の端末だけ古い名前で「更新者」を書き続け、
+      // せっかくまとめた名前がまた2つに割れる
+      expect(src).toContain('function migrateUsername(');
+      expect(src).toContain('currentUsername=migrateUsername(_raw)');
+      expect(src).toContain("'高田':'高田（関東）'");
+      expect(src).toContain("'GRME髙田':'高田（関東）'");
+      expect(src).toContain("'GRME内村':'内村（関東）'");
+    });
+
+    it(f + ': 第五部隊の部隊長名が統合後の名前になっている', () => {
+      expect(read(f)).toContain("'第五部隊':'高田（関東）'");
+    });
+  });
+
+  it('★画面とGASの読み替え表が食い違っていない', () => {
+    const gas = read('gas.js');
+    const idx = read('index.html');
+    ['高田','髙田','GRME髙田','GRME高田','柳澤','栁澤','GRME栁澤','GRME柳澤','内村','GRME内村']
+      .forEach(n => {
+        expect(gas, 'gas.jsに' + n + 'が無い').toContain("'" + n + "':");
+        expect(idx, 'index.htmlに' + n + 'が無い').toContain("'" + n + "':");
+      });
+  });
+});

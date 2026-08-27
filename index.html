@@ -1347,8 +1347,26 @@ function getGenbaMasterNames(){
 }
 
 function getUsername(){return currentUsername;}
+// ★2026-08-27 二重登録の統合（高田→高田（関東）等）に合わせて、
+//   端末に保存されている操作者名も読み替える。
+//   これが無いと、名前を変えた人の端末だけ古い名前のまま「更新者」に書かれ続け、
+//   せっかくまとめた名前がまた2つに割れる。
+const MEMBER_MERGE_MAP={
+  '高田':'高田（関東）','髙田':'高田（関東）','GRME髙田':'高田（関東）','GRME高田':'高田（関東）',
+  '柳澤':'柳澤（関東）','栁澤':'柳澤（関東）','GRME栁澤':'柳澤（関東）','GRME柳澤':'柳澤（関東）',
+  '内村':'内村（関東）','GRME内村':'内村（関東）'
+};
+function migrateUsername(v){
+  const s=String(v||'').trim();
+  return MEMBER_MERGE_MAP[s]||s;
+}
 function initUsername(){
-  try{currentUsername=localStorage.getItem('genba-username')||'';}catch(e){}
+  try{
+    const _raw=localStorage.getItem('genba-username')||'';
+    currentUsername=migrateUsername(_raw);
+    // 読み替えたら保存し直す（次回から新しい名前で動く）
+    if(currentUsername!==_raw&&currentUsername)localStorage.setItem('genba-username',currentUsername);
+  }catch(e){}
   updateUsernameDisplay();
 }
 function updateUsernameDisplay(){
