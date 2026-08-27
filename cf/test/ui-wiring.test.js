@@ -273,3 +273,53 @@ describe('重複判定の名簿のまとまり（2026-08-27 実機で発見し�
     });
   });
 });
+
+describe('詳しく探す（2026-08-27 フェーズ2 Task4）', () => {
+  const src = read('index.html');
+
+  it('4つ目のモードがある', () => {
+    expect(src).toContain("setGmMode('search')");
+    expect(src).toContain('id="gm-filter-search"');
+    expect(src).toContain('id="gm-mode-search"');
+  });
+
+  it('★モードの一覧に search が入っている（入れ忘れるとボタンの色が戻らない）', () => {
+    expect(src).toContain("['genba','person','pin','search'].forEach");
+    expect(src).toMatch(/gmMode === 'search'/);
+  });
+
+  it('★絞り込みの軸がそろっている', () => {
+    ['gm-sc-name', 'gm-sc-butai', 'gm-sc-genba', 'gm-sc-worktype', 'gm-sc-loc', 'gm-sc-from', 'gm-sc-to']
+      .forEach(id => expect(src, id).toContain('id="' + id + '"'));
+  });
+
+  it('★結果から一括編集・一括削除をさせない', () => {
+    // 検索結果は複数の現場・複数の日にまたがる。そこで一括削除を押せると
+    // 関係のない予定まで消える
+    const m = src.match(/function renderSearchResults\(\)\s*\{[\s\S]*?\n\}/);
+    expect(m, 'renderSearchResults が見つからない').toBeTruthy();
+    ['gm-delete-bar', 'gm-edit-btn', 'toggleGmSelect', 'openBulkEditModal', 'deleteGmChecked']
+      .forEach(bad => expect(m[0], bad).not.toContain(bad));
+  });
+
+  it('★検索の結果枠と、一括編集付きの一覧を同時に出さない', () => {
+    expect(src).toContain("sr.style.display = (mode === 'search') ? '' : 'none'");
+    expect(src).toContain('id="gm-search-result"');
+  });
+
+  it('氏名・現場名をそのままHTMLに入れていない', () => {
+    const m = src.match(/function renderSearchResults\(\)\s*\{[\s\S]*?\n\}/);
+    expect(m[0]).toContain('esc(g.genba)');
+    expect(m[0]).toContain('esc(m.name)');
+  });
+
+  it('部隊の選択肢は BUTAI_VALUES を使う（手打ちで増やさない）', () => {
+    expect(src).toContain("fill('gm-sc-butai', BUTAI_VALUES.slice())");
+  });
+
+  it('★拠点の絞り込みを二重に置いていない（見出し下の切替が唯一の拠点操作）', () => {
+    expect(src).not.toContain('id="gm-sc-kyoten"');
+    expect(src).toContain('function searchNippos(');
+    expect(src).toMatch(/function searchNippos\(\)\s*\{[\s\S]*?filteredNippos\(\)/);
+  });
+});

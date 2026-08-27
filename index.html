@@ -529,6 +529,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <button id="gm-mode-genba" class="btn btn-secondary active" onclick="setGmMode('genba')">🏗️ 現場で探す</button>
   <button id="gm-mode-person" class="btn btn-secondary" onclick="setGmMode('person')">👤 人で探す</button>
   <button id="gm-mode-pin" class="btn btn-secondary" onclick="setGmMode('pin')">📌 予定だけ</button>
+  <button id="gm-mode-search" class="btn btn-secondary" onclick="setGmMode('search')">🔎 詳しく探す</button>
 </div>
 <!-- 現場フィルタ（既存） -->
 <div id="gm-filter-genba" class="card">
@@ -555,6 +556,36 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   </div>
   <select id="gm-pin-month" onchange="renderGmList()" style="display:none"><option value="">月を選択</option></select>
 </div>
+<!-- 詳しく探す（2026-08-27 フェーズ2） -->
+<!-- ★拠点はここに置かない。見出しの下の切替が既に拠点の絞り込みなので、
+     同じ用途の操作を2つ置くとどちらが効いているか分からなくなる -->
+<div id="gm-filter-search" class="card" style="display:none">
+  <div style="font-size:12px;color:#666;margin-bottom:8px">空欄の項目は絞り込みません。拠点は上の切替を使ってください。</div>
+  <div style="display:flex;gap:8px">
+    <div style="flex:1"><label>社員名</label>
+      <select id="gm-sc-name" onchange="renderSearchResults()" style="margin-bottom:8px"><option value="">すべて</option></select></div>
+    <div style="flex:1"><label>部隊</label>
+      <select id="gm-sc-butai" onchange="renderSearchResults()" style="margin-bottom:8px"><option value="">すべて</option></select></div>
+  </div>
+  <div style="display:flex;gap:8px">
+    <div style="flex:1"><label>元請</label>
+      <select id="gm-sc-genba" onchange="renderSearchResults()" style="margin-bottom:8px"><option value="">すべて</option></select></div>
+    <div style="flex:1"><label>作業区分</label>
+      <select id="gm-sc-worktype" onchange="renderSearchResults()" style="margin-bottom:8px"><option value="">すべて</option></select></div>
+  </div>
+  <label>現場名（一部でもよい）</label>
+  <input type="search" id="gm-sc-loc" placeholder="🔍 現場名の一部" oninput="renderSearchResults()" style="margin-bottom:8px">
+  <label>日付</label>
+  <div style="display:flex;gap:8px;align-items:center">
+    <input type="date" id="gm-sc-from" onchange="renderSearchResults()" style="flex:1;margin-bottom:0">
+    <span style="font-size:13px;color:#666">～</span>
+    <input type="date" id="gm-sc-to" onchange="renderSearchResults()" style="flex:1;margin-bottom:0">
+  </div>
+  <button class="btn btn-secondary btn-sm" style="margin-top:10px" onclick="clearSearchFilters()">条件をすべてクリア</button>
+</div>
+<!-- ★結果は gm-list-wrap とは別の枠。あちらには一括編集・一括削除が付いていて、
+     複数の現場・複数の日にまたがる検索結果でそれを押せると事故になる -->
+<div id="gm-search-result" style="display:none"></div>
 <div id="gm-list-wrap" style="display:none">
   <div class="card" style="padding:12px 16px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -3955,11 +3986,90 @@ function refreshGmTab() {
   if (gmMode === 'genba') updateGmSelects();
   else if (gmMode === 'person') renderPersonFilter();
   else if (gmMode === 'pin') renderPinFilter();
+  else if (gmMode === 'search') { updateSearchSelects(); renderSearchResults(); }
+}
+
+// ============================================================
+// ★ 詳しく探す（2026-08-27 フェーズ2・要件2）
+//   社員名／部隊／元請／現場名／作業区分／日付の範囲 で絞る。
+//   拠点は見出しの下の既存の切替をそのまま使う（filteredNippos 経由）。
+//   ★読むだけ。ここから編集・削除はさせない。
+// ============================================================
+function searchFilterValue(id) {
+  const el = document.getElementById(id);
+  return el ? String(el.value || '').trim() : '';
+}
+
+function updateSearchSelects() {
+  const src = filteredNippos().filter(n => !n.isGhost);
+  const fill = (id, values, keep) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const cur = keep === undefined ? el.value : keep;
+    el.innerHTML = '<option value="">すべて</option>'
+      + values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+    if (values.indexOf(cur) >= 0) el.value = cur;
+  };
+  fill('gm-sc-name', [...new Set(src.map(n => n.name).filter(Boolean))].sort());
+  fill('gm-sc-butai', BUTAI_VALUES.slice());
+  fill('gm-sc-genba', [...new Set(src.map(n => n.genba).filter(Boolean))].sort());
+  fill('gm-sc-worktype', [...new Set(src.map(n => n.workType).filter(Boolean))].sort());
+}
+
+function searchNippos() {
+  const name = searchFilterValue('gm-sc-name');
+  const butai = searchFilterValue('gm-sc-butai');
+  const genba = searchFilterValue('gm-sc-genba');
+  const loc = searchFilterValue('gm-sc-loc').toLowerCase();
+  const wt = searchFilterValue('gm-sc-worktype');
+  const from = searchFilterValue('gm-sc-from');
+  const to = searchFilterValue('gm-sc-to');
+  return filteredNippos().filter(n => {
+    if (n.isGhost) return false;
+    if (name && n.name !== name) return false;
+    if (butai && String(n.butai || '') !== butai) return false;
+    if (genba && n.genba !== genba) return false;
+    if (loc && String(n.loc || '').toLowerCase().indexOf(loc) < 0) return false;
+    if (wt && String(n.workType || '') !== wt) return false;
+    if (from && String(n.date || '') < from) return false;
+    if (to && String(n.date || '') > to) return false;
+    return true;
+  });
+}
+
+function clearSearchFilters() {
+  ['gm-sc-name','gm-sc-butai','gm-sc-genba','gm-sc-worktype','gm-sc-loc','gm-sc-from','gm-sc-to']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  renderSearchResults();
+}
+
+function renderSearchResults() {
+  const box = document.getElementById('gm-search-result');
+  if (!box) return;
+  const groups = groupNippos(searchNippos());
+  const people = groups.reduce((a, g) => a + g.members.length, 0);
+  let html = '<div class="card" style="padding:12px 16px">'
+    + '<div style="font-size:13px;color:#666;font-weight:500;margin-bottom:8px">'
+    + '見つかった予定 ' + groups.length + ' 件（延べ ' + people + ' 人）</div>';
+  if (!groups.length) {
+    html += '<div style="color:#666;font-size:14px;padding:8px 0">条件に合う予定はありません。</div>';
+  } else {
+    html += groups.map(g =>
+      '<div class="conflict-row">'
+      + '<b>' + esc(formatDate(g.date)) + '</b>　' + esc(g.genba) + '／' + esc(g.loc || '')
+      + (g.workType && g.workType !== '現場作業' ? ' <span class="worktype-chip">' + esc(g.workType) + '</span>' : '')
+      + (g.butai ? ' <span class="kyoten-tag">' + esc(g.butai) + '</span>' : '')
+      + '<div class="conflict-job">' + g.members.map(m => esc(m.name)).join('、') + '</div>'
+      + '</div>'
+    ).join('');
+  }
+  html += '</div>';
+  box.innerHTML = html;
 }
 
 function setGmMode(mode) {
   gmMode = mode;
-  ['genba','person','pin'].forEach(m => {
+  ['genba','person','pin','search'].forEach(m => {
     const btn = document.getElementById('gm-mode-' + m);
     if (btn) btn.classList.toggle('active', m === mode);
   });
@@ -3967,11 +4077,15 @@ function setGmMode(mode) {
     genba: document.getElementById('gm-filter-genba'),
     person: document.getElementById('gm-filter-person'),
     pin: document.getElementById('gm-filter-pin'),
+    search: document.getElementById('gm-filter-search'),
   };
   Object.entries(cards).forEach(([k, el]) => {
     if (el) el.style.display = k === mode ? '' : 'none';
   });
+  // ★検索の結果と、一括編集付きの一覧は同時に出さない
   document.getElementById('gm-list-wrap').style.display = 'none';
+  const sr = document.getElementById('gm-search-result');
+  if (sr) sr.style.display = (mode === 'search') ? '' : 'none';
   refreshGmTab();
 }
 
