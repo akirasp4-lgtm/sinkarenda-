@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { validateGasPayload, sanitizeForStorage, fetchWithRetry, syncAll } from '../src/sync.js';
+import { validateGasPayload, sanitizeForStorage, fetchWithRetry, syncAll, OPTIONAL_HEADERS } from '../src/sync.js';
 
 const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工',
                  'メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両'];
@@ -79,8 +79,16 @@ describe('validateGasPayload', () => {
     expect(validateGasPayload(makeCompactPayload({ headers: [...HEADERS, '担当者'] })).ok).toBe(false);
   });
 
-  it('★21列以上でも、20列目が「拠点」なら通す（さらに列を足す将来に備える）', () => {
-    expect(validateGasPayload(makeCompactPayload({ headers: [...HEADERS, '拠点', '顧客'] })).ok).toBe(true);
+  // ★2026-08-27 フェーズ1で仕様を厳しくした。
+  //   旧: 「20列目が拠点なら、21列目以降は何であっても通す」
+  //   新: 「増えた列は OPTIONAL_HEADERS の順番どおりでなければ通さない」
+  //   理由: 想定外の列を黙って受け入れると、同期は成功しているのに画面はその列を
+  //   見つけられず全件が既定値扱いになる（静かな誤分類）。上の
+  //   describe('21列目 部隊（フェーズ1）') が新しい仕様を網羅している。
+  it('★21列目が想定外の列なら通さない（旧: 何でも通していた）', () => {
+    const r = validateGasPayload(makeCompactPayload({ headers: [...HEADERS, '拠点', '顧客'] }));
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('21列目');
   });
 });
 
@@ -92,7 +100,9 @@ describe('sanitizeForStorage', () => {
     const out = sanitizeForStorage(makeCompactPayload({
       members: [{ name: '森', company: 'GRHD', division: 'ICT', rate: 18000 }]
     }));
-    expect(out.members[0]).toEqual({ name: '森', company: 'GRHD', division: 'ICT' });
+    // ★2026-08-27 フェーズ1: butai / active が加わった。落とすのは rate だけ。
+    expect(out.members[0]).toEqual({ name: '森', company: 'GRHD', division: 'ICT',
+                                     butai: '', active: true });
     expect(JSON.stringify(out.members)).not.toContain('18000');
   });
 
@@ -1211,5 +1221,91 @@ describe('syncAll（例外を投げない契約の維持）', () => {
 
     await syncAll(env);
     expect(state.lockedAt).toBeNull();
+  });
+});
+
+// ============================================================================
+// ★2026-08-27 フェーズ1: 21列目「部隊」
+//   19列より後ろに増えてよい列を OPTIONAL_HEADERS で管理する形に変えた。
+//   GASより先にWorkerを出すため、19列・20列・21列のどれでも取り込めること。
+// ============================================================================
+describe('21列目 部隊（フェーズ1）', () => {
+  const H19 = HEADERS;                    // このファイル冒頭の自前定数（19列）
+  const H20 = [...H19, '拠点'];
+  const H21 = [...H19, '拠点', '部隊'];
+  const base = (headers) => ({
+    status: 'ok', compact: 1, headers,
+    rows: [], members: [], genbaMaster: [], jobsites: []
+  });
+
+  it('21列（拠点＋部隊）を受け入れる', () => {
+    expect(validateGasPayload(base(H21)).ok).toBe(true);
+  });
+
+  it('20列（拠点のみ・移行中）も受け入れる', () => {
+    expect(validateGasPayload(base(H20)).ok).toBe(true);
+  });
+
+  it('19列ちょうど（さらに古い）も受け入れる', () => {
+    expect(validateGasPayload(base([...H19])).ok).toBe(true);
+  });
+
+  it('20列目が拠点でなければ拒否する', () => {
+    const r = validateGasPayload(base([...H19, '部隊']));
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('20列目');
+  });
+
+  it('21列目が部隊でなければ拒否する', () => {
+    const r = validateGasPayload(base([...H19, '拠点', '班']));
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('21列目');
+  });
+
+  it('22列目以降は想定外として拒否する', () => {
+    const r = validateGasPayload(base([...H21, '何か']));
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('22列目');
+  });
+
+  it('OPTIONAL_HEADERSの順番は拠点→部隊', () => {
+    expect(OPTIONAL_HEADERS).toEqual(['拠点', '部隊']);
+  });
+
+  it('sanitizeForStorage が既定部隊と有効を残す', () => {
+    const out = sanitizeForStorage({
+      headers: H21, rows: [], genbaMaster: [], jobsites: [],
+      members: [{ name: '元', company: 'グローライズ', division: 'INF',
+                  butai: '2部隊', active: false, rate: 25000 }]
+    });
+    expect(out.members[0]).toEqual({
+      name: '元', company: 'グローライズ', division: 'INF',
+      butai: '2部隊', active: false
+    });
+  });
+
+  it('sanitizeForStorage は単価を落とし続ける', () => {
+    const out = sanitizeForStorage({
+      headers: H21, rows: [], genbaMaster: [], jobsites: [],
+      members: [{ name: '元', company: 'グローライズ', division: '', rate: 25000 }]
+    });
+    expect(out.members[0].rate).toBeUndefined();
+  });
+
+  it('activeが無い古いGAS応答は全員 有効=true とみなす', () => {
+    const out = sanitizeForStorage({
+      headers: H20, rows: [], genbaMaster: [], jobsites: [],
+      members: [{ name: '元', company: 'グローライズ', division: '' }]
+    });
+    expect(out.members[0].active).toBe(true);
+    expect(out.members[0].butai).toBe('');
+  });
+
+  it('jobsitesのステータスはそのまま素通しする', () => {
+    const out = sanitizeForStorage({
+      headers: H21, rows: [], genbaMaster: [], members: [],
+      jobsites: [{ genba: 'きんでん', loc: 'A', kyoten: '本社', status: '施工中' }]
+    });
+    expect(out.jobsites[0].status).toBe('施工中');
   });
 });

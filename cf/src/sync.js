@@ -38,6 +38,13 @@ const EXPECTED_HEADERS = ['登録日時','作業日','元請名','現場名','�
 
 // D1の1行あたりの上限は2,000,000バイト。実測の全社compactは約701,421バイト（35%使用）。
 // 上限に近づいたら黙って壊れる前に「失敗」として記録する（修正1のサイズガード）。
+// ★2026-08-27 フェーズ1: 19列より後ろに増えてよい列と、その順番。
+//   ここに書いた順番どおりでなければ取り込みを止める。
+//   「増えた列が何であっても受け入れる」にすると、GASが別の列を足したとき
+//   同期は成功しているのに画面はその列を見つけられず、静かな誤表示になる。
+//   列を足すときは必ず GAS の HEADERS と同じ名前・同じ順番でここにも足すこと。
+export const OPTIONAL_HEADERS = ['拠点', '部隊'];
+
 const SIZE_LIMIT_BYTES = 1_500_000;
 
 // Workerからのfetchが無応答のまま待ち続けるとGASへフォールバックする機会を失う
@@ -137,12 +144,21 @@ export function validateGasPayload(json) {
       !EXPECTED_HEADERS.every((h, i) => json.headers[i] === h)) {
     return { ok: false, message: 'headersの先頭19列が現行と一致しません: ' + JSON.stringify(json && json.headers) };
   }
-  // ★Codexレビュー[P2]#12: 20列目が増えているなら、それは必ず「拠点」であること。
-  //   別の列が紛れ込んだまま受け入れると、同期は成功しているのに画面は拠点列を
-  //   見つけられず全件が本社扱いになる（静かな誤分類）。止めた方がよい。
-  if (json.headers.length > EXPECTED_HEADERS.length &&
-      json.headers[EXPECTED_HEADERS.length] !== '拠点') {
-    return { ok: false, message: '20列目が「拠点」ではありません: ' + JSON.stringify(json.headers.slice(EXPECTED_HEADERS.length)) };
+  // ★Codexレビュー[P2]#12: 増えた列が想定どおりのものであること。
+  //   別の列が紛れ込んだまま受け入れると、同期は成功しているのに画面はその列を
+  //   見つけられず全件が既定値扱いになる（静かな誤分類）。止めた方がよい。
+  // ★2026-08-27 フェーズ1: 20列目だけを見る形から、OPTIONAL_HEADERS の順番を
+  //   1つずつ確かめる形へ拡張した（21列目 部隊 を足すため）。
+  const extraHeaders = json.headers.slice(EXPECTED_HEADERS.length);
+  for (let i = 0; i < extraHeaders.length; i++) {
+    const want = OPTIONAL_HEADERS[i];
+    const colNo = EXPECTED_HEADERS.length + i + 1;
+    if (!want) {
+      return { ok: false, message: colNo + '列目は想定外の列です: ' + JSON.stringify(extraHeaders.slice(i)) };
+    }
+    if (extraHeaders[i] !== want) {
+      return { ok: false, message: colNo + '列目が「' + want + '」ではありません: ' + JSON.stringify(extraHeaders.slice(i)) };
+    }
   }
   if (!Array.isArray(json.rows) || !Array.isArray(json.members) ||
       !Array.isArray(json.genbaMaster) || !Array.isArray(json.jobsites)) {
@@ -164,7 +180,11 @@ export function sanitizeForStorage(json) {
     headers: json.headers,
     rows: json.rows,
     members: json.members.map(m => ({
-      name: String(m.name || ''), company: String(m.company || ''), division: String(m.division || '')
+      name: String(m.name || ''), company: String(m.company || ''), division: String(m.division || ''),
+      // ★2026-08-27 フェーズ1: 既定部隊と有効フラグ。ここに書かないと黙って消える
+      //   （rate を意図的に落としているのと同じ仕組みのため）。
+      //   activeが無い＝まだ列を足していない古いGAS応答 → 全員 有効 とみなす。
+      butai: String(m.butai || ''), active: m.active !== false
     })),
     genbaMaster: json.genbaMaster,
     jobsites: json.jobsites
