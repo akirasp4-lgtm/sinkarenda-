@@ -1791,32 +1791,74 @@ function diffDailyRows_(headers, oldRows, newRows) {
   const idIdx = headers.indexOf('ID');
   const dIdx = headers.indexOf('作業日');
   const nIdx = headers.indexOf('氏名');
+  const gIdx = headers.indexOf('元請名');
+  const lIdx = headers.indexOf('現場名');
+  const wIdx = headers.indexOf('作業区分');
+  const yIdx = headers.indexOf('夜勤');
+  const tz = Session.getScriptTimeZone();
+
+  // ★Codexレビュー[P2]#5: シートから読んだ旧行は 作業日・出勤・退勤 が Date型で、
+  //   画面から来た新行は '2026-08-28' '08:00' の文字列。素のStringで比べると
+  //   'Wed Aug 28 2026...' と '2026-08-28' になって全項目が「変わった」と判定され、
+  //   突き合わせの鍵も一致せず、毎回の編集が「全部削除＋全部追加」として記録される。
+  //   ＝履歴が使い物にならなくなる。列ごとに同じ形へ揃えてから比べる。
   const cell = function (arr, i) {
-    return String(arr && arr[i] != null ? arr[i] : '').trim();
+    const v = arr && arr[i] != null ? arr[i] : '';
+    if (v === '') return '';
+    const h = headers[i];
+    if (h === '作業日') return (v instanceof Date) ? fmtDate_(v, tz) : String(v).trim();
+    if (h === '出勤' || h === '退勤') return (v instanceof Date) ? fmtTime_(v, tz) : String(v).trim();
+    if (h === '人工') { const n = Number(v); return Number.isFinite(n) ? String(n) : String(v).trim(); }
+    return String(v).trim();
   };
 
-  // 同じ「作業日＋氏名」が複数あっても取りこぼさないよう連番を振る
-  const indexRows = function (rows) {
-    const map = {}, seen = {};
-    (rows || []).forEach(function (r) {
-      const base = cell(r, dIdx) + '|' + cell(r, nIdx);
-      seen[base] = (seen[base] || 0) + 1;
-      map[base + '#' + seen[base]] = r;
-    });
-    return map;
+  // ★Codexレビュー[P2]#4: 鍵を「作業日＋氏名＋出現順」だけにすると、
+  //   旧[A現場, 事務所] → 新[事務所] のときに
+  //   「A現場→事務所へ変更」＋「事務所を削除」と誤って記録される（実際は A現場 が消えただけ）。
+  //   かといって中身まで全部鍵に入れると、今度は「現場を変えた」が
+  //   削除＋追加になって読みにくくなる。
+  //   → 2段階で突き合わせる:
+  //      1回目 中身が同じもの同士（元請・現場・区分・昼夜が一致）を先に結ぶ
+  //      2回目 余ったもの同士を「作業日＋氏名」で順に結ぶ（＝現場を変えた等）
+  //      それでも余ったら 削除／追加
+  const keyStrong = function (r) {
+    return [cell(r, dIdx), cell(r, nIdx), cell(r, gIdx), cell(r, lIdx),
+            cell(r, wIdx), cell(r, yIdx)].join('|');
   };
-  const oldMap = indexRows(oldRows);
-  const newMap = indexRows(newRows);
+  const keyWeak = function (r) { return cell(r, dIdx) + '|' + cell(r, nIdx); };
+
+  const olds = (oldRows || []).slice();
+  const news = (newRows || []).slice();
+  const usedNew = new Array(news.length).fill(false);
+  const pairs = [];        // [oldRow, newRow]
+  const leftoverOld = [];
+
+  // 1回目: 中身が同じもの同士
+  olds.forEach(function (o) {
+    const k = keyStrong(o);
+    let hit = -1;
+    for (let i = 0; i < news.length; i++) {
+      if (!usedNew[i] && keyStrong(news[i]) === k) { hit = i; break; }
+    }
+    if (hit >= 0) { usedNew[hit] = true; pairs.push([o, news[hit]]); }
+    else leftoverOld.push(o);
+  });
+
+  // 2回目: 余ったもの同士を「作業日＋氏名」で結ぶ（現場や区分を変えた編集）
+  const stillOld = [];
+  leftoverOld.forEach(function (o) {
+    const k = keyWeak(o);
+    let hit = -1;
+    for (let i = 0; i < news.length; i++) {
+      if (!usedNew[i] && keyWeak(news[i]) === k) { hit = i; break; }
+    }
+    if (hit >= 0) { usedNew[hit] = true; pairs.push([o, news[hit]]); }
+    else stillOld.push(o);
+  });
 
   const out = [];
-  Object.keys(oldMap).forEach(function (k) {
-    const o = oldMap[k];
-    const n = newMap[k];
-    if (!n) {
-      out.push({ oldId: cell(o, idIdx), newId: '', field: '(削除)',
-                 before: rowSummary_(headers, o), after: '' });
-      return;
-    }
+  pairs.forEach(function (pr) {
+    const o = pr[0], n = pr[1];
     headers.forEach(function (h, i) {
       if (HISTORY_SKIP_FIELDS.indexOf(h) >= 0) return;
       const a = cell(o, i), b = cell(n, i);
@@ -1825,9 +1867,12 @@ function diffDailyRows_(headers, oldRows, newRows) {
       }
     });
   });
-  Object.keys(newMap).forEach(function (k) {
-    if (oldMap[k]) return;
-    const n = newMap[k];
+  stillOld.forEach(function (o) {
+    out.push({ oldId: cell(o, idIdx), newId: '', field: '(削除)',
+               before: rowSummary_(headers, o), after: '' });
+  });
+  news.forEach(function (n, i) {
+    if (usedNew[i]) return;
     out.push({ oldId: '', newId: cell(n, idIdx), field: '(追加)',
                before: '', after: rowSummary_(headers, n) });
   });
@@ -1836,10 +1881,8 @@ function diffDailyRows_(headers, oldRows, newRows) {
   //   差分ゼロで何も残さないと、そこで旧ID→新IDの鎖が切れて過去へ遡れなくなる。
   //   1件も出力が無いときだけ、対応関係だけを記録する行を残す。
   if (!out.length) {
-    Object.keys(oldMap).forEach(function (k) {
-      const o = oldMap[k], n = newMap[k];
-      if (!n) return;
-      const oid = cell(o, idIdx), nid = cell(n, idIdx);
+    pairs.forEach(function (pr) {
+      const oid = cell(pr[0], idIdx), nid = cell(pr[1], idIdx);
       if (oid && nid && oid !== nid) {
         out.push({ oldId: oid, newId: nid, field: '(ID引継ぎ)', before: oid, after: nid });
       }

@@ -21,6 +21,9 @@ const EXPORT_SNIPPET = `
   SITE_STATUSES, SITE_STATUS_DONE, normalizeSiteStatus_, isSiteStatusDone_, isCompletedCell_,
   HISTORY_SHEET, HISTORY_HEADERS, HISTORY_MAX_ROWS,
   diffDailyRows_, rowSummary_, rowFullJson_, sortHistoryRows_,
+  // ★vm の外で作った Date は中の Date と別物になり instanceof が効かない。
+  //   本番（GAS）は同一環境なので起きないが、テストでは中で作る必要がある。
+  makeDate_: function (y, m, d, h, mi) { return new Date(y, m, d, h || 0, mi || 0); },
   KNOWN_COMPANIES, fixMojibakeCompany_, mergeMemberRows_
 };`;
 
@@ -32,7 +35,22 @@ beforeAll(() => {
     SpreadsheetApp: { getActiveSpreadsheet: () => null, flush() {} },
     Session: { getScriptTimeZone: () => 'Asia/Tokyo' },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
-    Utilities: {}, ContentService: {}, PropertiesService: {},
+    Utilities: {
+      // ★fmtDate_ / fmtTime_ が使う。gas.js は起動時に tzFastOk_() でこれを試し、
+      //   期待どおりの文字列が返れば以降は素のDateメソッドで組み立てる（速い経路）。
+      //   ここを空にしておくと日付・時刻の変換が例外になり、履歴の突き合わせが壊れる。
+      formatDate: (d, tz, fmt) => {
+        const p = (n) => String(n).padStart(2, '0');
+        return String(fmt)
+          .replace('yyyy', d.getFullYear())
+          .replace('MM', p(d.getMonth() + 1))
+          .replace('dd', p(d.getDate()))
+          .replace('HH', p(d.getHours()))
+          .replace('mm', p(d.getMinutes()))
+          .replace('ss', p(d.getSeconds()));
+      }
+    },
+    ContentService: {}, PropertiesService: {},
     UrlFetchApp: {}, Logger: { log() {} }, console
   });
   vm.runInContext(code + EXPORT_SNIPPET, sandbox, { filename: 'gas.js' });
@@ -442,5 +460,92 @@ describe('データ掃除', () => {
     // 予定が0件の14人には 川端・井上・作本・児玉・杉本仁（兄）・いくや など
     // 実在の職人が多数含まれる。予定が無いことと人でないことは別の話。
     expect(ctx.looksLikeNonPerson_).toBeUndefined();
+  });
+});
+
+describe('変更履歴 突き合わせ（Codexレビュー[P2]#4#5の追試）', () => {
+  const H = () => ctx.HEADERS;
+  const mk = (over) => {
+    const base = {
+      '登録日時': '2026/08/27 10:00', '作業日': '2026-08-28', '元請名': 'きんでん西',
+      '現場名': 'A現場', '氏名': '元', '役割': '代表', '出勤': '08:00', '退勤': '17:00',
+      '人工': 1, 'メモ': '', '夜勤': '', '会社': 'グローライズ', 'ID': 'X1',
+      '更新者': '向', '色': '', '事業部': 'INF', '工番': 'INF-26-001',
+      '作業区分': '現場作業', '車両': '', '拠点': '本社', '部隊': '1部隊'
+    };
+    Object.assign(base, over || {});
+    return H().map(h => base[h]);
+  };
+
+  it('★Codexの例: 旧[A現場, 事務所] → 新[事務所] は「A現場を削除」と記録する', () => {
+    // 素朴な出現順の鍵だと「A現場→事務所へ変更」＋「事務所を削除」と誤記録された
+    const oldRows = [
+      mk({ ID: 'A1', '現場名': 'A現場', '作業区分': '現場作業' }),
+      mk({ ID: 'A2', '現場名': '事務所', '作業区分': '事務所' })
+    ];
+    const newRows = [mk({ ID: 'B2', '現場名': '事務所', '作業区分': '事務所' })];
+    const d = ctx.diffDailyRows_(H(), oldRows, newRows);
+    const del = d.filter(x => x.field === '(削除)');
+    expect(del.length).toBe(1);
+    expect(del[0].oldId).toBe('A1');            // ★消えたのは A現場
+    expect(d.find(x => x.field === '現場名')).toBeUndefined();
+  });
+
+  it('★先頭に人が増えても、既存の行が「変更」に化けない', () => {
+    const oldRows = [mk({ ID: 'A1', '氏名': '元' })];
+    const newRows = [mk({ ID: 'B0', '氏名': '中島' }), mk({ ID: 'B1', '氏名': '元' })];
+    const d = ctx.diffDailyRows_(H(), oldRows, newRows);
+    const add = d.filter(x => x.field === '(追加)');
+    expect(add.length).toBe(1);
+    expect(add[0].newId).toBe('B0');
+    expect(d.filter(x => x.field === '(削除)').length).toBe(0);
+  });
+
+  it('並び順が入れ替わっただけなら何も記録しない（ID引継ぎだけ）', () => {
+    const a = mk({ ID: 'A1', '氏名': '元' });
+    const b = mk({ ID: 'A2', '氏名': '中島' });
+    const a2 = mk({ ID: 'B1', '氏名': '元' });
+    const b2 = mk({ ID: 'B2', '氏名': '中島' });
+    const d = ctx.diffDailyRows_(H(), [a, b], [b2, a2]);
+    expect(d.filter(x => x.field === '(削除)').length).toBe(0);
+    expect(d.filter(x => x.field === '(追加)').length).toBe(0);
+  });
+
+  it('現場を変えた編集は「現場名 A現場 → B現場」と読める形で残る', () => {
+    const d = ctx.diffDailyRows_(H(), [mk({ ID: 'A1', '現場名': 'A現場' })],
+      [mk({ ID: 'B1', '現場名': 'B現場' })]);
+    const k = d.find(x => x.field === '現場名');
+    expect(k).toBeTruthy();
+    expect(k.before).toBe('A現場');
+    expect(k.after).toBe('B現場');
+  });
+
+  it('★シートのDate値と画面の文字列を同じものとして扱う（履歴が全滅しない）', () => {
+    // 旧行はシートから読むので Date、新行は画面由来なので文字列になる
+    const oldRow = mk({ ID: 'A1' });
+    oldRow[H().indexOf('作業日')] = ctx.makeDate_(2026, 7, 28);      // 2026-08-28
+    oldRow[H().indexOf('出勤')] = ctx.makeDate_(1899, 11, 30, 8, 0);
+    oldRow[H().indexOf('退勤')] = ctx.makeDate_(1899, 11, 30, 17, 0);
+    const newRow = mk({ ID: 'B1' });                             // 文字列のまま
+    const d = ctx.diffDailyRows_(H(), [oldRow], [newRow]);
+    // 中身は同じなので「変わった項目」は出ず、ID引継ぎだけが残るはず
+    expect(d.filter(x => x.field === '作業日').length).toBe(0);
+    expect(d.filter(x => x.field === '出勤').length).toBe(0);
+    expect(d.filter(x => x.field === '(削除)').length).toBe(0);
+    expect(d.filter(x => x.field === '(追加)').length).toBe(0);
+  });
+
+  it('人工の 1 と "1" と 1.0 を同じ値として扱う', () => {
+    const o = mk({ ID: 'A1', '人工': 1 });
+    const n = mk({ ID: 'A1', '人工': '1.0' });
+    expect(ctx.diffDailyRows_(H(), [o], [n]).filter(x => x.field === '人工').length).toBe(0);
+  });
+
+  it('人工が本当に変わったときは記録する', () => {
+    const o = mk({ ID: 'A1', '人工': 1 });
+    const n = mk({ ID: 'B1', '人工': 0.5 });
+    const k = ctx.diffDailyRows_(H(), [o], [n]).find(x => x.field === '人工');
+    expect(k.before).toBe('1');
+    expect(k.after).toBe('0.5');
   });
 });

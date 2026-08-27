@@ -63,7 +63,22 @@ function makeContext(sheets) {
     SpreadsheetApp: { getActiveSpreadsheet: () => ss, flush() {} },
     Session: { getScriptTimeZone: () => 'Asia/Tokyo' },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
-    Utilities: {}, ContentService: {}, PropertiesService: {},
+    Utilities: {
+      // ★fmtDate_ / fmtTime_ が使う。gas.js は起動時に tzFastOk_() でこれを試し、
+      //   期待どおりの文字列が返れば以降は素のDateメソッドで組み立てる（速い経路）。
+      //   ここを空にしておくと日付・時刻の変換が例外になり、履歴の突き合わせが壊れる。
+      formatDate: (d, tz, fmt) => {
+        const p = (n) => String(n).padStart(2, '0');
+        return String(fmt)
+          .replace('yyyy', d.getFullYear())
+          .replace('MM', p(d.getMonth() + 1))
+          .replace('dd', p(d.getDate()))
+          .replace('HH', p(d.getHours()))
+          .replace('mm', p(d.getMinutes()))
+          .replace('ss', p(d.getSeconds()));
+      }
+    },
+    ContentService: {}, PropertiesService: {},
     UrlFetchApp: {}, Logger: { log() {} }, console
   });
   vm.runInContext(CODE + EXPORT, sandbox, { filename: 'gas.js' });
