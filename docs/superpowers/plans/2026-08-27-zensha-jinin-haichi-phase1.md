@@ -45,43 +45,57 @@ GASより先にここを緩める。この時点ではGASがまだ20列なので
 
 - [ ] **Step 1: 失敗するテストを書く**
 
-`cf/test/sync.test.js` の末尾に追記。ファイル先頭の import に `OPTIONAL_HEADERS` を足すこと。
+`cf/test/sync.test.js` の末尾に追記。
+
+⚠️ **★Codexレビュー[P3]#9: 実物の名前に合わせること。**
+検査関数は `validate` ではなく **`validateGasPayload`**（`cf/src/sync.js:125`）。
+テストファイル側は `EXPECTED_HEADERS` を import しておらず、
+**自前の `HEADERS` という19列の定数**を先頭で定義している（`cf/test/sync.test.js:4`）。
+間違えると意図した「21列で失敗」ではなく `ReferenceError` になり、
+テストが通ったつもりで実装へ進んでしまう。
+
+ファイル先頭の import に `OPTIONAL_HEADERS` を足す:
+
+```js
+import { validateGasPayload, sanitizeForStorage, fetchWithRetry, syncAll, OPTIONAL_HEADERS } from '../src/sync.js';
+```
 
 ```js
 describe('21列目 部隊（フェーズ1）', () => {
-  const H20 = [...EXPECTED_HEADERS, '拠点'];
-  const H21 = [...EXPECTED_HEADERS, '拠点', '部隊'];
+  const H19 = HEADERS;                    // テストファイル冒頭の自前定数（19列）
+  const H20 = [...H19, '拠点'];
+  const H21 = [...H19, '拠点', '部隊'];
   const base = (headers) => ({
     status: 'ok', compact: 1, headers,
     rows: [], members: [], genbaMaster: [], jobsites: []
   });
 
   it('21列（拠点＋部隊）を受け入れる', () => {
-    expect(validate(base(H21)).ok).toBe(true);
+    expect(validateGasPayload(base(H21)).ok).toBe(true);
   });
 
   it('20列（拠点のみ・移行中）も受け入れる', () => {
-    expect(validate(base(H20)).ok).toBe(true);
+    expect(validateGasPayload(base(H20)).ok).toBe(true);
   });
 
   it('19列ちょうど（さらに古い）も受け入れる', () => {
-    expect(validate(base([...EXPECTED_HEADERS])).ok).toBe(true);
+    expect(validateGasPayload(base([...H19])).ok).toBe(true);
   });
 
   it('20列目が拠点でなければ拒否する', () => {
-    const r = validate(base([...EXPECTED_HEADERS, '部隊']));
+    const r = validateGasPayload(base([...H19, '部隊']));
     expect(r.ok).toBe(false);
     expect(r.message).toContain('20列目');
   });
 
   it('21列目が部隊でなければ拒否する', () => {
-    const r = validate(base([...EXPECTED_HEADERS, '拠点', '班']));
+    const r = validateGasPayload(base([...H19, '拠点', '班']));
     expect(r.ok).toBe(false);
     expect(r.message).toContain('21列目');
   });
 
   it('22列目以降は想定外として拒否する', () => {
-    expect(validate(base([...H21, '何か'])).ok).toBe(false);
+    expect(validateGasPayload(base([...H21, '何か'])).ok).toBe(false);
   });
 
   it('OPTIONAL_HEADERSの順番は拠点→部隊', () => {
@@ -239,7 +253,7 @@ const EXPORT_SNIPPET = `
   normalizeButai_, resolveButai_, normalizeMemberActive_,
   normalizeSiteStatus_, isSiteStatusDone_,
   diffDailyRows_, rowSummary_, sortHistoryRows_, historyTimeValue_,
-  fixMojibakeCompany_, looksLikeNonPerson_
+  fixMojibakeCompany_, mergeMemberRows_
 };`;
 
 let ctx;   // ctx.__gas から取り出す
@@ -882,6 +896,8 @@ function diffDailyRows_(headers, oldRows, newRows) {
   };
   const oldMap = indexRows(oldRows);
   const newMap = indexRows(newRows);
+  // ※ oldRows はシートを下から上へ走査して積むため画面の順と逆になる。
+  //    呼び出す前に必ず reverse() して渡すこと（★Codexレビュー[P2]#5）。
 
   const out = [];
   Object.keys(oldMap).forEach(k => {
@@ -906,46 +922,124 @@ function diffDailyRows_(headers, oldRows, newRows) {
     out.push({ oldId: '', newId: cell(n, idIdx), field: '(追加)',
                before: '', after: rowSummary_(headers, n) });
   });
+
+  // ★Codexレビュー[P2]#5: 業務項目に差が無くてもIDは編集のたびに必ず変わる。
+  //   差分ゼロで何も残さないと、そこで旧ID→新IDの鎖が切れて過去へ遡れなくなる。
+  //   1件も出力が無いときだけ、対応関係だけを記録する行を残す。
+  if (!out.length) {
+    Object.keys(oldMap).forEach(k => {
+      const o = oldMap[k], n = newMap[k];
+      if (!n) return;
+      const oid = cell(o, idIdx), nid = cell(n, idIdx);
+      if (oid && nid && oid !== nid) {
+        out.push({ oldId: oid, newId: nid, field: '(ID引継ぎ)', before: oid, after: nid });
+      }
+    });
+  }
   return out;
 }
 
 // 履歴をまとめて1回で書く（appendRowを繰り返すとGASが遅くなるため）
+//
+// ★Codexレビュー[P1]#2: ここで例外を握りつぶしてはいけない。
+//   握りつぶすと「履歴が書けなかったのに旧予定は消えた」＝
+//   元の予定を永久に復元できない状態が、成功応答のまま起きる。
+//   呼び出し側は、この関数が成功したことを確認してから原本を消すこと。
+//   SpreadsheetApp.flush() まで通して初めて「書けた」と言える。
 function logHistory_(ss, action, entries, user) {
-  try {
-    if (!entries || !entries.length) return;
-    const sheet = getOrCreateHistorySheet_(ss);
-    const now = new Date().toLocaleString('ja-JP');
-    const values = entries.map(e => [
-      now, action, e.oldId || '', e.newId || '', e.field || '',
-      e.before == null ? '' : e.before, e.after == null ? '' : e.after, user || ''
-    ]);
-    sheet.getRange(sheet.getLastRow() + 1, 1, values.length, HISTORY_HEADERS.length)
-         .setValues(values);
-  } catch (e) {}
+  if (!entries || !entries.length) return 0;
+  const sheet = getOrCreateHistorySheet_(ss);
+  const now = new Date().toLocaleString('ja-JP');
+  const values = entries.map(e => [
+    now, action, e.oldId || '', e.newId || '', e.field || '',
+    e.before == null ? '' : e.before, e.after == null ? '' : e.after, user || ''
+  ]);
+  sheet.getRange(sheet.getLastRow() + 1, 1, values.length, HISTORY_HEADERS.length)
+       .setValues(values);
+  SpreadsheetApp.flush();     // 実際に書き終わるまで待つ
+  return values.length;
+}
+
+// ★Codexレビュー[P1]#3: 削除は「全項目」を残さないと復元できない。
+//   要約（作業日・氏名・現場・区分）だけでは、役割・出退勤・人工・メモ・夜勤・
+//   会社・事業部・工番・車両・拠点・部隊が失われる。
+//   バックアップ後に登録された予定を消したら、二度と戻せない。
+function rowFullJson_(headers, arr) {
+  const o = {};
+  headers.forEach((h, i) => {
+    const v = arr && arr[i];
+    o[h] = (v == null) ? '' : String(v);
+  });
+  return JSON.stringify(o);
 }
 ```
 
 `gas.js` の `add` アクション（`logOperation_(ss, 'add', ...)` の行の**直前**）に追加:
 
 ```js
-      logHistory_(ss, 'add', values.map(v => ({
-        oldId: '', newId: String(v[HEADERS.indexOf('ID')] || ''), field: '(新規)',
-        before: '', after: rowSummary_(HEADERS, v)
-      })), updatedBy);
+      // addだけは握りつぶす。履歴が書けなくても原本の予定は正しく保存されており
+      // 失うものが無い。ここでエラーにすると履歴シートの不調で新規登録が全部止まる。
+      try {
+        logHistory_(ss, 'add', values.map(v => ({
+          oldId: '', newId: String(v[idCol] || ''), field: '(新規)',
+          before: '', after: rowSummary_(HEADERS, v)
+        })), updatedBy);
+      } catch (e) {}
 ```
 
-`gas.js` の `delete` アクション（行を消す前に古い値を拾う）。
-`rowsToDelete` を作っているループの中で古い行も控えるよう修正し、
-`logOperation_(ss, 'delete', ...)` の直前に追加:
+`gas.js:586-598` の `delete` アクションを差し替える。
+
+**★Codexレビュー[P1]#2#3**: 削除も「履歴を書いてから消す」。
+さらに `変更前` には**21列すべてをJSONで**残す。要約だけでは復元できない。
 
 ```js
-      logHistory_(ss, 'delete', deletedRows.map(r => ({
-        oldId: String(r[HEADERS.indexOf('ID')] || ''), newId: '', field: '(削除)',
-        before: rowSummary_(HEADERS, r), after: ''
-      })), updatedBy);
+    if (action === 'delete') {
+      const ids = body.ids || [];
+      if (ids.length === 0) return ok({deleted: 0});
+      const data = sheet.getDataRange().getValues();
+      const rowsToDelete = [];
+      const deletedRows = [];                   // ★2026-08-27 消す前に中身を控える
+      for (let i = data.length - 1; i >= 1; i--) {
+        const rowId = String(data[i][idCol] || '').trim();
+        if (rowId && ids.includes(rowId)) {
+          rowsToDelete.push(i + 1);
+          deletedRows.push(data[i]);
+        }
+      }
+
+      // ★1) 先に履歴を書く。失敗したら1行も消さずにエラーで返す。
+      try {
+        logHistory_(ss, 'delete', deletedRows.slice().reverse().map(r => ({
+          oldId: String(r[idCol] || ''), newId: '', field: '(削除)',
+          // 全項目をJSONで残す＝ここから元の予定をそのまま作り直せる
+          before: rowFullJson_(HEADERS, r), after: ''
+        })), updatedBy);
+      } catch (e) {
+        return error('変更履歴を記録できなかったため、削除を中止しました（予定はそのまま残っています）: ' + e);
+      }
+
+      // ★2) 履歴が残ってから消す
+      rowsToDelete.forEach(rowNum => sheet.deleteRow(rowNum));
+      logOperation_(ss, 'delete', 'IDs=' + ids.length + '件', '削除行=' + rowsToDelete.length, updatedBy);
+      return ok({deleted: rowsToDelete.length, requested: ids.length});
+    }
 ```
 
+⚠️ **`add` は握りつぶしたままでよい**（何も壊れないため）。
+新規登録で履歴が書けなくても、原本の予定は正しく保存されており失うものが無い。
+逆にここでエラーにすると、履歴シートの不調だけで**新規登録が全部止まる**。
+`add` だけは `try { logHistory_(...) } catch (e) {}` で囲む。
+
 `gas.js:601-617` の `update` アクションを差し替える:
+
+**★Codexレビュー[P1]#2: 順番が命。**
+元の計画は「新行を足す → 旧行を消す → 履歴を書く」だった。
+履歴の書き込みが失敗すると **旧予定は既に消えているのに成功応答**になり、
+依頼⑦の「元の予定も確認できる」が保証できない。
+
+正しい順番は **「値を作る → 履歴を書く（flushまで確認）→ 新行を足す → 旧行を消す」**。
+IDは画面が作って送ってくるので、行を足す前に新IDが分かる＝先に履歴を書ける。
+履歴で例外が出れば **原本は1行も動いていない**状態で止まる。
 
 ```js
     if (action === 'update') {
@@ -964,11 +1058,19 @@ function logHistory_(ss, action, entries, user) {
         }
       }
       const values = buildDailyValues_(ss, rows, updatedBy);
-      // 新しい予定を先に一括保存する。保存に失敗しても元予定は残る。
+
+      // ★1) 先に履歴を書く。ここで失敗したら原本は1行も動かさずにエラーで返す。
+      //    oldRowsは下から積んでいるので reverse して画面の順に戻す（[P2]#5）。
+      try {
+        logHistory_(ss, 'update', diffDailyRows_(HEADERS, oldRows.slice().reverse(), values), updatedBy);
+      } catch (e) {
+        return error('変更履歴を記録できなかったため、保存を中止しました（元の予定はそのまま残っています）: ' + e);
+      }
+
+      // ★2) 履歴が残ってから原本を触る
       appendDailyValues_(sheet, values);
       rowsToDelete.forEach(rowNum => sheet.deleteRow(rowNum));
-      // ★2026-08-27 フェーズ1: 何が何に変わったかを残す（依頼⑦）
-      logHistory_(ss, 'update', diffDailyRows_(HEADERS, oldRows, values), updatedBy);
+
       logOperation_(ss, 'update', rows[0].genba + '/' + (rows[0].loc || ''), '行数=' + rows.length + ', 旧ID=' + ids.length, updatedBy);
       return ok({updated: rows.length});
     }
@@ -991,24 +1093,48 @@ git commit -m "feat(gas): 変更履歴シート（変更前の値と旧ID→新I
 
 ---
 
-### Task 5: GAS — データ掃除の関数（Apps Scriptから手で1回だけ実行する）
+### Task 5: GAS — データ掃除（★必ず dry-run を先に出し、推測で書き換えない）
 
 設計書 §3.6。**壊れたデータを直す。行数は変えない。**
+
+**★Codexレビュー[P1]#4 で当初案を全面的に作り直した。** 当初案には2つの重大な誤りがあった:
+
+1. **重複を「先勝ちで捨てる」実装だった** — 2行目以降の 事業部・**単価**・既定部隊を
+   比較せず破棄していた。**単価は給料の元数字**であり、2行目に正しい値が入っていたら失われる。
+   「統合」と書いておきながら実際は削除だった。
+2. **`/応援/` という正規表現で「人でない枠」を推測していた** — これは**間違い**。
+   予定が0件の14人を実データで確認したところ、`川端` `井上` `作本` `児玉` `杉本仁（兄）`
+   `いくや` など**実在の人が多数含まれる**。予定が無いことと人でないことは別の話であり、
+   推測で無効化すると**実在の職人が空き人員リストから消える**。
+
+**新しい方針: 掃除は「機械が確実に判断できること」だけやる。人の判断が要るものは一覧を出すだけ。**
+
+| 対象 | 機械がやる | 人が決める |
+|---|---|---|
+| 会社名の文字化け（1件） | ✅ 直す（既知の会社名と一意に決まるため確実） | — |
+| 職人マスタの氏名重複（9件） | ✅ 非空の値だけを寄せて統合。**値が食い違ったら中止して一覧を出す** | 食い違った場合のみ |
+| 予定に出るがマスタに無い（1件） | ✅ 追加（`有効=○`） | — |
+| 「人でない枠」の無効化（14件候補） | ❌ **やらない**。候補一覧を出すだけ | ✅ Task 6B の画面で1件ずつ |
+| 既存2,664行への部隊の流し込み | ❌ **やらない**（Task 5B 参照） | ✅ 割当表を決めてから別途 |
 
 **Files:**
 - Modify: `gas.js`（末尾に追加）
 - Test: `cf/test/gas-phase1.test.js`（追記）
 
 **Interfaces:**
-- Produces: `cleanupMastersPhase1()`（Apps Scriptのエディタから手で実行する。引数なし）
+- Produces: `cleanupMastersPhase1(apply)` — 引数なし/`false` で **dry-run**（何も書かない）、
+  `true` で実行。Apps Scriptのエディタから手で実行する
 - Produces: `fixMojibakeCompany_(v) -> string`
+- Produces: `mergeMemberRows_(rows) -> {merged, conflicts}`
 
 - [ ] **Step 1: 失敗するテストを書く**
 
 ```js
 describe('データ掃除', () => {
+  const MOJI = '�';   // 文字化けを表す記号
+
   it('文字化けした会社名を直す', () => {
-    expect(ctx.fixMojibakeCompany_('グロ�ライズ')).toBe('グローライズ');
+    expect(ctx.fixMojibakeCompany_('グロ' + MOJI + 'ライズ')).toBe('グローライズ');
     expect(ctx.fixMojibakeCompany_('グロ?ライズ')).toBe('グローライズ');
   });
 
@@ -1022,11 +1148,43 @@ describe('データ掃除', () => {
     expect(ctx.fixMojibakeCompany_('')).toBe('');
   });
 
-  it('★人でない枠を見分けられる（空き人員リストから外すため）', () => {
-    ['応援3','デモ','管理','グローライズ応援1','馬場（応援）'].forEach(n =>
-      expect(ctx.looksLikeNonPerson_(n)).toBe(true));
-    ['元','中島','河原','杉本凌（弟）','川端（達）'].forEach(n =>
-      expect(ctx.looksLikeNonPerson_(n)).toBe(false));
+  it('化け方が曖昧でどの会社か決まらないときは触らない', () => {
+    const v = MOJI.repeat(5);
+    expect(ctx.fixMojibakeCompany_(v)).toBe(v);
+  });
+
+  it('★重複行は非空の値を寄せて統合する（先勝ちで捨てない）', () => {
+    const r = ctx.mergeMemberRows_([
+      ['元','グローライズ','',0,'',''],
+      ['元','グローライズ','INF',25000,'2部隊','']
+    ]);
+    expect(r.conflicts.length).toBe(0);
+    expect(r.merged.length).toBe(1);
+    expect(r.merged[0][2]).toBe('INF');
+    expect(r.merged[0][3]).toBe(25000);      // ★単価を失わない
+    expect(r.merged[0][4]).toBe('2部隊');
+  });
+
+  it('★値が食い違ったら統合せず conflicts に出す（勝手に決めない）', () => {
+    const r = ctx.mergeMemberRows_([
+      ['元','グローライズ','INF',25000,'',''],
+      ['元','グローライズ','ICT',30000,'','']
+    ]);
+    expect(r.conflicts.length).toBeGreaterThan(0);
+    expect(r.conflicts[0].name).toBe('元');
+  });
+
+  it('会社が違えば別人として扱う（同姓の別会社を潰さない）', () => {
+    const r = ctx.mergeMemberRows_([
+      ['元','グローライズ','INF',25000,'',''],
+      ['元','和信カインド','',0,'','']
+    ]);
+    expect(r.merged.length).toBe(2);
+    expect(r.conflicts.length).toBe(0);
+  });
+
+  it('★「人でない枠」を機械で判定する関数は存在しない（推測しない設計）', () => {
+    expect(ctx.looksLikeNonPerson_).toBeUndefined();
   });
 });
 ```
@@ -1046,8 +1204,10 @@ cd cf && npx vitest run test/gas-phase1.test.js
 ```js
 // ★2026-08-27 フェーズ1: データ掃除
 //   本番実データで見つかった汚れ（設計書 §1.3）を直す。行数は変えない。
+//   ★方針: 機械が確実に判断できることだけ直す。人の判断が要るものは一覧を出すだけ。
 
 const KNOWN_COMPANIES = ['グローライズ', '和信カインド', 'GRミツマ', 'GRHD', 'ラーテル'];
+const MOJIBAKE_RE = /[�?]/;
 
 // 文字化けした会社名を、既知の会社名のどれかに寄せる。
 // 判定は「化けていない文字だけで一意に決まるか」。決まらなければ触らない。
@@ -1055,106 +1215,149 @@ function fixMojibakeCompany_(v) {
   const s = String(v == null ? '' : v).trim();
   if (!s) return s;
   if (KNOWN_COMPANIES.indexOf(s) >= 0) return s;
-  if (!/[�?]/.test(s)) return s;               // 化けていないなら触らない
-  const pattern = new RegExp('^' + s.split('').map(ch =>
-    /[�?]/.test(ch) ? '.' : ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  ).join('') + '$');
-  const hits = KNOWN_COMPANIES.filter(c => c.length === s.length && pattern.test(c));
-  return hits.length === 1 ? hits[0] : s;           // 1つに決まるときだけ直す
-}
-
-// 「人ではない枠」らしさ。空き人員リストに出すと邪魔になるもの。
-function looksLikeNonPerson_(name) {
-  const s = String(name == null ? '' : name).trim();
-  if (!s) return true;
-  if (/応援/.test(s)) return true;
-  return ['デモ', '管理', 'テスト', '未定'].indexOf(s) >= 0;
+  if (!MOJIBAKE_RE.test(s)) return s;              // 化けていないなら触らない
+  const pattern = new RegExp('^' + s.split('').map(function (ch) {
+    return MOJIBAKE_RE.test(ch) ? '.' : ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }).join('') + '$');
+  const hits = KNOWN_COMPANIES.filter(function (c) {
+    return c.length === s.length && pattern.test(c);
+  });
+  return hits.length === 1 ? hits[0] : s;          // 1つに決まるときだけ直す
 }
 
 /**
- * Apps Scriptのエディタから手で1回だけ実行する。
- * ① 職人マスタの氏名重複をまとめる
- * ② 人でない枠に 有効=× を立てる（削除はしない。過去データが参照している）
- * ③ 予定に出るのにマスタに無い人を追加する
- * ④ 日報データの文字化けした会社名を直す
+ * 職人マスタの重複行を統合する。
+ * ★Codexレビュー[P1]#4: 先勝ちで捨てず、非空の値だけを寄せる。
+ *   同じ項目に違う値が入っていたら統合せず conflicts に出して人の判断に回す
+ *   （特に単価は給料の元数字なので機械が選んではいけない）。
+ * 鍵は (会社, 氏名)。会社が違えば別人。
+ * 戻り値: {merged: [[6列], ...], conflicts: [{name, company, field, values}]}
+ */
+function mergeMemberRows_(rows) {
+  const MERGE_FIELDS = [2, 3, 4, 5];               // 事業部 / 単価 / 既定部隊 / 有効
+  const FIELD_NAMES = { 2: '事業部', 3: '単価', 4: '既定部隊', 5: '有効' };
+  const order = [];
+  const byKey = {};
+  const conflicts = [];
+  const isEmpty = function (v, i) {
+    if (v == null || String(v).trim() === '') return true;
+    return i === 3 && Number(v) === 0;             // 単価0は「未設定」とみなす
+  };
+
+  (rows || []).forEach(function (r) {
+    const name = String(r[0] == null ? '' : r[0]).trim();
+    if (!name) return;
+    const company = String(r[1] == null ? '' : r[1]).trim();
+    const key = company + '|' + name;
+    if (!byKey[key]) {
+      byKey[key] = [name, company, r[2], r[3], r[4], r[5]];
+      order.push(key);
+      return;
+    }
+    const cur = byKey[key];
+    MERGE_FIELDS.forEach(function (i) {
+      const a = cur[i], b = r[i];
+      if (isEmpty(b, i)) return;                   // 足す値が空なら何もしない
+      if (isEmpty(a, i)) { cur[i] = b; return; }   // 今が空なら埋める
+      if (String(a).trim() !== String(b).trim()) { // 両方に値があって食い違う
+        conflicts.push({ name: name, company: company, field: FIELD_NAMES[i],
+                         values: [String(a), String(b)] });
+      }
+    });
+  });
+  return { merged: order.map(function (k) { return byKey[k]; }), conflicts: conflicts };
+}
+
+/**
+ * Apps Scriptのエディタから手で実行する。
+ *   cleanupMastersPhase1()      … dry-run。何も書かずに結果だけログに出す
+ *   cleanupMastersPhase1(true)  … 実行
+ *
+ * (1) 職人マスタの重複を統合（食い違いがあれば中止）
+ * (2) 予定に出るのにマスタに無い人を (会社,氏名) で判定して追加
+ * (3) 日報データの文字化けした会社名を直す
+ * (4) 「予定が0件の人」の一覧を出す（★無効化はしない。人がTask 6Bの画面で決める）
  * 行数は1行も増減しない。
  */
-function cleanupMastersPhase1() {
+function cleanupMastersPhase1(apply) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) throw new Error('他の処理が動いています。少し待ってからもう一度実行してください。');
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const report = { 重複統合: 0, 無効化: 0, 追加: 0, 会社名修正: 0 };
+    const report = { dryRun: !apply, 重複統合: 0, 追加: 0, 会社名修正: 0,
+                     食い違い: [], 予定0件の候補: [] };
 
-    // ── ① ② 職人マスタ
-    const mSheet = getOrCreateMemberSheet_(ss);
+    // (1) 重複の統合
+    const mSheet = getOrCreateMemberSheet_(ss);          // ここで6列に拡張される
     const mData = mSheet.getDataRange().getValues();
-    const seen = {};
-    const keep = [];
-    for (let i = 1; i < mData.length; i++) {
-      const name = String(mData[i][0] || '').trim();
-      if (!name) continue;
-      const key = name + '|' + String(mData[i][1] || '').trim();
-      if (seen[key]) { report.重複統合++; continue; }
-      seen[key] = true;
-      const row = mData[i].slice(0, 6);
-      row[0] = name;
-      if (String(row[5] || '').trim() === '') {
-        const active = looksLikeNonPerson_(name) ? '×' : '○';
-        if (active === '×') report.無効化++;
-        row[5] = active;
-      }
-      keep.push(row);
+    const body = mData.slice(1).map(function (r) { return r.slice(0, 6); });
+    const beforeCount = body.filter(function (r) { return String(r[0] || '').trim(); }).length;
+    const m = mergeMemberRows_(body);
+    report.重複統合 = beforeCount - m.merged.length;
+    report.食い違い = m.conflicts;
+    if (m.conflicts.length) {
+      // ★勝手に決めない。人が直してからもう一度実行してもらう。
+      Logger.log('中止: 値が食い違う重複があります\n' + JSON.stringify(m.conflicts, null, 2));
+      return report;
     }
 
-    // ── ③ 予定に出るのにマスタに無い人
+    // (2) 予定に出るのにマスタに無い人（★会社も見る）
     const nSheet = ss.getSheetByName(SHEET_NAME);
     const nData = nSheet.getDataRange().getValues();
     const nameIdx = HEADERS.indexOf('氏名');
     const compIdx = HEADERS.indexOf('会社');
+    const keep = m.merged.slice();
     const known = {};
-    keep.forEach(r => { known[String(r[0]).trim()] = true; });
-    const added = {};
+    keep.forEach(function (r) { known[String(r[1]).trim() + '|' + String(r[0]).trim()] = true; });
+    const seenInNippo = {};
     for (let i = 1; i < nData.length; i++) {
       const nm = String(nData[i][nameIdx] || '').trim();
-      if (!nm || known[nm] || added[nm]) continue;
-      added[nm] = true;
-      keep.push([nm, String(nData[i][compIdx] || '').trim(), '', 0, '',
-                 looksLikeNonPerson_(nm) ? '×' : '○']);
+      if (!nm) continue;
+      const co = fixMojibakeCompany_(nData[i][compIdx]);
+      seenInNippo[nm] = true;
+      const key = co + '|' + nm;
+      if (known[key]) continue;
+      known[key] = true;
+      keep.push([nm, co, '', 0, '', '○']);            // ★既定は必ず有効
       report.追加++;
     }
 
-    // 職人マスタを書き戻す。
-    // ★順番が重要: 「先に消してから書く」にしてはいけない。
-    //   消した直後に実行時間の上限や通信エラーで落ちると、職人マスタが空のまま残る
-    //   （＝全画面から職人が消える）。先に上書きし、余った行だけを後から消す。
+    // (4) 「予定が0件」の候補を出すだけ（無効化はしない）
+    keep.forEach(function (r) {
+      if (!seenInNippo[String(r[0]).trim()]) {
+        report.予定0件の候補.push(String(r[0]).trim() + '（' + String(r[1]).trim() + '）');
+      }
+    });
+
+    // (3) 日報データの会社名の文字化け
+    let changed = 0;
+    const col = [];
+    for (let i = 1; i < nData.length; i++) {
+      const raw = String(nData[i][compIdx] == null ? '' : nData[i][compIdx]);
+      const fixed = fixMojibakeCompany_(raw);
+      if (fixed !== raw.trim()) changed++;
+      col.push([fixed]);
+    }
+    report.会社名修正 = changed;
+
+    if (!apply) {
+      Logger.log('【dry-run】書き込みはしていません\n' + JSON.stringify(report, null, 2));
+      return report;
+    }
+
+    // 書き込み（★上書き→余りを消す順。逆にすると途中で落ちたとき空になる）
     const oldLastRow = mSheet.getLastRow();
-    if (keep.length) {
-      mSheet.getRange(2, 1, keep.length, 6).setValues(keep);
+    if (keep.length) mSheet.getRange(2, 1, keep.length, 6).setValues(keep);
+    const extraRows = oldLastRow - 1 - keep.length;
+    if (extraRows > 0) mSheet.getRange(2 + keep.length, 1, extraRows, 6).clearContent();
+    if (changed > 0 && col.length) {
+      nSheet.getRange(2, compIdx + 1, col.length, 1).setValues(col);
     }
-    const extraRows = oldLastRow - 1 - keep.length;   // 統合で減った分だけ末尾に余りが出る
-    if (extraRows > 0) {
-      mSheet.getRange(2 + keep.length, 1, extraRows, 6).clearContent();
-    }
+    SpreadsheetApp.flush();
 
-    // ── ④ 日報データの会社名の文字化け（列ごとに1回のsetValuesで書く）
-    if (compIdx >= 0 && nData.length > 1) {
-      const col = [];
-      let changed = 0;
-      for (let i = 1; i < nData.length; i++) {
-        const before = String(nData[i][compIdx] == null ? '' : nData[i][compIdx]);
-        const after = fixMojibakeCompany_(before);
-        if (after !== before.trim()) changed++;
-        col.push([after]);
-      }
-      if (changed > 0) {
-        nSheet.getRange(2, compIdx + 1, col.length, 1).setValues(col);
-        report.会社名修正 = changed;
-      }
-    }
-
-    logOperation_(ss, 'cleanup_masters_phase1', '職人マスタ/日報データ', JSON.stringify(report), 'system');
-    Logger.log(JSON.stringify(report));
+    logOperation_(ss, 'cleanup_masters_phase1', '職人マスタ/日報データ',
+      JSON.stringify({ 重複統合: report.重複統合, 追加: report.追加, 会社名修正: report.会社名修正 }), 'system');
+    Logger.log(JSON.stringify(report, null, 2));
     return report;
   } finally {
     lock.releaseLock();
@@ -1162,20 +1365,65 @@ function cleanupMastersPhase1() {
 }
 ```
 
+`EXPORT_SNIPPET` の `fixMojibakeCompany_, looksLikeNonPerson_` を
+`fixMojibakeCompany_, mergeMemberRows_` に差し替える（`looksLikeNonPerson_` は作らない）。
+
 - [ ] **Step 4: テストを実行して通ることを確認する**
 
 ```bash
 cd cf && npx vitest run
 ```
 
-想定: 全件 PASS（＋新規4）。
-
 - [ ] **Step 5: コミット**
 
 ```bash
 git add gas.js cf/test/gas-phase1.test.js
-git commit -m "feat(gas): データ掃除（氏名重複・人でない枠・マスタ漏れ・会社名の文字化け）"
+git commit -m "feat(gas): データ掃除（dry-run必須・重複は値を寄せて統合・推測で無効化しない）"
 ```
+
+---
+
+### Task 5B: 部隊の割り当ては「作らない」— ★利用者が決めるまで空のままにする
+
+**★Codexレビュー[P2]#6 で判明した、設計書の穴。**
+
+設計書 §5 の手順3に「既定部隊の流し込み」と書いたが、**流し込む中身が存在しない。**
+誰が1部隊で誰が2部隊なのかは、**社長・利用者しか知らない情報**であり、
+コードからも実データからも導けない。
+
+**推測して埋めてはいけない理由**:
+- 間違った部隊が2,664行に書き込まれると、正しい割当が決まったあと
+  「どれが推測でどれが本物か」を区別できなくなる
+- 拠点のときは「GRミツマ＝関東支店」という**運用実態と一致する明確な根拠**があったが、
+  部隊にはそれが無い
+
+**したがってフェーズ1では:**
+
+| | やること |
+|---|---|
+| 部隊の仕組み | ✅ 作る（21列目・入力欄・表示・既定部隊の自動補完） |
+| 既定部隊の中身 | ❌ **空のまま出す。** Task 6B の画面で利用者が1人ずつ設定する |
+| 既存2,664行の部隊 | ❌ **空のまま。** 割当表が決まってから別途バックフィルする |
+
+- [ ] **Step 1: 設計書の §5 手順3 から「既定部隊の流し込み」を削る**
+
+`docs/superpowers/specs/2026-08-27-zensha-jinin-haichi-design.md` の
+反映の順番の表を、実態に合わせて直す（掃除だけにする）。
+
+- [ ] **Step 2: リリース確認の文言を直す**
+
+Task 10 Step 11 の「責任者を選ぶと部隊が自動で入る」は、
+**先に Task 6B の画面で誰か1人に既定部隊を設定してから**でないと確認できない。
+確認手順にその1行を足す。
+
+- [ ] **Step 3: 利用者に割当表を尋ねる（フェーズ1の最後・リリース後）**
+
+引き継ぎ書に「**部隊の割当表が未確定**。誰が1〜4部隊かを決めてもらう必要がある」と明記する。
+将来バックフィルするときの注意も残す:
+- 鍵は氏名だけでなく **(会社, 氏名)**
+- 対象は現場系の予定だけ（事務所・休みに部隊は不要）
+- **日報データとアーカイブの両方**に流す
+- 必ず dry-run を先に出す
 
 ---
 
@@ -1259,6 +1507,65 @@ CSS（拠点タグの定義の近くに）:
 .butai-tag{display:inline-block;font-size:10px;padding:1px 5px;border-radius:3px;background:#EDE7F6;color:#5E35B1;border:1px solid #B39DDB;margin-left:3px}
 ```
 
+- [ ] **Step 3B: ★部隊を画面のデータ構造に通す（これが無いと編集で部隊が消える）**
+
+**★Codexレビュー[P1]#1。実コードで確認済み（2026-08-27）。**
+これを飛ばすと **「部隊と無関係な編集をしただけで、保存済みの部隊が消える」**
+という最悪の壊れ方をする。拠点で起きたバグ（[P1]#2）とまったく同じ形。
+
+原因は2つ:
+
+1. **`parseRows`（`index.html:2496` / `admin.html:2255`）は列を1つずつ手で写している。**
+   最後が `kyoten:String(r['拠点']||'')` で終わっており、**部隊は捨てられる**
+2. **`groupNippos`（`index.html:2897` / `admin.html:3007`）の members は
+   `{name, role}` の2つだけ。** 計画が読もうとしていた `g.members[0].butai` は**必ず undefined**
+
+しかも保存時は `readButai('e')` が空文字を送るため、`resolveButai_` の仕様
+（画面が項目を送ってきたら空欄も尊重する）により**既定部隊でも補完されず、消える**。
+
+**両ファイルの4箇所すべてを直す:**
+
+`parseRows` の `kyoten:` の行の後ろに追加（`index.html:2511` / `admin.html` の同じ場所）:
+
+```js
+    kyoten:String(r['拠点']||''),     // ★2026-08-26 拠点（本社/関東支店/両方）
+    butai:String(r['部隊']||'')       // ★2026-08-27 部隊（1〜4部隊）
+```
+
+`groupNippos` の `groups[key]={...}` に `butai` を足し、members にも持たせる:
+
+```js
+    if(!groups[key])groups[key]={date:n.date, /* …既存のまま… */ ,
+      vehicle:n.vehicle||'', butai:n.butai||'',      // ★2026-08-27 部隊
+      isGhost:!!n.isGhost,isPending:!!n.isPending,originalId:n.originalId||''};
+    groups[key].members.push({name:n.name,role:n.role,butai:n.butai||''});
+```
+
+⚠️ **`groups[key]` の作り方に注意**: グループの鍵に部隊は入れない。
+同じ予定（同じID）の全行は同じ部隊であるべきなので、グループ単位で1つ持てばよい。
+鍵に足すと、部隊だけ違う行がグループとして割れてカレンダーの表示が崩れる。
+
+- [ ] **Step 3C: ★一括編集の入口も塞ぐ（Codexが見つけたもう1つの穴）**
+
+編集の入口は単一編集だけではない。**一括編集は別の関数**
+（`index.html:3728` / `admin.html:3687`）で、当初の計画は単一編集しか見ていなかった。
+
+```bash
+grep -n "bulkEditMode\|function openBulkEdit\|function applyBulkEdit" index.html admin.html | head
+```
+
+一括編集を開くときも `butaiTouched.e=false` にし、**選択した予定の部隊が全部同じときだけ
+その値を初期表示する**。バラバラなら空にして「変更しない」を意味させる:
+
+```js
+  // ★2026-08-27: 一括編集では、選んだ予定の部隊が全部同じときだけ初期値に入れる。
+  //   直前に開いた単一編集の部隊が残っていると、無関係な複数予定へ誤って適用される。
+  butaiTouched.e=false;
+  const bs=[...new Set(targetGroups.map(g=>String(g.butai||'')))];
+  const eb=document.getElementById('e-butai');
+  if(eb)eb.value=(bs.length===1?bs[0]:'');
+```
+
 - [ ] **Step 4: 送信と読み戻しを繋ぐ**
 
 `index.html:2264-2266`（`const members=[{name:leader,role:'代表'}];` の周辺）で、
@@ -1274,9 +1581,10 @@ CSS（拠点タグの定義の近くに）:
 編集モーダルを開く関数（`openEditModal` 相当・`kyotenTouched.e=false` を書いている `index.html:3463` 付近）に:
 
 ```js
+  // ★Step 3B でグループに butai を持たせたので、そこから読む
   butaiTouched.e=false;
   const eb=document.getElementById('e-butai');
-  if(eb)eb.value=normalizeButai(g.members&&g.members[0]?g.members[0].butai:'');
+  if(eb)eb.value=normalizeButai(g.butai);
 ```
 
 新規フォームのクリア処理（`index.html:2332` の `kyotenTouched.s=false;` の隣）に:
@@ -1449,7 +1757,12 @@ async function setMemberButai(name,butai){
     const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_butai',name,company:currentCompany,butai}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status!=='ok')throw new Error(json.message||'保存できませんでした');
-    memberCache=null;                       // 職人管理の自前キャッシュを捨てる
+    // ★Codexレビュー[P2]#8: 実物のキャッシュ名は settingsMembers（admin.html:4794）。
+    //   memberCache という変数は存在しない。捨てるのではなく該当要素を更新する。
+    const sm=(settingsMembers||[]).find(x=>x.name===name&&x.company===currentCompany);
+    if(sm)sm.butai=butai;
+    const am=(allMembers||[]).find(x=>x.name===name&&x.company===currentCompany);
+    if(am)am.butai=butai;
     showAlert(`${name} の既定部隊を「${butai||'なし'}」にしました`,'ok');
   }catch(e){showAlert('保存できませんでした','err');}
 }
@@ -1458,7 +1771,10 @@ async function setMemberActive(name,active){
     const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_active',name,company:currentCompany,active}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status!=='ok')throw new Error(json.message||'保存できませんでした');
-    memberCache=null;
+    const sm=(settingsMembers||[]).find(x=>x.name===name&&x.company===currentCompany);
+    if(sm)sm.active=active;
+    const am=(allMembers||[]).find(x=>x.name===name&&x.company===currentCompany);
+    if(am)am.active=active;
     showAlert(`${name} を${active?'有効':'無効'}にしました`,'ok');
   }catch(e){showAlert('保存できませんでした','err');}
 }
@@ -1470,9 +1786,33 @@ async function setMemberActive(name,active){
 `<label><input type="checkbox" ${active?'checked':''} onchange="setMemberActive('${esc(name)}',this.checked)"> 有効</label>`
 ```
 
-⚠️ 職人管理は**自前のキャッシュ**（`admin.html:4790` 付近の職人マスタキャッシュ）を持っている。
-変数名を `grep -n "memberCache\|職人マスタキャッシュ" admin.html` で確認し、
-保存後に必ず捨てること。捨てないと画面が古いまま残る。
+- [ ] **Step 4B: ★loadSettingsMembers に新しい2列を読ませる（Codexレビュー[P2]#8）**
+
+`loadSettingsMembers`（`admin.html:4814-4821`）は
+**氏名・単価・会社・事業部の4つしか読んでいない**。ここに足さないと、
+画面は既定部隊・有効の**現在値を表示できず、常に空から上書き**してしまう。
+
+```js
+      const header=data[0]||[];
+      const nameIdx=header.indexOf('氏名'),rateIdx=header.indexOf('単価');
+      if(nameIdx<0||rateIdx<0){
+        throw new Error('職人マスタのヘッダに「氏名」または「単価」列が見つかりません: '+JSON.stringify(header));
+      }
+      const companyIdx=header.indexOf('会社'),divIdx=header.indexOf('事業部');
+      // ★2026-08-27 フェーズ1: 既定部隊・有効。まだ列が無い場合は -1 になるので
+      //   その時は既定値（空／有効）で扱う＝GASを出す前でも画面が壊れない。
+      const butaiIdx=header.indexOf('既定部隊'),activeIdx=header.indexOf('有効');
+```
+
+`settingsMembers=data.slice(1).map(r=>{...})` が返すオブジェクトに2つ足す:
+
+```js
+          butai: butaiIdx>=0?String(r[butaiIdx]||'').trim():'',
+          active: activeIdx>=0?String(r[activeIdx]||'').trim()!=='×':true,
+```
+
+⚠️ **`throw` するのは氏名・単価が無いときだけ**にする。既定部隊・有効を必須にすると、
+**Worker/GASを出す前に画面を開いた瞬間に職人管理が死ぬ**（反映順の事故）。
 
 - [ ] **Step 5: 構文チェックとテスト**
 
@@ -1603,9 +1943,42 @@ async function setSiteStatus(el){
 
 `postGas` は既存の送信関数に合わせる（`grep -n "function postGas\|function callGas" admin.html` で確認）。
 
-- [ ] **Step 3: index.html は表示のみ**
+- [ ] **Step 3: ★index.html の「完了にする／進行中に戻す」ボタンを撤去する**
 
-現場一覧にステータスの文字を出すだけ。編集はadminに寄せる（職人が誤って触らないため）。
+**★Codexレビュー[P2]#7。実コードで確認済み（`index.html:3214-3224`）。**
+
+職人用の予定詳細に「完了にする／進行中に戻す」ボタンが残っており、
+`update_site_status`（`completed` の真偽値だけを送る）を呼んでいる。
+これを放置すると:
+
+> 管理者が現場を **「延期」** にする
+>   → 職人が予定詳細で「完了にする」を押す
+>     → `完了=TRUE` になり、次に読んだとき `normalizeSiteStatus_` が
+>        **「延期」を「完工」に書き換える**
+
+つまり **管理者の設定が職人の操作で勝手に消える**。
+計画に書いた「indexは表示のみ」とも矛盾していた。
+
+やること:
+1. `index.html` の完了/進行中ボタンとその呼び出し関数を**削除**する
+   （現場一覧・予定詳細の両方。`grep -n "完了にする\|進行中に戻す" index.html` で全部出す）
+2. 代わりに**ステータスの文字を表示するだけ**にする
+3. `gas.js` の旧 `update_site_status` は、**ステータス列に値が入っていたら上書きを拒否**する
+
+```js
+      // ★2026-08-27 [P2]#7: 8段階ステータスが設定済みなら、旧APIで上書きさせない。
+      //   （延期・中止が「完工」「施工中」に化けるのを防ぐ）
+      const curStatus = String(data[i][11] || '').trim();
+      if (SITE_STATUSES.indexOf(curStatus) >= 0) {
+        return error('この現場はステータス「' + curStatus + '」が設定されています。変更は管理者画面から行ってください。');
+      }
+```
+
+4. 管理者は `set_site_status` に一本化する（Step 2 で作ったもの）
+
+⚠️ **ステータス変更も履歴に残す**: `set_site_status` の中で、
+変更前のステータスを `logHistory_` に `field:'案件ステータス'` として記録する。
+現場マスタは日報データと別なので `旧ID/新ID` は空でよく、`項目` に現場名を含める。
 
 - [ ] **Step 4: 構文チェック**
 
@@ -1720,7 +2093,35 @@ function sortHistoryRows_(rows, limit) {
 
 JS:
 
+**★Codexレビュー[P1]#3 の後半**: 平坦な明細表だけでは
+設計書の「**予定を選ぶと変更前が見える**」を満たさない。
+**1回の編集ごとにまとめて表示し、削除は全項目を開けるようにする。**
+
 ```js
+// 履歴を「1回の操作」単位にまとめる。
+// 同じ日時・同じ操作・同じ実行者の明細は1つの編集としてくくる。
+function groupHistory(rows){
+  const groups=[];const idx={};
+  rows.forEach(x=>{
+    const key=x[0]+'|'+x[1]+'|'+x[7];
+    if(idx[key]===undefined){idx[key]=groups.length;groups.push({at:x[0],action:x[1],by:x[7],items:[]});}
+    groups[idx[key]].items.push({oldId:x[2],newId:x[3],field:x[4],before:x[5],after:x[6]});
+  });
+  return groups;
+}
+
+const ACTION_LABEL={add:'登録',update:'変更',delete:'削除'};
+
+// 削除の「変更前」は21列すべてのJSON。人が読める表に開く。
+function renderDeletedRecord(json){
+  let o;try{o=JSON.parse(json);}catch(e){return `<div>${esc(String(json))}</div>`;}
+  const skip=['登録日時','色'];
+  return '<table class="tbl" style="font-size:12px">'+
+    Object.keys(o).filter(k=>!skip.includes(k)&&String(o[k]).trim()!=='')
+      .map(k=>`<tr><th style="text-align:left;white-space:nowrap">${esc(k)}</th><td>${esc(String(o[k]))}</td></tr>`).join('')+
+    '</table>';
+}
+
 async function loadHistory(){
   const el=document.getElementById('history-body');
   el.textContent='読み込み中…';
@@ -1728,12 +2129,26 @@ async function loadHistory(){
     const r=await postGas({action:'get_history',limit:500});
     if(!r||r.status!=='ok'){el.textContent='読み込めませんでした';return;}
     if(!r.rows.length){el.textContent='まだ履歴はありません';return;}
-    el.innerHTML='<table class="tbl"><thead><tr>'+
-      ['日時','操作','項目','変更前','変更後','実行者'].map(h=>`<th>${h}</th>`).join('')+
-      '</tr></thead><tbody>'+
-      r.rows.map(x=>`<tr><td>${esc(x[0])}</td><td>${esc(x[1])}</td><td>${esc(x[4])}</td>`+
-        `<td style="color:#c0392b">${esc(x[5])}</td><td style="color:#27ae60">${esc(x[6])}</td>`+
-        `<td>${esc(x[7])}</td></tr>`).join('')+'</tbody></table>';
+    el.innerHTML=groupHistory(r.rows).map((g,gi)=>{
+      const isDel=g.action==='delete';
+      const body=isDel
+        ? g.items.map(it=>
+            `<details><summary>削除された予定を見る（ID: ${esc(it.oldId)}）</summary>${renderDeletedRecord(it.before)}</details>`
+          ).join('')
+        : '<table class="tbl" style="font-size:12px"><thead><tr><th>項目</th><th>変更前</th><th>変更後</th></tr></thead><tbody>'+
+          g.items.map(it=>`<tr><td>${esc(it.field)}</td>`+
+            `<td style="color:#c0392b">${esc(it.before)}</td>`+
+            `<td style="color:#27ae60">${esc(it.after)}</td></tr>`).join('')+
+          '</tbody></table>';
+      // 旧ID→新ID が分かるように出す（編集するとIDが変わるため）
+      const ids=[...new Set(g.items.filter(it=>it.oldId&&it.newId&&it.oldId!==it.newId)
+        .map(it=>`${it.oldId} → ${it.newId}`))];
+      return `<div class="card" style="margin-bottom:10px">
+        <div style="font-weight:600;margin-bottom:6px">${esc(g.at)}　${esc(ACTION_LABEL[g.action]||g.action)}　<span style="color:#666;font-weight:400">${esc(g.by)}</span></div>
+        ${ids.length?`<div style="font-size:11px;color:#999;margin-bottom:6px">ID: ${esc(ids.join(' / '))}</div>`:''}
+        ${body}
+      </div>`;
+    }).join('');
   }catch(e){el.textContent='読み込めませんでした';}
 }
 ```
@@ -1818,8 +2233,13 @@ curl -s "https://script.google.com/macros/s/AKfycbxp2eUcpIjCj0ZWyAPPD9m3egJrKdWm
 
 - [ ] **Step 7: データ掃除を実行する**
 
-Apps Script エディタで `cleanupMastersPhase1` を選んで実行。
-実行ログに `{"重複統合":9,"無効化":14,"追加":1,"会社名修正":1}` のような結果が出る。
+**★必ず2回に分ける。**
+
+1. Apps Script エディタで `cleanupMastersPhase1` を**引数なしで実行**（＝dry-run。何も書かない）
+2. 実行ログを読む。`{"dryRun":true,"重複統合":9,"追加":1,"会社名修正":1,"食い違い":[],"予定0件の候補":[...]}`
+   - **`食い違い` が空でなければここで止める。** 単価などが食い違う重複がある＝人が決める必要がある
+   - `予定0件の候補` は**そのまま利用者に見せる**（無効化はしない。誰が実在の人かは機械に分からない）
+3. 数字が想定どおりなら、エディタで一時的に `cleanupMastersPhase1(true)` を呼ぶ関数を作って実行
 
 - [ ] **Step 8: 行数が変わっていないことを確認する**
 
@@ -1856,15 +2276,20 @@ GitHub Pages のビルド完了を待ってから（1〜2分）次へ。
 2. 会社を **グローライズ / 和信カインド / GRミツマ / GRHD / ラーテル** の順に切り替える
 3. 拠点を **全拠点 / 本社 / 関東支店** で切り替える（**昨日の機能を壊していないこと**）
 4. タブを **カレンダー / 空き確認 / 現場管理 / 車確認 / 事務** の全部押す
-5. 新規登録フォームを開く → **責任者を選ぶと部隊が自動で入る**
-6. 部隊を手で「3部隊」に変える → **別の責任者に変えても3部隊のまま**（上書きされない）
-7. 1件登録する → カレンダーに**部隊の印**が出る
-8. その予定を編集して部隊を変える → 保存
-9. `admin.html` の **履歴タブ** に「部隊 1部隊 → 3部隊」が出る
-10. `admin.html` の**現場管理**でステータスを「延期」に変える → 再読み込みで残っている
-11. 画面幅 **390px**（スマホ）で 1〜4 をもう一度
-12. `president.html` を開く → **社長予定が今まで通り出る**（触っていない証明）
-13. 登録したテスト予定を**削除して後片付け**する
+5. `admin.html` の**職人管理**を開き、誰か1人に**既定部隊「2部隊」を設定**する
+   （★これをやらないと次が確認できない。フェーズ1は既定部隊が空で出るため）
+6. `index.html` の新規登録フォームを開く → **その人を責任者に選ぶと部隊が自動で入る**
+7. 部隊を手で「3部隊」に変える → **別の責任者に変えても3部隊のまま**（上書きされない）
+8. 1件登録する → カレンダーに**部隊の印**が出る
+9. ★**部隊と無関係な項目だけ**（メモ等）を編集して保存 → **部隊が消えていない**ことを確認（[P1]#1）
+10. その予定を編集して部隊を変える → 保存
+11. `admin.html` の **履歴タブ** に「部隊 1部隊 → 3部隊」が出る
+12. `admin.html` の**現場管理**でステータスを「延期」に変える → 再読み込みで残っている
+13. ★`index.html` の予定詳細に **「完了にする」ボタンが無い**ことを確認（[P2]#7 の撤去確認）
+14. ★予定を1件**削除** → 履歴タブで「削除された予定を見る」を開き**全項目が読める**ことを確認（[P1]#3）
+15. 画面幅 **390px**（スマホ）で 1〜4 をもう一度
+16. `president.html` を開く → **社長予定が今まで通り出る**（触っていない証明）
+17. 登録したテスト予定を**削除して後片付け**する
 
 - [ ] **Step 12: 引き継ぎ書を更新する**
 
