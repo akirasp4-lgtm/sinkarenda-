@@ -718,6 +718,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div id="e-butai-row" style="margin-bottom:12px">
     <label>部隊 <span style="font-weight:400;color:#888;font-size:11px">（責任者から自動。違うときだけ変更）</span></label>
     <select id="e-butai" onchange="onButaiChanged('e')" style="margin-bottom:0">
+      <!-- ★一括編集で部隊がバラバラのときだけ出す。選んだままなら各予定の部隊を保つ -->
+      <option value="__KEEP__" style="display:none">（そのまま・変更しない）</option>
       <option value="">部隊なし</option>
       <option value="1部隊">1部隊</option>
       <option value="2部隊">2部隊</option>
@@ -2087,9 +2089,21 @@ function refreshButaiField(p,opts){
   const leader=document.getElementById(p+'-leader');
   el.value=memberDefaultButai(leader?leader.value:'');
 }
+const BUTAI_KEEP='__KEEP__';
+// ★Codexレビュー[P1]#2: 一括編集で部隊がバラバラのとき、空文字を送ると
+//   「時間だけ直したつもりが全件の部隊が消える」。「そのまま」を選んでいる間は
+//   その日の予定に元から入っていた部隊を書き戻す。
+function resolveEditButai(date){
+  const v=readButai('e');
+  if(v!==BUTAI_KEEP)return v;
+  return normalizeButai(bulkOrigButai[date]);
+}
 function readButai(p){
   const el=document.getElementById(p+'-butai');
-  return el?normalizeButai(el.value):'';
+  if(!el)return '';
+  const v=String(el.value||'');
+  if(v===BUTAI_KEEP)return BUTAI_KEEP;   // 「そのまま」は保存側でグループごとに解決する
+  return normalizeButai(v);
 }
 function butaiTag(v){
   const b=normalizeButai(v&&v.butai!==undefined?v.butai:v);
@@ -2103,19 +2117,36 @@ function butaiTag(v){
 //   拠点で同じ事故を起こしているので、必ず入口をまとめて1つの関数にする。
 function applyEditButai(g){
   butaiTouched.e=false;
+  bulkOrigButai={};                     // 前回の一括編集の控えを残さない
   const el=document.getElementById('e-butai');
   if(!el||!g)return;
+  const keep=el.querySelector('option[value="__KEEP__"]');
+  if(keep)keep.style.display='none';    // 単一編集に「そのまま」は要らない
   el.value=normalizeButai(g.butai);
 }
 // 一括編集用: 選んだ予定の部隊が全部同じときだけ初期値に入れる。
 //   バラバラなら空＝「変更しない」。直前に開いた単一編集の値が残っていると
 //   無関係な複数予定へ誤って適用されるため、必ずここで初期化する。
+// 一括編集で「そのまま」を選んだときに使う、日付ごとの元の部隊
+let bulkOrigButai={};
 function applyBulkEditButai(groups){
   butaiTouched.e=false;
+  bulkOrigButai={};
+  (groups||[]).forEach(g=>{if(g&&g.date)bulkOrigButai[g.date]=normalizeButai(g.butai);});
   const el=document.getElementById('e-butai');
   if(!el)return;
+  const keep=el.querySelector('option[value="__KEEP__"]');
   const set=[...new Set((groups||[]).map(g=>normalizeButai(g&&g.butai)))];
-  el.value=(set.length===1)?set[0]:'';
+  if(set.length===1){
+    // 全部同じ → その値を初期表示。「そのまま」は要らないので隠す
+    if(keep)keep.style.display='none';
+    el.value=set[0];
+  }else{
+    // ★バラバラ → 「そのまま・変更しない」を選ばせる（Codexレビュー[P1]#2）。
+    //   空文字を初期値にすると、時間だけ直したつもりで全件の部隊が消える。
+    if(keep)keep.style.display='';
+    el.value='__KEEP__';
+  }
 }
 
 const kyotenTouched={s:false,e:false};
@@ -3674,7 +3705,7 @@ async function saveEdit(){
   const rows=[];
   dates.forEach(date=>{
     const newId=uuid();
-    members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company),butai:readButai('e')});});
+    members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company),butai:resolveEditButai(date)});});
   });
   btn.textContent='保存中...';btn.disabled=true;
   try{

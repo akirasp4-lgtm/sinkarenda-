@@ -60,6 +60,21 @@ describe('画面の配線もれ（拠点があるところには部隊もある�
         expect(src).toContain('applyBulkEditButai(targets)');
       });
 
+      it('★一括編集で部隊が混在するとき「そのまま」を使う（空で全消しにしない）', () => {
+        // Codexレビュー[P1]#2: 空文字を初期値にすると、時間だけ直したつもりで
+        // 1部隊と2部隊がまとめて「部隊なし」に消える。
+        expect(src).toContain("const BUTAI_KEEP='__KEEP__'");
+        expect(src).toContain("el.value='__KEEP__'");
+        expect(src).toContain('function resolveEditButai(');
+        // 保存経路は必ず解決関数を通す（生の readButai('e') を直接使わない）
+        expect(src).toContain("butai:resolveEditButai(date)");
+        expect(src).not.toContain("kyoten:readKyoten('e',company),butai:readButai('e')");
+      });
+
+      it('単一編集では「そのまま」を出さない', () => {
+        expect(src).toMatch(/function applyEditButai\(g\)\{[\s\S]*?keep\.style\.display='none'/);
+      });
+
       it('責任者を選ぶと既定部隊が入る', () => {
         expect(src).toContain("refreshButaiField('s')");
         expect(src).toContain("refreshButaiField('e')");
