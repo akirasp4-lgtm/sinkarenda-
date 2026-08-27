@@ -88,7 +88,7 @@ function makeContext(sheets) {
 // 本番と同じ列構成の職人マスタ・現場マスタ
 const MEMBER_ROWS = [
   ['氏名', '会社', '事業部', '単価', '既定部隊', '有効'],
-  ['元', 'グローライズ', 'INF', 25000, '2部隊', '○'],
+  ['元', 'グローライズ', 'INF', 25000, '第二部隊', '○'],
   ['中島', 'グローライズ', 'ICT', 24000, '', '○'],
   ['デモ', 'グローライズ', '', 0, '', '×']
 ];
@@ -137,12 +137,12 @@ describe('buildDailyValues_（実際にシートを読んで行を組み立て�
 
   it('画面が部隊を送らなければ、職人マスタの既定部隊が入る', () => {
     const out = ctx.g.buildDailyValues_(ctx.ss, [baseRow], '向')[0];
-    expect(out[ctx.g.HEADERS.indexOf('部隊')]).toBe('2部隊');
+    expect(out[ctx.g.HEADERS.indexOf('部隊')]).toBe('第二部隊');
   });
 
   it('画面が部隊を送ってきたらそれを使う', () => {
-    const out = ctx.g.buildDailyValues_(ctx.ss, [{ ...baseRow, butai: '4部隊' }], '向')[0];
-    expect(out[ctx.g.HEADERS.indexOf('部隊')]).toBe('4部隊');
+    const out = ctx.g.buildDailyValues_(ctx.ss, [{ ...baseRow, butai: '第四部隊' }], '向')[0];
+    expect(out[ctx.g.HEADERS.indexOf('部隊')]).toBe('第四部隊');
   });
 
   it('★画面が空欄を送ってきたら空欄のまま（既定部隊で戻さない）', () => {
@@ -170,20 +170,20 @@ describe('buildDailyValues_（実際にシートを読んで行を組み立て�
       [baseRow, { ...baseRow, name: '中島', role: '同行', id: 'ID1' }], '向');
     expect(out.length).toBe(2);
     out.forEach(r => expect(r.length).toBe(21));
-    expect(out[0][ctx.g.HEADERS.indexOf('部隊')]).toBe('2部隊');
+    expect(out[0][ctx.g.HEADERS.indexOf('部隊')]).toBe('第二部隊');
     expect(out[1][ctx.g.HEADERS.indexOf('部隊')]).toBe('');
   });
 
   it('★既定部隊の鍵は (会社, 氏名)（同名の別会社を取り違えない）', () => {
     const map = ctx.g.getMemberButaiMap_(ctx.ss);
-    expect(map[ctx.g.memberKey_('グローライズ', '元')]).toBe('2部隊');
-    expect(ctx.g.lookupMemberButai_(map, 'グローライズ', '元')).toBe('2部隊');
+    expect(map[ctx.g.memberKey_('グローライズ', '元')]).toBe('第二部隊');
+    expect(ctx.g.lookupMemberButai_(map, 'グローライズ', '元')).toBe('第二部隊');
     expect(ctx.g.lookupMemberButai_(map, 'グローライズ', '中島')).toBe('');
   });
 
   it('会社が分からなくても氏名で引ける（1人しかいない名前なら）', () => {
     const map = ctx.g.getMemberButaiMap_(ctx.ss);
-    expect(ctx.g.lookupMemberButai_(map, '', '元')).toBe('2部隊');
+    expect(ctx.g.lookupMemberButai_(map, '', '元')).toBe('第二部隊');
   });
 
   it('★同名が別会社にいて部隊が違うときは氏名だけでは引かない（取り違え防止）', () => {
@@ -191,15 +191,15 @@ describe('buildDailyValues_（実際にシートを読んで行を組み立て�
       '日報データ': makeSheet([[]]),
       '職人マスタ': makeSheet([
         ['氏名', '会社', '事業部', '単価', '既定部隊', '有効'],
-        ['元', 'グローライズ', '', 0, '2部隊', '○'],
-        ['元', 'GRミツマ', '', 0, '3部隊', '○']
+        ['元', 'グローライズ', '', 0, '第二部隊', '○'],
+        ['元', 'GRミツマ', '', 0, '第三部隊', '○']
       ]),
       '現場マスタ': makeSheet(JOBSITE_ROWS.map(r => r.slice())),
       '元請マスタ': makeSheet([['元請名', '会社', '読み']])
     });
     const map = ctx2.g.getMemberButaiMap_(ctx2.ss);
-    expect(ctx2.g.lookupMemberButai_(map, 'グローライズ', '元')).toBe('2部隊');
-    expect(ctx2.g.lookupMemberButai_(map, 'GRミツマ', '元')).toBe('3部隊');
+    expect(ctx2.g.lookupMemberButai_(map, 'グローライズ', '元')).toBe('第二部隊');
+    expect(ctx2.g.lookupMemberButai_(map, 'GRミツマ', '元')).toBe('第三部隊');
     expect(ctx2.g.lookupMemberButai_(map, '', '元')).toBe('');   // どちらか分からないので入れない
   });
 
@@ -208,8 +208,8 @@ describe('buildDailyValues_（実際にシートを読んで行を組み立て�
       '日報データ': makeSheet([[]]),
       '職人マスタ': makeSheet([
         ['氏名', '会社', '事業部', '単価', '既定部隊', '有効'],
-        ['元', 'グローライズ', '', 0, '2部隊', '○'],
-        ['元', 'GRミツマ', '', 0, '3部隊', '○']
+        ['元', 'グローライズ', '', 0, '第二部隊', '○'],
+        ['元', 'GRミツマ', '', 0, '第三部隊', '○']
       ]),
       '現場マスタ': makeSheet(JOBSITE_ROWS.map(r => r.slice())),
       '元請マスタ': makeSheet([['元請名', '会社', '読み']])
@@ -220,8 +220,8 @@ describe('buildDailyValues_（実際にシートを読んで行を組み立て�
       updatedBy: '向', color: '', workType: '現場作業', vehicle: ''
     };
     const bi = ctx2.g.HEADERS.indexOf('部隊');
-    expect(ctx2.g.buildDailyValues_(ctx2.ss, [{ ...base, company: 'グローライズ' }], '向')[0][bi]).toBe('2部隊');
-    expect(ctx2.g.buildDailyValues_(ctx2.ss, [{ ...base, company: 'GRミツマ' }], '向')[0][bi]).toBe('3部隊');
+    expect(ctx2.g.buildDailyValues_(ctx2.ss, [{ ...base, company: 'グローライズ' }], '向')[0][bi]).toBe('第二部隊');
+    expect(ctx2.g.buildDailyValues_(ctx2.ss, [{ ...base, company: 'GRミツマ' }], '向')[0][bi]).toBe('第三部隊');
   });
 });
 
@@ -248,12 +248,12 @@ describe('変更履歴が実際の行の形で動く', () => {
   });
 
   it('部隊だけを変えた編集も記録される', () => {
-    const oldRows = ctx.g.buildDailyValues_(ctx.ss, [mk({ id: 'OLD', butai: '1部隊' })], '向');
-    const newRows = ctx.g.buildDailyValues_(ctx.ss, [mk({ id: 'NEW', butai: '3部隊' })], '向');
+    const oldRows = ctx.g.buildDailyValues_(ctx.ss, [mk({ id: 'OLD', butai: '第一部隊' })], '向');
+    const newRows = ctx.g.buildDailyValues_(ctx.ss, [mk({ id: 'NEW', butai: '第三部隊' })], '向');
     const d = ctx.g.diffDailyRows_(ctx.g.HEADERS, oldRows, newRows);
     const b = d.find(x => x.field === '部隊');
-    expect(b.before).toBe('1部隊');
-    expect(b.after).toBe('3部隊');
+    expect(b.before).toBe('第一部隊');
+    expect(b.after).toBe('第三部隊');
   });
 
   it('★削除の記録から元の予定を復元できる（21項目そろっている）', () => {
@@ -262,7 +262,7 @@ describe('変更履歴が実際の行の形で動く', () => {
     expect(Object.keys(o).length).toBe(21);
     expect(o['メモ']).toBe('大事なメモ');
     expect(o['氏名']).toBe('元');
-    expect(o['部隊']).toBe('2部隊');
+    expect(o['部隊']).toBe('第二部隊');
     expect(o['拠点']).toBe('本社');
     expect(o['作業区分']).toBe('現場作業');
   });

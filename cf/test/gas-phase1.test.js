@@ -17,7 +17,7 @@ const GAS_PATH = join(here, '..', '..', 'gas.js');
 const EXPORT_SNIPPET = `
 ;globalThis.__gas = {
   HEADERS, BUTAI_VALUES,
-  normalizeButai_, resolveButai_, normalizeMemberActive_,
+  normalizeButai_, resolveButai_, normalizeMemberActive_, BUTAI_LEADERS,
   SITE_STATUSES, SITE_STATUS_DONE, normalizeSiteStatus_, isSiteStatusDone_, isCompletedCell_,
   HISTORY_SHEET, HISTORY_HEADERS, HISTORY_MAX_ROWS,
   diffDailyRows_, rowSummary_, rowFullJson_, sortHistoryRows_, fmtDateTime_,
@@ -77,37 +77,52 @@ describe('HEADERS', () => {
 
 describe('normalizeButai_', () => {
   it('1〜4部隊はそのまま通す', () => {
-    ['1部隊', '2部隊', '3部隊', '4部隊'].forEach(v =>
+    ['第一部隊', '第二部隊', '第三部隊', '第四部隊', '第五部隊', '第六部隊'].forEach(v =>
       expect(ctx.normalizeButai_(v)).toBe(v));
   });
 
   it('前後の空白を落とす', () => {
-    expect(ctx.normalizeButai_('  2部隊 ')).toBe('2部隊');
+    expect(ctx.normalizeButai_('  第二部隊 ')).toBe('第二部隊');
   });
 
   it('知らない値は空にする', () => {
-    ['5部隊', '部隊', 'A班', '1', 1, null, undefined, ''].forEach(v =>
+    // ★2026-08-27: 旧表記（1部隊〜4部隊）は組織図2026に無いので通さない。
+    //   まだ誰にも部隊が入っていない段階で第一〜第六へ切り替えたため、
+    //   旧表記のデータは1件も存在しない。
+    ['第七部隊', '1部隊', '2部隊', '3部隊', '4部隊', '部隊', 'A班', '1', 1, null, undefined, ''].forEach(v =>
       expect(ctx.normalizeButai_(v)).toBe(''));
   });
 
-  it('部隊の値は1〜4部隊の4つだけ', () => {
-    expect(ctx.BUTAI_VALUES).toEqual(['1部隊', '2部隊', '3部隊', '4部隊']);
+  it('部隊長は6人（第六部隊は奥田・利用者確認済み）', () => {
+    expect(ctx.BUTAI_LEADERS).toEqual({
+      '第一部隊': '中島', '第二部隊': '前﨑', '第三部隊': '東',
+      '第四部隊': '鈴木', '第五部隊': '高田', '第六部隊': '奥田'
+    });
+  });
+
+  it('★組織図の「前崎」ではなく職人マスタの表記「前﨑」を使う（字が違う）', () => {
+    expect(ctx.BUTAI_LEADERS['第二部隊']).toBe('前﨑');
+    expect(ctx.BUTAI_LEADERS['第二部隊']).not.toBe('前崎');
+  });
+
+  it('部隊の値は第一〜第六の6つだけ（組織図2026・方針書Ver1.0）', () => {
+    expect(ctx.BUTAI_VALUES).toEqual(['第一部隊','第二部隊','第三部隊','第四部隊','第五部隊','第六部隊']);
   });
 });
 
 describe('resolveButai_', () => {
   it('画面が値を送ってきたらそれを使う', () => {
-    expect(ctx.resolveButai_({ butai: '3部隊' }, '1部隊')).toBe('3部隊');
+    expect(ctx.resolveButai_({ butai: '第三部隊' }, '第一部隊')).toBe('第三部隊');
   });
 
   it('★画面が「空欄」を送ってきたら空欄のまま（既定値で上書きしない）', () => {
     // 事務所・休みなど「部隊に属さない」を明示できるようにするため。
     // 拠点で起きたバグ（手で消した値が既定値に戻る）を繰り返さない。
-    expect(ctx.resolveButai_({ butai: '' }, '1部隊')).toBe('');
+    expect(ctx.resolveButai_({ butai: '' }, '第一部隊')).toBe('');
   });
 
   it('画面が項目そのものを送ってこなければ職人マスタの既定部隊を使う', () => {
-    expect(ctx.resolveButai_({}, '1部隊')).toBe('1部隊');
+    expect(ctx.resolveButai_({}, '第一部隊')).toBe('第一部隊');
   });
 
   it('既定部隊も無ければ空', () => {
@@ -116,15 +131,15 @@ describe('resolveButai_', () => {
   });
 
   it('既定部隊が壊れた値でも空にする', () => {
-    expect(ctx.resolveButai_({}, '9部隊')).toBe('');
+    expect(ctx.resolveButai_({}, '第九部隊')).toBe('');
   });
 
   it('画面が送ってきた値が壊れていれば空（既定値へは戻さない）', () => {
-    expect(ctx.resolveButai_({ butai: 'A班' }, '1部隊')).toBe('');
+    expect(ctx.resolveButai_({ butai: 'A班' }, '第一部隊')).toBe('');
   });
 
   it('rowがnull/undefinedでも落ちない', () => {
-    expect(ctx.resolveButai_(null, '2部隊')).toBe('2部隊');
+    expect(ctx.resolveButai_(null, '第二部隊')).toBe('第二部隊');
     expect(ctx.resolveButai_(undefined, '')).toBe('');
   });
 });
@@ -215,7 +230,7 @@ describe('変更履歴 diffDailyRows_', () => {
       '現場名': 'A現場', '氏名': '元', '役割': '代表', '出勤': '08:00', '退勤': '17:00',
       '人工': 1, 'メモ': '', '夜勤': '', '会社': 'グローライズ', 'ID': 'X1',
       '更新者': '向', '色': '', '事業部': 'INF', '工番': 'INF-26-001',
-      '作業区分': '現場作業', '車両': '', '拠点': '本社', '部隊': '1部隊'
+      '作業区分': '現場作業', '車両': '', '拠点': '本社', '部隊': '第一部隊'
     };
     Object.assign(base, over || {});
     return H().map(h => base[h]);
@@ -282,11 +297,11 @@ describe('変更履歴 diffDailyRows_', () => {
   });
 
   it('部隊の変更も拾う', () => {
-    const d = ctx.diffDailyRows_(H(), [mkRow({ '部隊': '1部隊' })],
-      [mkRow({ ID: 'X2', '部隊': '3部隊' })]);
+    const d = ctx.diffDailyRows_(H(), [mkRow({ '部隊': '第一部隊' })],
+      [mkRow({ ID: 'X2', '部隊': '第三部隊' })]);
     const k = d.find(x => x.field === '部隊');
-    expect(k.before).toBe('1部隊');
-    expect(k.after).toBe('3部隊');
+    expect(k.before).toBe('第一部隊');
+    expect(k.after).toBe('第三部隊');
   });
 
   it('日付や時刻の型が違っても文字列として比べる（誤検知しない）', () => {
@@ -407,13 +422,13 @@ describe('データ掃除', () => {
   it('★重複行は非空の値を寄せて統合する（先勝ちで捨てない）', () => {
     const r = ctx.mergeMemberRows_([
       ['元', 'グローライズ', '', 0, '', ''],
-      ['元', 'グローライズ', 'INF', 25000, '2部隊', '']
+      ['元', 'グローライズ', 'INF', 25000, '第二部隊', '']
     ]);
     expect(r.conflicts.length).toBe(0);
     expect(r.merged.length).toBe(1);
     expect(r.merged[0][2]).toBe('INF');
     expect(r.merged[0][3]).toBe(25000);      // ★単価を失わない
-    expect(r.merged[0][4]).toBe('2部隊');
+    expect(r.merged[0][4]).toBe('第二部隊');
   });
 
   it('★値が食い違ったら統合せず conflicts に出す（勝手に決めない）', () => {
@@ -471,7 +486,7 @@ describe('変更履歴 突き合わせ（Codexレビュー[P2]#4#5の追試）',
       '現場名': 'A現場', '氏名': '元', '役割': '代表', '出勤': '08:00', '退勤': '17:00',
       '人工': 1, 'メモ': '', '夜勤': '', '会社': 'グローライズ', 'ID': 'X1',
       '更新者': '向', '色': '', '事業部': 'INF', '工番': 'INF-26-001',
-      '作業区分': '現場作業', '車両': '', '拠点': '本社', '部隊': '1部隊'
+      '作業区分': '現場作業', '車両': '', '拠点': '本社', '部隊': '第一部隊'
     };
     Object.assign(base, over || {});
     return H().map(h => base[h]);
@@ -562,7 +577,7 @@ describe('変更履歴の読みやすさ（2026-08-27 実機テストで見つ�
       if (h === '退勤') return ctx.makeDate_(1899, 11, 30, 17, 0);
       if (h === '登録日時') return ctx.makeDate_(2026, 7, 27, 18, 45);
       if (h === '氏名') return '元';
-      if (h === '部隊') return '3部隊';
+      if (h === '部隊') return '第三部隊';
       return '';
     });
     const o = JSON.parse(ctx.rowFullJson_(H(), arr));
@@ -571,7 +586,7 @@ describe('変更履歴の読みやすさ（2026-08-27 実機テストで見つ�
     expect(o['退勤']).toBe('17:00');
     expect(o['登録日時']).not.toContain('GMT');
     expect(o['氏名']).toBe('元');
-    expect(o['部隊']).toBe('3部隊');
+    expect(o['部隊']).toBe('第三部隊');
     expect(Object.keys(o).length).toBe(21);
   });
 

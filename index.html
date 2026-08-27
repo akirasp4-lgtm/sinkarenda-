@@ -368,10 +368,12 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <label>部隊 <span style="font-weight:400;color:#888;font-size:11px">（責任者から自動。違うときだけ変更）</span></label>
     <select id="s-butai" onchange="onButaiChanged('s')" style="margin-bottom:0">
       <option value="">部隊なし</option>
-      <option value="1部隊">1部隊</option>
-      <option value="2部隊">2部隊</option>
-      <option value="3部隊">3部隊</option>
-      <option value="4部隊">4部隊</option>
+      <option value="第一部隊">第一部隊（中島）</option>
+      <option value="第二部隊">第二部隊（前﨑）</option>
+      <option value="第三部隊">第三部隊（東）</option>
+      <option value="第四部隊">第四部隊（鈴木）</option>
+      <option value="第五部隊">第五部隊（高田・関東）</option>
+      <option value="第六部隊">第六部隊（奥田）</option>
     </select>
   </div>
 
@@ -721,10 +723,12 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
       <!-- ★一括編集で部隊がバラバラのときだけ出す。選んだままなら各予定の部隊を保つ -->
       <option value="__KEEP__" style="display:none">（そのまま・変更しない）</option>
       <option value="">部隊なし</option>
-      <option value="1部隊">1部隊</option>
-      <option value="2部隊">2部隊</option>
-      <option value="3部隊">3部隊</option>
-      <option value="4部隊">4部隊</option>
+      <option value="第一部隊">第一部隊（中島）</option>
+      <option value="第二部隊">第二部隊（前﨑）</option>
+      <option value="第三部隊">第三部隊（東）</option>
+      <option value="第四部隊">第四部隊（鈴木）</option>
+      <option value="第五部隊">第五部隊（高田・関東）</option>
+      <option value="第六部隊">第六部隊（奥田）</option>
     </select>
   </div>
 
@@ -2082,7 +2086,9 @@ function jobsiteKyoten(loc){
 //   ★部隊は人に固定で持たせず予定1件ごとに持つ（案件ごとに人員を組み替える運用のため）。
 //     職人マスタの「既定部隊」は入力の初期値を入れるためだけに使う。
 // ==============================================================
-const BUTAI_VALUES=['1部隊','2部隊','3部隊','4部隊'];
+const BUTAI_VALUES=['第一部隊','第二部隊','第三部隊','第四部隊','第五部隊','第六部隊'];
+// 部隊長（固定）。組織図2026／組織運営方針書Ver1.0 より。第六部隊は利用者確認済み（奥田）。
+const BUTAI_LEADERS={'第一部隊':'中島','第二部隊':'前﨑','第三部隊':'東','第四部隊':'鈴木','第五部隊':'高田','第六部隊':'奥田'};
 const butaiTouched={s:false,e:false};
 function onButaiChanged(p){butaiTouched[p]=true;}
 function normalizeButai(v){const s=String(v==null?'':v).trim();return BUTAI_VALUES.includes(s)?s:'';}
@@ -2127,7 +2133,7 @@ function readButai(p){
 function butaiTag(v){
   const b=normalizeButai(v&&v.butai!==undefined?v.butai:v);
   if(!b)return '';
-  return '<span class="butai-tag">'+esc(b.replace('部隊','部'))+'</span>';
+  return '<span class="butai-tag">'+esc(b.replace('部隊',''))+'</span>';
 }
 
 // ★2026-08-27 フェーズ1: 編集モーダルを開くとき、その予定に保存されている部隊を読み戻す。
