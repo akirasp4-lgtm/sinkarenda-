@@ -2323,6 +2323,97 @@ function expandCompactRows(headers,rows){
   if(!headers||!headers.length)return rows||[];
   return (rows||[]).map(r=>{const o={};for(let i=0;i<headers.length;i++)o[headers[i]]=r[i];return o;});
 }
+// ===== PHASE2-CONFLICT-RULE:BEGIN =====
+// 人員の重複判定（設計書 §1.1・2026-08-27 に実データ2,664行を数えて確定したルール）
+//
+//   同じ人・同じ日に、作業区分が現場系で、元請＋現場名が異なる行が2件以上ある。
+//   昼と夜勤は別枠。夜勤列が「予定」「休み」の行は対象外。
+//
+// ★ゆるいルールにしなかった理由（実測）:
+//     同じ人・同じ日に2件以上 → 250件（「現場＋安全会議」「現場＋事務所」など正常が大半）
+//     出退勤の時間が重なる     → 217件（08:00-17:00の定型なのでほぼ全部が該当）
+//     人工の合計が1.0超        → 189件（人工は給料の数字。全行が1で時間の意味を持たない）
+//     同じ日に別々の現場系      →  47件（うち今日以降12件）★物理的に不可能＝これだけが本物
+//   毎日200件出る警告は誰も読まない。読まれる数まで絞るのが目的。
+//
+// ★このブロックは index.html と admin.html に同じ物が入っている。片方だけ直さないこと
+//   （cf/test/phase2-conflict.test.js が1文字でも違えば落とす）。
+// ★ここはDOMに一切触らない。テストがこの区間だけを取り出して動かすため。
+var GENBA_WORKTYPES = ['現場作業', '置局', '着打ち', '撤去品返却'];
+
+// 区切り文字。氏名や現場名に出てこない制御文字を使う。
+// 「きんでん」+「西A現場」と「きんでん西」+「A現場」を別物として扱うために必要
+var CONFLICT_SEP = '\u0001';
+
+function isGenbaWork(n) {
+  return GENBA_WORKTYPES.indexOf(String((n && n.workType) || '').trim()) >= 0;
+}
+
+// 昼と夜勤は同じ日でも別枠。夜勤明けに昼の現場へ行くのは普通にある
+function conflictBucket(n) { return (n && n.yakin) ? 'night' : 'day'; }
+
+// 「どの現場か」の同一性。元請が違えば別の現場として数える
+function jobKey(n) {
+  return String((n && n.genba) || '').trim() + CONFLICT_SEP + String((n && n.loc) || '').trim();
+}
+
+// 重複として数えない行をここで落とす
+function countsForConflict(n) {
+  if (!n || n.isGhost) return false;      // 夜勤の翌日ぶんの影は実体ではない
+  if (n.yotei || n.yasumi) return false;  // 「予定」「休み」は現場に立っていない
+  if (!isGenbaWork(n)) return false;      // 事務所・現調・移動などは現場と両立する
+  if (!n.date || !n.name) return false;
+  return true;
+}
+
+function findConflicts(nippos, opts) {
+  var from = (opts && opts.from) || '';
+  var map = new Map();
+  (nippos || []).forEach(function (n) {
+    if (!countsForConflict(n)) return;
+    if (from && String(n.date) < from) return;
+    // 会社を混ぜない。和信カインドの「元」とラーテルの「元」は別人
+    var key = [String(n.date), String(n.company || '').trim(),
+               String(n.name).trim(), conflictBucket(n)].join(CONFLICT_SEP);
+    if (!map.has(key)) map.set(key, new Map());
+    var jobs = map.get(key);
+    var jk = jobKey(n);
+    if (!jobs.has(jk)) {
+      jobs.set(jk, {
+        genba: String(n.genba || ''), loc: String(n.loc || ''),
+        butai: String(n.butai || ''), ids: []
+      });
+    }
+    if (n.id) jobs.get(jk).ids.push(n.id);
+  });
+  var out = [];
+  map.forEach(function (jobs, key) {
+    if (jobs.size < 2) return;
+    var p = key.split(CONFLICT_SEP);
+    out.push({
+      date: p[0], company: p[1], name: p[2], bucket: p[3],
+      jobs: Array.from(jobs.values())
+    });
+  });
+  out.sort(function (a, b) {
+    return a.date < b.date ? -1 : a.date > b.date ? 1
+      : a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
+  return out;
+}
+
+// 「今から保存しようとしている予定」が新しく重複を生むかだけを見る。
+// 元から重なっていた分まで出すと、毎回同じ警告が出て読まれなくなる。
+function conflictsIfAdded(existing, candidates) {
+  if (!candidates || !candidates.length) return [];
+  var sig = function (c) { return [c.date, c.company, c.name, c.bucket].join(CONFLICT_SEP); };
+  var before = new Set(findConflicts(existing).map(sig));
+  return findConflicts((existing || []).concat(candidates)).filter(function (c) {
+    return !before.has(sig(c));
+  });
+}
+// ===== PHASE2-CONFLICT-RULE:END =====
+
 function parseRows(rows,company){
   return(rows||[]).map(r=>({
     id:String(r['ID']||''),timestamp:String(r['登録日時']||''),
