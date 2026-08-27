@@ -12,6 +12,7 @@ const BILLING_RATE_SHEET = '請求単価マスタ';
 const BILLING_CALC_SHEET = '請求計算';
 const ALLOCATION_SHEET = '事業部別按分';
 const OPLOG_SHEET = '操作ログ';
+const HISTORY_SHEET = '変更履歴';
 const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両','拠点','部隊'];
 const GROWISE = 'グローライズ';
 
@@ -105,6 +106,38 @@ function getMemberButaiMap_(ss) {
 function normalizeMemberActive_(v) {
   const s = String(v == null ? '' : v).trim();
   return !(s === '×' || s === 'x' || s === 'X' || s === '✕');
+}
+
+// ==============================================================
+// ★2026-08-27 フェーズ1: 案件ステータス（依頼10項目の⑧）
+//   既存の「完了」列（真偽値）は集計エンジンが参照しているので消さない。
+//   ステータスを正とし、完了列を従属させる（二重管理を避けるため）。
+// ==============================================================
+const SITE_STATUSES = ['見積中', '受注', '準備中', '施工中', '残工事', '完工', '延期', '中止'];
+const SITE_STATUS_DONE = ['完工', '中止'];
+
+function isSiteStatusDone_(status) {
+  return SITE_STATUS_DONE.indexOf(String(status || '').trim()) >= 0;
+}
+
+// 「完了」列の読み方。★既存の判定と必ず同じにすること。
+//   doGet は `String(r[8] || '').trim() !== ''` で completed を出しており
+//   （gas.js の jobsites 出力）、実際に保存されている値は 'TRUE' ではなく **'✓'**。
+//   ここを 'TRUE' だけで判定すると、完工済みの現場が全部「施工中」に化ける。
+function isCompletedCell_(v) {
+  if (v === true) return true;
+  if (v === false || v == null) return false;
+  const s = String(v).trim();
+  if (s === '' || s.toUpperCase() === 'FALSE') return false;
+  return true;     // ✓ / TRUE / 完了 / 1 など、何か入っていれば完了
+}
+
+// ★移行は「読むときに導出する」方式。既存184件を書き換えなくてよい。
+//   ステータス列が空欄・壊れた値のときは、今までの「完了」列から導く。
+function normalizeSiteStatus_(raw, completedCell) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (SITE_STATUSES.indexOf(s) >= 0) return s;
+  return isCompletedCell_(completedCell) ? '完工' : '施工中';
 }
 
 // ==============================================================
@@ -629,6 +662,15 @@ function doPost(e) {
       const rows = requireDailyRows_(body);
       const values = buildDailyValues_(ss, rows, updatedBy);
       appendDailyValues_(sheet, values);
+      // ★2026-08-27 フェーズ1: 変更履歴。
+      //   addだけは握りつぶす。履歴が書けなくても原本の予定は正しく保存されており
+      //   失うものが無い。ここでエラーにすると履歴シートの不調だけで新規登録が全部止まる。
+      try {
+        logHistory_(ss, 'add', values.map(function (v) {
+          return { oldId: '', newId: String(v[idCol] || ''), field: '(新規)',
+                   before: '', after: rowSummary_(HEADERS, v) };
+        }), updatedBy);
+      } catch (e) {}
       logOperation_(ss, 'add', rows[0].genba + '/' + (rows[0].loc || ''), '行数=' + rows.length, updatedBy);
       return ok({count: rows.length});
     }
@@ -638,10 +680,27 @@ function doPost(e) {
       if (ids.length === 0) return ok({deleted: 0});
       const data = sheet.getDataRange().getValues();
       const rowsToDelete = [];
+      const deletedRows = [];                   // ★2026-08-27 消す前に中身を控える
       for (let i = data.length - 1; i >= 1; i--) {
         const rowId = String(data[i][idCol] || '').trim();
-        if (rowId && ids.includes(rowId)) rowsToDelete.push(i + 1);
+        if (rowId && ids.includes(rowId)) {
+          rowsToDelete.push(i + 1);
+          deletedRows.push(data[i]);
+        }
       }
+
+      // ★1) 先に履歴を書く。失敗したら1行も消さずにエラーで返す（[P1]#2）。
+      //     変更前には21列すべてをJSONで残す＝ここから元の予定を作り直せる（[P1]#3）。
+      try {
+        logHistory_(ss, 'delete', deletedRows.slice().reverse().map(function (r) {
+          return { oldId: String(r[idCol] || ''), newId: '', field: '(削除)',
+                   before: rowFullJson_(HEADERS, r), after: '' };
+        }), updatedBy);
+      } catch (e) {
+        return error('変更履歴を記録できなかったため、削除を中止しました（予定はそのまま残っています）: ' + e);
+      }
+
+      // ★2) 履歴が残ってから消す
       rowsToDelete.forEach(rowNum => sheet.deleteRow(rowNum));
       logOperation_(ss, 'delete', 'IDs=' + ids.length + '件', '削除行=' + rowsToDelete.length, updatedBy);
       return ok({deleted: rowsToDelete.length, requested: ids.length});
@@ -651,14 +710,32 @@ function doPost(e) {
       const rows = requireDailyRows_(body);
       const ids = body.ids || [];
       const rowsToDelete = [];
+      const oldRows = [];                       // ★2026-08-27 変更前の値を控える
       if (ids.length > 0) {
         const data = sheet.getDataRange().getValues();
         for (let i = data.length - 1; i >= 1; i--) {
           const rowId = String(data[i][idCol] || '').trim();
-          if (rowId && ids.includes(rowId)) rowsToDelete.push(i + 1);
+          if (rowId && ids.includes(rowId)) {
+            rowsToDelete.push(i + 1);
+            oldRows.push(data[i]);              // 消す前にここで拾う
+          }
         }
       }
       const values = buildDailyValues_(ss, rows, updatedBy);
+
+      // ★2026-08-27 [P1]#2: 順番が命。
+      //   旧: 「新行を足す → 旧行を消す → 履歴を書く」だったため、履歴の書き込みが
+      //   失敗すると旧予定は既に消えているのに成功応答になっていた。
+      //   新: 「値を作る → 履歴を書く（flushまで確認）→ 新行を足す → 旧行を消す」。
+      //   IDは画面が作って送ってくるので、行を足す前に新IDが分かる＝先に履歴を書ける。
+      //   履歴で例外が出れば原本は1行も動いていない状態で止まる。
+      //   oldRowsは下から積んでいるので reverse して画面の順に戻す（[P2]#5）。
+      try {
+        logHistory_(ss, 'update', diffDailyRows_(HEADERS, oldRows.slice().reverse(), values), updatedBy);
+      } catch (e) {
+        return error('変更履歴を記録できなかったため、保存を中止しました（元の予定はそのまま残っています）: ' + e);
+      }
+
       // 新しい予定を先に一括保存する。保存に失敗しても元予定は残る。
       appendDailyValues_(sheet, values);
       rowsToDelete.forEach(rowNum => sheet.deleteRow(rowNum));
@@ -1001,9 +1078,54 @@ function doPost(e) {
       const data = jobSiteSheet.getDataRange().getValues();
       for (let i = 1; i < data.length; i++) {
         if (String(data[i][0]).trim() === genba && String(data[i][1]).trim() === loc) {
+          // ★2026-08-27 [P2]#7: 8段階ステータスが設定済みなら、この旧APIで上書きさせない。
+          //   管理者が「延期」「中止」にした現場を、職人側の「完了にする」ボタンが
+          //   「完工」「施工中」へ戻してしまうため（Codexレビューで発見）。
+          const curStatus = String(data[i][11] || '').trim();
+          if (SITE_STATUSES.indexOf(curStatus) >= 0) {
+            return error('この現場はステータス「' + curStatus + '」が設定されています。変更は管理者画面から行ってください。');
+          }
           jobSiteSheet.getRange(i + 1, 9).setValue(completed ? '✓' : '');
           logOperation_(ss, 'update_site_status', genba + '/' + loc, completed ? '完了' : '進行中に戻す', updatedBy);
           return ok({updated: genba + '/' + loc, completed: completed});
+        }
+      }
+      return error('現場マスタに該当現場が見つかりません');
+    }
+
+    // ★2026-08-27 フェーズ1: 案件ステータス（8段階）を設定する。管理者画面から使う。
+    //   ステータスを正とし、既存の「完了」列を従属させる（集計エンジンがそちらを見るため）。
+    // ★2026-08-27 フェーズ1: 変更履歴の取り出し（admin.html の履歴タブ用）
+    if (action === 'get_history') {
+      const hSheet = getOrCreateHistorySheet_(ss);
+      const hData = hSheet.getDataRange().getValues();
+      const hBody = hData.length > 1 ? hData.slice(1) : [];
+      return ok({ rows: sortHistoryRows_(hBody, Number(body.limit) || HISTORY_MAX_ROWS) });
+    }
+
+    if (action === 'set_site_status') {
+      const jobSiteSheet = getOrCreateJobSiteSheet_(ss);
+      const genba = String(body.genba || '').trim();
+      const loc = String(body.loc || '').trim();
+      const status = String(body.status || '').trim();
+      if (!genba) return error('元請名は必須です');
+      if (SITE_STATUSES.indexOf(status) < 0) return error('知らないステータスです: ' + status);
+      const data = jobSiteSheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][0]).trim() === genba && String(data[i][1]).trim() === loc) {
+          const before = normalizeSiteStatus_(data[i][11], data[i][8]);
+          const done = isSiteStatusDone_(status);
+          jobSiteSheet.getRange(i + 1, 12).setValue(status);
+          jobSiteSheet.getRange(i + 1, 9).setValue(done ? '✓' : '');
+          // 変更履歴にも残す（現場マスタは日報と別なので旧ID/新IDは空でよい）
+          try {
+            logHistory_(ss, 'site_status', [{
+              oldId: '', newId: '', field: '案件ステータス: ' + genba + '/' + loc,
+              before: before, after: status
+            }], updatedBy);
+          } catch (e) {}
+          logOperation_(ss, 'set_site_status', genba + '/' + loc, before + ' → ' + status, updatedBy);
+          return ok({updated: genba + '/' + loc, status: status, completed: done});
         }
       }
       return error('現場マスタに該当現場が見つかりません');
@@ -1392,7 +1514,9 @@ function doGet(e) {
       jobNo: String(r[2] || ''),
       completed: String(r[8] || '').trim() !== '',
       billingMethod: String(r[9] || '').trim() || '応援',
-      kyoten: String(r[10] || '').trim()    // ★2026-08-26 拠点。空なら画面側は会社の既定値を使う
+      kyoten: String(r[10] || '').trim(),   // ★2026-08-26 拠点。空なら画面側は会社の既定値を使う
+      // ★2026-08-27 フェーズ1: 未設定なら「完了」列から導く（既存184件は無書き換えで移行）
+      status: normalizeSiteStatus_(r[11], r[8])
     })).filter(j => j.genba && (!filterByCompany || allowedGenba.has(j.genba))) : [];
 
     if (wantCompact) return ok({compact: 1, headers: outHeaders, rows, members, genbaMaster, jobsites});
@@ -1469,16 +1593,18 @@ function getOrCreateJobSiteSheet_(ss) {
   let sheet = ss.getSheetByName(JOBSITE_SHEET);
   if (!sheet) {
     sheet = ss.insertSheet(JOBSITE_SHEET);
-    sheet.appendRow(['元請名', '現場名', '工番', '事業部', '年度', '連番', '売上', '読み', '完了', '請求方式', '拠点']);
+    sheet.appendRow(['元請名', '現場名', '工番', '事業部', '年度', '連番', '売上', '読み', '完了', '請求方式', '拠点', 'ステータス']);
   } else {
-    ensureColumns_(sheet, 11);
-    const headers = sheet.getRange(1, 1, 1, 11).getValues()[0];
+    ensureColumns_(sheet, 12);
+    const headers = sheet.getRange(1, 1, 1, 12).getValues()[0];
     if (String(headers[6] || '').trim() !== '売上') sheet.getRange(1, 7).setValue('売上');
     if (String(headers[7] || '').trim() !== '読み') sheet.getRange(1, 8).setValue('読み');
     if (String(headers[8] || '').trim() !== '完了') sheet.getRange(1, 9).setValue('完了');
     if (String(headers[9] || '').trim() !== '請求方式') sheet.getRange(1, 10).setValue('請求方式');
     // ★2026-08-26: 拠点（本社/関東支店）。現場を選べば予定に自動で入る＝入力を増やさない
     if (String(headers[10] || '').trim() !== '拠点') sheet.getRange(1, 11).setValue('拠点');
+    // ★2026-08-27 フェーズ1: 案件ステータス（8段階）
+    if (String(headers[11] || '').trim() !== 'ステータス') sheet.getRange(1, 12).setValue('ステータス');
   }
   return sheet;
 }
@@ -1559,6 +1685,166 @@ function getOrCreateOpLogSheet_(ss) {
     sheet.appendRow(['日時', '操作', '対象', '詳細', '実行者']);
   }
   return sheet;
+}
+
+// ==============================================================
+// ★2026-08-27 フェーズ1: 変更履歴（依頼⑦「誰が登録・変更・削除したか」
+//   「元の予定も確認できる」）
+//
+//   操作ログ（誰が何をしたか）とは別物。こちらは「何が何に変わったか」を残す。
+//   両方残す理由: 操作ログはアーカイブ・マージ等の管理操作も記録しており用途が違う。
+// ==============================================================
+const HISTORY_HEADERS = ['日時', '操作', '旧ID', '新ID', '項目', '変更前', '変更後', '実行者'];
+const HISTORY_MAX_ROWS = 500;
+
+// 履歴に出さない列。登録日時は毎回変わるので出すと本当の差分が埋もれる。
+// IDは旧ID/新IDの欄で見えるので項目としては重複。
+const HISTORY_SKIP_FIELDS = ['登録日時', 'ID'];
+
+function getOrCreateHistorySheet_(ss) {
+  let sheet = ss.getSheetByName(HISTORY_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(HISTORY_SHEET);
+    sheet.appendRow(HISTORY_HEADERS);
+  } else {
+    ensureColumns_(sheet, HISTORY_HEADERS.length);
+  }
+  return sheet;
+}
+
+// 予定1件を人が読める1行にまとめる（追加・グループ内の増減の表示用）
+function rowSummary_(headers, arr) {
+  const g = function (h) {
+    const i = headers.indexOf(h);
+    return i >= 0 ? String(arr[i] == null ? '' : arr[i]).trim() : '';
+  };
+  return [g('作業日'), g('氏名'), g('元請名') + '/' + g('現場名'), g('作業区分')]
+    .filter(function (x) { return x && x !== '/'; }).join(' ');
+}
+
+// ★Codexレビュー[P1]#3: 削除は「全項目」を残さないと復元できない。
+//   要約（作業日・氏名・現場・区分）だけでは、役割・出退勤・人工・メモ・夜勤・
+//   会社・事業部・工番・車両・拠点・部隊が失われる。
+//   バックアップ後に登録された予定を消したら、二度と戻せない。
+function rowFullJson_(headers, arr) {
+  const o = {};
+  headers.forEach(function (h, i) {
+    const v = arr && arr[i];
+    o[h] = (v == null) ? '' : String(v);
+  });
+  return JSON.stringify(o);
+}
+
+/**
+ * 編集前後の行を突き合わせ、変わった項目だけを返す。
+ * 突き合わせの鍵は「作業日＋氏名＋その中での何番目か」。
+ * IDは編集のたびに変わるので鍵に使えない。
+ *
+ * ★「何番目か」を鍵に混ぜる理由（実データで確認・2026-08-27）:
+ *   同じ人が同じ日に複数行を持つ組み合わせが本番に250件ある
+ *   （現場＋事務所、昼＋夜勤 など）。単純に「作業日＋氏名」を鍵にすると
+ *   2件目以降が握りつぶされ、2件目を直した履歴が残らないうえ、
+ *   件数が変わったときに「削除された」と誤って記録してしまう。
+ *
+ * ※ oldRows はシートを下から上へ走査して積むため画面の順と逆になる。
+ *    呼び出す前に必ず reverse() して渡すこと（★Codexレビュー[P2]#5）。
+ *
+ * 戻り値: [{oldId, newId, field, before, after}]
+ */
+function diffDailyRows_(headers, oldRows, newRows) {
+  const idIdx = headers.indexOf('ID');
+  const dIdx = headers.indexOf('作業日');
+  const nIdx = headers.indexOf('氏名');
+  const cell = function (arr, i) {
+    return String(arr && arr[i] != null ? arr[i] : '').trim();
+  };
+
+  // 同じ「作業日＋氏名」が複数あっても取りこぼさないよう連番を振る
+  const indexRows = function (rows) {
+    const map = {}, seen = {};
+    (rows || []).forEach(function (r) {
+      const base = cell(r, dIdx) + '|' + cell(r, nIdx);
+      seen[base] = (seen[base] || 0) + 1;
+      map[base + '#' + seen[base]] = r;
+    });
+    return map;
+  };
+  const oldMap = indexRows(oldRows);
+  const newMap = indexRows(newRows);
+
+  const out = [];
+  Object.keys(oldMap).forEach(function (k) {
+    const o = oldMap[k];
+    const n = newMap[k];
+    if (!n) {
+      out.push({ oldId: cell(o, idIdx), newId: '', field: '(削除)',
+                 before: rowSummary_(headers, o), after: '' });
+      return;
+    }
+    headers.forEach(function (h, i) {
+      if (HISTORY_SKIP_FIELDS.indexOf(h) >= 0) return;
+      const a = cell(o, i), b = cell(n, i);
+      if (a !== b) {
+        out.push({ oldId: cell(o, idIdx), newId: cell(n, idIdx), field: h, before: a, after: b });
+      }
+    });
+  });
+  Object.keys(newMap).forEach(function (k) {
+    if (oldMap[k]) return;
+    const n = newMap[k];
+    out.push({ oldId: '', newId: cell(n, idIdx), field: '(追加)',
+               before: '', after: rowSummary_(headers, n) });
+  });
+
+  // ★Codexレビュー[P2]#5: 業務項目に差が無くてもIDは編集のたびに必ず変わる。
+  //   差分ゼロで何も残さないと、そこで旧ID→新IDの鎖が切れて過去へ遡れなくなる。
+  //   1件も出力が無いときだけ、対応関係だけを記録する行を残す。
+  if (!out.length) {
+    Object.keys(oldMap).forEach(function (k) {
+      const o = oldMap[k], n = newMap[k];
+      if (!n) return;
+      const oid = cell(o, idIdx), nid = cell(n, idIdx);
+      if (oid && nid && oid !== nid) {
+        out.push({ oldId: oid, newId: nid, field: '(ID引継ぎ)', before: oid, after: nid });
+      }
+    });
+  }
+  return out;
+}
+
+// 履歴をまとめて1回で書く（appendRowを繰り返すとGASが遅くなるため）
+//
+// ★Codexレビュー[P1]#2: ここで例外を握りつぶしてはいけない。
+//   握りつぶすと「履歴が書けなかったのに旧予定は消えた」＝
+//   元の予定を永久に復元できない状態が、成功応答のまま起きる。
+//   呼び出し側は、この関数が成功したことを確認してから原本を消すこと。
+//   SpreadsheetApp.flush() まで通して初めて「書けた」と言える。
+function logHistory_(ss, action, entries, user) {
+  if (!entries || !entries.length) return 0;
+  const sheet = getOrCreateHistorySheet_(ss);
+  const now = new Date().toLocaleString('ja-JP');
+  const values = entries.map(function (e) {
+    return [now, action, e.oldId || '', e.newId || '', e.field || '',
+            e.before == null ? '' : e.before, e.after == null ? '' : e.after, user || ''];
+  });
+  sheet.getRange(sheet.getLastRow() + 1, 1, values.length, HISTORY_HEADERS.length)
+       .setValues(values);
+  SpreadsheetApp.flush();     // 実際に書き終わるまで待つ
+  return values.length;
+}
+
+// 日時は 'YYYY/M/D H:mm:ss' の文字列で保存されている。数値に直して新しい順に並べる。
+function historyTimeValue_(v) {
+  const s = String(v == null ? '' : v).trim();
+  const m = /^(\d{4})\/(\d{1,2})\/(\d{1,2})[ 　]+(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(s);
+  if (!m) return 0;
+  return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)).getTime();
+}
+
+function sortHistoryRows_(rows, limit) {
+  const arr = (rows || []).slice();
+  arr.sort(function (a, b) { return historyTimeValue_(b[0]) - historyTimeValue_(a[0]); });
+  return arr.slice(0, limit || HISTORY_MAX_ROWS);
 }
 
 function logOperation_(ss, action, target, detail, user) {
