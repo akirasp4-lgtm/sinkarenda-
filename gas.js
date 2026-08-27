@@ -77,7 +77,7 @@ function resolveKyoten_(explicit, jobsiteKyoten, company) {
 //   | 第二部隊 | 前崎 蓮（★職人マスタの表記は「前﨑」） | 情報通信事業部 |
 //   | 第三部隊 | 東 努 | 都市インフラ事業部 |
 //   | 第四部隊 | 鈴木 陸央 | 都市インフラ事業部 |
-//   | 第五部隊 | 高田 真也（GRミツマ所属） | 関東支店 |
+//   | 第五部隊 | 高田 真也（GRミツマ所属・職人マスタの表記は「高田（関東）」） | 関東支店 |
 //   | 第六部隊 | 奥田 翔貴 | MISC事業部 |
 //
 //   ※第六部隊の部隊長は資料間で食い違っていた（組織図＝奥田／方針書＝向）。
@@ -99,7 +99,7 @@ const BUTAI_LEADERS = {
   '第二部隊': '前﨑',
   '第三部隊': '東',
   '第四部隊': '鈴木',
-  '第五部隊': '高田',
+  '第五部隊': '高田（関東）',   // ★2026-08-27 二重登録の統合で「高田（関東）」に改名
   '第六部隊': '奥田'
 };
 
@@ -4021,4 +4021,173 @@ function cleanupMastersPhase1(apply) {
 // dry-runの結果を見て問題なければ、こちらをエディタから実行する
 function cleanupMastersPhase1_APPLY() {
   return cleanupMastersPhase1(true);
+}
+
+
+// ==============================================================
+// ★2026-08-27 同一人物の二重登録を1つにまとめる（利用者指示）
+//
+//   §3.9 でグローライズとGRミツマを1つの名簿として扱うようにしたため、
+//   同じ人が2つの名前で登録されているのが名簿に二重で出るようになった。
+//   利用者確認: 「その二重は確かに二重なので高田（関東）のように変えておいて」
+//
+//   | 今の名前 | 会社 | 予定の氏名 | まとめる先 |
+//   |---|---|---|---|
+//   | 高田 | GRミツマ | 62件 | 高田（関東） |
+//   | GRME髙田 | グローライズ | 40件 | 高田（関東） |
+//   | 柳澤 | GRミツマ | 8件 | 柳澤（関東） |
+//   | 栁澤 | GRミツマ | 1件 | 柳澤（関東） |
+//   | GRME栁澤 | グローライズ | 3件 | 柳澤（関東） |
+//   | 内村 | GRミツマ | 2件 | 内村（関東） |
+//   | GRME内村 | グローライズ | 0件 | 内村（関東） |
+//
+//   ★★会社は絶対に触らない。
+//     「GRME髙田（グローライズ）」の40件は、関東の人が本社案件に入った記録であり
+//     正しいデータ。会社を書き換えると拠点の絞り込みと集計が壊れる。
+//     直すのは「氏名」と「更新者」だけ。
+//
+//   ★対象は 日報データ と アーカイブ の両方。
+//     アーカイブを忘れると、3ヶ月より前の集計だけ名前が割れたままになる。
+// ==============================================================
+
+const MEMBER_MERGE_MAP = {
+  '高田': '高田（関東）',
+  '髙田': '高田（関東）',
+  'GRME髙田': '高田（関東）',
+  'GRME高田': '高田（関東）',
+  '柳澤': '柳澤（関東）',
+  '栁澤': '柳澤（関東）',
+  'GRME栁澤': '柳澤（関東）',
+  'GRME柳澤': '柳澤（関東）',
+  '内村': '内村（関東）',
+  'GRME内村': '内村（関東）'
+};
+
+// まとめたあとの職人マスタで、この人たちを置く会社。
+// 実態は関東支店＝GRミツマ。§3.9でグローライズとGRミツマは1つの名簿なので、
+// どちらに置いても両方の画面に出る。
+const MEMBER_MERGE_COMPANY = 'GRミツマ';
+
+function mergedMemberName_(name) {
+  const s = String(name == null ? '' : name).trim();
+  return MEMBER_MERGE_MAP[s] || s;
+}
+
+// 1つのシートの「氏名」「更新者」列をまとめる先の名前へ置き換える。
+// 列ごとに1回の setValues で書く（1セルずつ書くとGASの6分制限に届く）。
+function mergeNamesInSheet_(sheet, apply) {
+  const out = { sheet: sheet ? sheet.getName() : '(無し)', 氏名: 0, 更新者: 0, 行数: 0 };
+  if (!sheet) return out;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return out;
+  const headers = data[0];
+  const nameIdx = headers.indexOf('氏名');
+  const byIdx = headers.indexOf('更新者');
+  out.行数 = data.length - 1;
+
+  [['氏名', nameIdx, '氏名'], ['更新者', byIdx, '更新者']].forEach(function (pair) {
+    const idx = pair[1];
+    if (idx < 0) return;
+    const col = [];
+    let changed = 0;
+    for (let i = 1; i < data.length; i++) {
+      const before = String(data[i][idx] == null ? '' : data[i][idx]);
+      const after = mergedMemberName_(before);
+      if (after !== before) changed++;
+      col.push([after]);
+    }
+    out[pair[2]] = changed;
+    if (apply && changed > 0) {
+      sheet.getRange(2, idx + 1, col.length, 1).setValues(col);
+    }
+  });
+  return out;
+}
+
+/**
+ * Apps Scriptのエディタから手で実行する。
+ *   mergeDuplicateMembers()      … dry-run。何も書かずに結果だけログに出す
+ *   mergeDuplicateMembers_APPLY() … 実行
+ *
+ * (1) 日報データ・アーカイブの「氏名」「更新者」をまとめる先の名前へ置換
+ * (2) 職人マスタの重複行を1行にまとめる（非空の値を寄せる。食い違えば中止）
+ * 行数は1行も増減しない。会社は1つも触らない。
+ */
+function mergeDuplicateMembers(apply) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('他の処理が動いています。少し待ってからもう一度実行してください。');
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const report = { dryRun: !apply, シート: [], 職人マスタ: {}, 食い違い: [] };
+
+    // ── (1) 予定データの氏名・更新者
+    [SHEET_NAME, ARCHIVE_SHEET].forEach(function (n) {
+      report.シート.push(mergeNamesInSheet_(ss.getSheetByName(n), apply));
+    });
+
+    // ── (2) 職人マスタ
+    const mSheet = apply ? getOrCreateMemberSheet_(ss) : ss.getSheetByName(MEMBER_SHEET);
+    if (!mSheet) { Logger.log('職人マスタがありません'); return report; }
+    const mData = mSheet.getDataRange().getValues();
+    const bodyRows = mData.slice(1).map(function (r) { return r.slice(0, 6); });
+
+    // 名前を置き換え、対象者は会社もGRミツマへ寄せる（本人キーが(会社,氏名)のため）
+    const renamed = bodyRows.map(function (r) {
+      const orig = String(r[0] == null ? '' : r[0]).trim();
+      const merged = mergedMemberName_(orig);
+      const row = r.slice();
+      row[0] = merged;
+      if (merged !== orig) row[1] = MEMBER_MERGE_COMPANY;
+      return row;
+    });
+
+    const m = mergeMemberRows_(renamed);
+    report.食い違い = m.conflicts;
+    report.職人マスタ = {
+      前: bodyRows.filter(function (r) { return String(r[0] || '').trim(); }).length,
+      後: m.merged.length,
+      まとめた数: bodyRows.filter(function (r) { return String(r[0] || '').trim(); }).length - m.merged.length
+    };
+    report.まとめた人 = m.merged
+      .filter(function (r) { return String(r[0]).indexOf('（関東）') >= 0; })
+      .map(function (r) { return r[0] + '（' + r[1] + '・単価' + (r[3] || 0) + '）'; });
+
+    if (m.conflicts.length) {
+      Logger.log('中止: 値が食い違う重複があります\n' + JSON.stringify(m.conflicts, null, 2));
+      return report;
+    }
+
+    if (!apply) {
+      Logger.log('【dry-run】書き込みはしていません\n' + JSON.stringify(report, null, 2));
+      return report;
+    }
+
+    // 書く直前にもう一度読み、変わっていたら中止（cleanupと同じ守り）
+    const nowData = mSheet.getDataRange().getValues()
+      .slice(1).map(function (r) { return r.slice(0, 6); });
+    if (JSON.stringify(nowData) !== JSON.stringify(bodyRows)) {
+      Logger.log('中止: 読み取りのあとに職人マスタが変更されました。もう一度dry-runからやり直してください。');
+      report.中止理由 = '読み取り後に職人マスタが変更された';
+      return report;
+    }
+
+    // 上書き→余りを消す順（逆だと途中で落ちたとき空になる）
+    const keep = m.merged;
+    const oldLastRow = mSheet.getLastRow();
+    if (keep.length) mSheet.getRange(2, 1, keep.length, 6).setValues(keep);
+    const extraRows = oldLastRow - 1 - keep.length;
+    if (extraRows > 0) mSheet.getRange(2 + keep.length, 1, extraRows, 6).clearContent();
+    SpreadsheetApp.flush();
+
+    logOperation_(ss, 'merge_duplicate_members', '職人マスタ/日報データ/アーカイブ',
+      JSON.stringify(report.職人マスタ), 'system');
+    Logger.log(JSON.stringify(report, null, 2));
+    return report;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function mergeDuplicateMembers_APPLY() {
+  return mergeDuplicateMembers(true);
 }

@@ -24,7 +24,8 @@ const EXPORT_SNIPPET = `
   // ★vm の外で作った Date は中の Date と別物になり instanceof が効かない。
   //   本番（GAS）は同一環境なので起きないが、テストでは中で作る必要がある。
   makeDate_: function (y, m, d, h, mi) { return new Date(y, m, d, h || 0, mi || 0); },
-  KNOWN_COMPANIES, fixMojibakeCompany_, mergeMemberRows_
+  KNOWN_COMPANIES, fixMojibakeCompany_, mergeMemberRows_,
+  mergedMemberName_, MEMBER_MERGE_MAP, MEMBER_MERGE_COMPANY
 };`;
 
 let ctx;   // sandbox.__gas
@@ -96,7 +97,7 @@ describe('normalizeButai_', () => {
   it('部隊長は6人（第六部隊は奥田・利用者確認済み）', () => {
     expect(ctx.BUTAI_LEADERS).toEqual({
       '第一部隊': '中島', '第二部隊': '前﨑', '第三部隊': '東',
-      '第四部隊': '鈴木', '第五部隊': '高田', '第六部隊': '奥田'
+      '第四部隊': '鈴木', '第五部隊': '高田（関東）', '第六部隊': '奥田'
     });
   });
 
@@ -610,5 +611,41 @@ describe('変更履歴の読みやすさ（2026-08-27 実機テストで見つ�
     expect(sum).toContain('2028-12-31');
     expect(sum).not.toContain('GMT');
     expect(sum).toContain('元');
+  });
+});
+
+describe('同一人物の二重登録をまとめる（2026-08-27 利用者指示）', () => {
+  it('★まとめる先は「◯◯（関東）」', () => {
+    expect(ctx.mergedMemberName_('高田')).toBe('高田（関東）');
+    expect(ctx.mergedMemberName_('GRME髙田')).toBe('高田（関東）');
+    expect(ctx.mergedMemberName_('髙田')).toBe('高田（関東）');
+    expect(ctx.mergedMemberName_('柳澤')).toBe('柳澤（関東）');
+    expect(ctx.mergedMemberName_('栁澤')).toBe('柳澤（関東）');
+    expect(ctx.mergedMemberName_('GRME栁澤')).toBe('柳澤（関東）');
+    expect(ctx.mergedMemberName_('内村')).toBe('内村（関東）');
+    expect(ctx.mergedMemberName_('GRME内村')).toBe('内村（関東）');
+  });
+
+  it('対象外の人は1文字も変えない', () => {
+    ['中島', '前﨑', '東', '鈴木', '奥田', '向', '河原', '元', '川端', '川端（達）', '', null, undefined]
+      .forEach(n => expect(ctx.mergedMemberName_(n)).toBe(String(n == null ? '' : n).trim()));
+  });
+
+  it('★もう一度かけても結果が変わらない（二重実行しても壊れない）', () => {
+    const once = ctx.mergedMemberName_('GRME髙田');
+    expect(ctx.mergedMemberName_(once)).toBe(once);
+    expect(ctx.mergedMemberName_('高田（関東）')).toBe('高田（関東）');
+  });
+
+  it('前後の空白があっても拾う', () => {
+    expect(ctx.mergedMemberName_('  高田 ')).toBe('高田（関東）');
+  });
+
+  it('★第五部隊の部隊長名も統合後の名前になっている', () => {
+    expect(ctx.BUTAI_LEADERS['第五部隊']).toBe('高田（関東）');
+  });
+
+  it('まとめたあとの会社はGRミツマ（関東支店の実態）', () => {
+    expect(ctx.MEMBER_MERGE_COMPANY).toBe('GRミツマ');
   });
 });
