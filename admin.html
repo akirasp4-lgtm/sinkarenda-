@@ -414,13 +414,13 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="toggle-row toggle-yasumi" id="s-yasumi-toggle" onclick="setMode('s','yasumi')"><span class="t-icon">🏖️</span><span class="t-label">休み</span></div>
   <div class="toggle-row toggle-yotei" id="s-yotei-toggle" onclick="setMode('s','yotei')"><span class="t-icon">📌</span><span class="t-label">予定</span></div>
   <div class="leader-select-wrap">
-    <label>代表者<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
+    <label>責任者<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
     <div class="select-add-wrap" style="margin-bottom:0">
-      <select id="s-leader" onchange="checkLocationJobNo();refreshButaiField('s')"><option value="">代表者を選択してください</option></select>
+      <select id="s-leader" onchange="checkLocationJobNo();refreshButaiField('s')"><option value="">責任者を選択してください</option></select>
       <button class="btn btn-secondary btn-sm add-inline-btn" onclick="openSettingsFor('s-leader')">➕</button>
     </div>
   </div>
-  <div class="member-section"><div class="member-label">同行メンバー（タップで選択）</div><div id="member-selector" class="member-grid"></div></div>
+  <div class="member-section"><div class="member-label">班員（タップで選択）</div><div id="member-selector" class="member-grid"></div></div>
   <label>メモ <span style="font-size:11px;color:#999;font-weight:400">🎤 キーボードのマイクで音声入力できます</span></label>
   <textarea id="s-memo" placeholder="作業内容など"></textarea>
   <label>カレンダーの色</label>
@@ -818,8 +818,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="toggle-row toggle-yakin" id="e-yakin-toggle" onclick="setMode('e','yakin')"><span class="t-icon">🌙</span><span class="t-label">夜勤</span></div>
   <div class="toggle-row toggle-yasumi" id="e-yasumi-toggle" onclick="setMode('e','yasumi')"><span class="t-icon">🏖️</span><span class="t-label">休み</span></div>
   <div class="toggle-row toggle-yotei" id="e-yotei-toggle" onclick="setMode('e','yotei')"><span class="t-icon">📌</span><span class="t-label">予定</span></div>
-  <div class="leader-select-wrap"><label>代表者</label><select id="e-leader" onchange="refreshButaiField('e')"><option value="">代表者を選択してください</option></select></div>
-  <div class="member-section"><div class="member-label">同行メンバー（タップで選択）</div><div id="e-member-selector" class="member-grid"></div></div>
+  <div class="leader-select-wrap"><label>責任者</label><select id="e-leader" onchange="refreshButaiField('e')"><option value="">責任者を選択してください</option></select></div>
+  <div class="member-section"><div class="member-label">班員（タップで選択）</div><div id="e-member-selector" class="member-grid"></div></div>
   <label>メモ</label><textarea id="e-memo"></textarea>
   <label>カレンダーの色</label>
   <div id="e-color-picker" class="color-picker-wrap"></div>
@@ -900,9 +900,9 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <h3>🔧 工番修正モーダル</h3>
     <p>現場マスタの全現場が一覧表示されます。各現場で:</p>
     <ul>
-      <li>🔍 上部の検索ボックスで <b>元請名・現場名・工番・代表者</b> を横断検索できます</li>
+      <li>🔍 上部の検索ボックスで <b>元請名・現場名・工番・責任者</b> を横断検索できます</li>
       <li><b>事業部を変更</b> → 「工番更新」で新事業部×年度の次連番で<b>再発番</b>（旧工番は欠番）</li>
-      <li>代表者の事業部が参考表示されるので、選び直しの判断に使える</li>
+      <li>責任者の事業部が参考表示されるので、選び直しの判断に使える</li>
       <li style="color:#92400E">💡 売上などの金額入力は <b>GR管理画面の📊経営タブ</b> に一本化しました（このモーダルの売上欄は非表示）</li>
     </ul>
   </div>
@@ -950,7 +950,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <ul>
       <li>終わった工事を <b>新規入力時のプルダウンから隠す</b> 機能。データは残るので集計・粗利は維持</li>
       <li>予定詳細を開く → <b>「この現場を完了にする」</b> ボタン</li>
-      <li>権限: その現場の <b>代表者</b> または <b>管理者</b> のみ操作可</li>
+      <li>権限: その現場の <b>責任者</b> または <b>管理者</b> のみ操作可</li>
       <li>「進行中に戻す」ボタンで完了解除も可能</li>
       <li>工番・売上・過去データは完了後も保持される（参照は可能）</li>
     </ul>
@@ -1015,7 +1015,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
       <li>元請・現場・作業区分・出勤/退勤・メモ等の入力欄が<b>自動で無効化</b>される</li>
       <li>すでに入力されている値は<b>自動でクリア</b>される</li>
       <li>元請名は<b>入力不要</b>（バリデーションをスキップ）</li>
-      <li>操作者・日付・代表者・同行メンバーは引き続き入力可能</li>
+      <li>操作者・日付・責任者・班員は引き続き入力可能</li>
       <li>もう一度同じトグルを押すと解除され、入力欄が再び有効化される</li>
     </ul>
     <p style="color:#1D9E75;font-weight:600;margin-top:8px">工番が発行されないモード</p>
@@ -1095,7 +1095,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <ul>
       <li><b>元請名 + 月</b>で絞り込み可能（月は元請の右側、デフォルトは「全期間」）</li>
       <li>月を選ぶとその月の現場リスト・日程一覧だけが表示される</li>
-      <li>チェックボックスで複数日選択 → <b>一括編集</b>で時間・元請・代表者・メンバー・車両等をまとめて変更</li>
+      <li>チェックボックスで複数日選択 → <b>一括編集</b>で時間・元請・責任者・メンバー・車両等をまとめて変更</li>
       <li>編集保存時、メンバーが他の予定とぶつかる場合は<b>被り警告</b>が出ます</li>
     </ul>
   </div>
@@ -1103,7 +1103,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="help-section">
     <h3>🆘 困ったら</h3>
     <ul>
-      <li><b>工番が空欄</b> → 代表者の事業部未設定。職人管理で割当</li>
+      <li><b>工番が空欄</b> → 責任者の事業部未設定。職人管理で割当</li>
       <li><b>粗利がマイナス</b> → 売上未入力 or 単価が高すぎる可能性</li>
       <li><b>原価が0</b> → 職人の単価が未設定</li>
       <li><b>起動が遅い</b> → アーカイブを実行（3ヶ月以前を退避）</li>
@@ -1662,7 +1662,7 @@ async function shareGroup(g){
   const dateStr=`${lp[0]}年${lp[1]}月${lp[2]}日(${DOW[dt.getDay()]})`;
   const leader=g.members.find(m=>m.role==='代表');
   const fellows=g.members.filter(m=>m.role==='同行');
-  const memberLine=(leader?leader.name+'（代表）':'')+(fellows.length?'、'+fellows.map(m=>m.name).join('、'):'');
+  const memberLine=(leader?leader.name+'（責任者）':'')+(fellows.length?'、'+fellows.map(m=>m.name).join('、'):'');
   const lines=[];
   lines.push(`【${dateStr} の予定】`);
   if(g.yasumi)lines.push('🏖️ 休み');
@@ -1984,7 +1984,7 @@ function applyYasumiLock(p,clearValues){
     el.style.opacity=isLocked?'0.45':'';
     el.style.cursor=isLocked?'not-allowed':'';
   });
-  // 代表者は休み/倉庫モードでも選択可能（誰が休みを取ったか/誰が倉庫作業をするか記録するため）
+  // 責任者（保存値は '代表'）は休み/倉庫モードでも選択可能（誰が休みを取ったか/誰が倉庫作業をするか記録するため）
   const leaderEl=document.getElementById(p+'-leader');
   if(leaderEl){leaderEl.disabled=false;leaderEl.style.opacity='';leaderEl.style.cursor='';}
   // 車両 chip コンテナもロック
@@ -2141,7 +2141,7 @@ function initMemberUI(){
   ['s-leader','e-leader'].forEach(id=>{
     const sel=document.getElementById(id);if(!sel)return;
     const cur=sel.value;
-    sel.innerHTML='<option value="">代表者を選択してください</option>'+getShokunin().map(n=>`<option value="${esc(n)}"${n===cur?' selected':''}>${esc(n)}</option>`).join('');
+    sel.innerHTML='<option value="">責任者を選択してください</option>'+getShokunin().map(n=>`<option value="${esc(n)}"${n===cur?' selected':''}>${esc(n)}</option>`).join('');
   });
   const opSel=document.getElementById('s-operator');
   if(opSel){
@@ -2951,7 +2951,7 @@ async function submitNippo(){
       return;
     }
   }
-  if(!leader){showAlert('代表者を選択してください','err');return;}
+  if(!leader){showAlert('責任者を選択してください','err');return;}
   // 異常値検出
   if(!yasumi){
     if(!yakin&&start&&end&&start>=end){showAlert('退勤時刻が出勤時刻以下です。時間を確認してください','err');return;}
@@ -3290,7 +3290,7 @@ function renderEventDetail(){
   document.getElementById('detail-fs-title').textContent=`${detailIdx+1} / ${detailGroups.length}`;
   const leader=g.members.find(m=>m.role==='代表');
   const fellows=g.members.filter(m=>m.role==='同行');
-  const memberLine=(leader?`<b>${esc(leader.name)}</b>（代表）`:'')+(fellows.length>0?(leader?'<br>':'')+fellows.map(m=>esc(m.name)).join('　'):'');
+  const memberLine=(leader?`<b>${esc(leader.name)}</b>（責任者）`:'')+(fellows.length>0?(leader?'<br>':'')+fellows.map(m=>esc(m.name)).join('　'):'');
   const totalKo=(g.kosu*g.members.length).toFixed(1);
   const badges=[];if(g.souko)badges.push('🏭 倉庫');if(g.yakin)badges.push('🌙 夜勤');if(g.yasumi)badges.push('🏖️ 休み');if(g.yotei)badges.push('📌 予定');
   const wt=g.workType&&g.workType!=='現場作業'?g.workType:'現場作業';
@@ -3307,7 +3307,7 @@ function renderEventDetail(){
     }
   }
   // 行の工番列が空でも、現場マスタに発行済みの工番があれば表示する
-  // （グローライズ以外の会社の代表が登録すると行の工番が空のまま保存されるため）
+  // （グローライズ以外の会社の責任者が登録すると行の工番が空のまま保存されるため）
   const masterJobNo=(!g.jobNo&&g.genba&&g.loc)?(((allJobsites||[]).find(j=>j.genba===g.genba&&j.loc===g.loc)||{}).jobNo||''):'';
   const displayJobNo=g.jobNo||masterJobNo;
   // ★レビュー修正ラウンド1・M-5: カードの「⏳未送信」印だけだと、詳細画面を
@@ -3604,7 +3604,7 @@ async function saveEdit(){
       return;
     }
   }
-  if(!leader){alert('代表者を選択してください');return;}
+  if(!leader){alert('責任者を選択してください');return;}
   if(!getUsername()){alert('編集者の名前が未設定です。事務タブの「操作者名」から名前を設定してください');openUsernameModal();return;}
   if(!yasumi){
     if(!yakin&&start&&end&&start>=end){alert('退勤時刻が出勤時刻以下です。時間を確認してください');return;}
@@ -4683,7 +4683,7 @@ async function openJobNoFix(){
     if(json.status!=='ok'){list.innerHTML='<div style="color:#c00">エラー：'+esc(json.message||'')+'</div>';return;}
     const rows=(json.data||[]).slice(1);
     if(rows.length===0){list.innerHTML='<div style="text-align:center;color:#999;padding:20px">現場マスタにデータがありません</div>';return;}
-    // 代表者の逆引き: 元請|現場 → 最初の代表者
+    // 責任者（保存値は '代表'）の逆引き: 元請|現場 → 最初の責任者
     const leaderMap={};
     allNippos.forEach(n=>{
       if(n.role==='代表'&&n.genba&&n.name){
@@ -4706,7 +4706,7 @@ async function openJobNoFix(){
       const statusBadge=completed?'<span style="background:#1D9E75;color:#fff;font-size:10px;padding:2px 6px;border-radius:10px;margin-left:6px">✅ 完了</span>':'';
       return `<div data-search="${esc(searchText)}" data-completed="${completed?'1':'0'}" style="border:1px solid ${border};border-radius:8px;padding:10px;margin-bottom:8px;background:${bg}">
         <div style="font-size:13px;margin-bottom:4px"><b>${esc(genba)}</b> / ${esc(loc||'（現場名なし）')}${statusBadge}</div>
-        <div style="font-size:12px;color:#666;margin-bottom:6px">現在: <b>${esc(jobNo)}</b>（${esc(div)}）${ldName?`　代表: ${esc(ldName)}${ldDiv?`（${esc(ldDiv)}）`:''}`:''}</div>
+        <div style="font-size:12px;color:#666;margin-bottom:6px">現在: <b>${esc(jobNo)}</b>（${esc(div)}）${ldName?`　責任者: ${esc(ldName)}${ldDiv?`（${esc(ldDiv)}）`:''}`:''}</div>
         <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
           <label style="font-size:11px;color:#666;white-space:nowrap;margin:0">事業部:</label>
           <select id="jnfix-div-${idx}" style="flex:1;margin-bottom:0">${divOpts}</select>

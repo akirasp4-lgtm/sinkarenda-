@@ -405,13 +405,13 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="toggle-row toggle-yasumi" id="s-yasumi-toggle" onclick="setMode('s','yasumi')"><span class="t-icon">🏖️</span><span class="t-label">休み</span></div>
   <div class="toggle-row toggle-yotei" id="s-yotei-toggle" onclick="setMode('s','yotei')"><span class="t-icon">📌</span><span class="t-label">予定</span></div>
   <div class="leader-select-wrap">
-    <label>代表者<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
+    <label>責任者<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
     <div class="select-add-wrap" style="margin-bottom:0">
-      <select id="s-leader" onchange="checkLocationJobNo();refreshButaiField('s')"><option value="">代表者を選択してください</option></select>
+      <select id="s-leader" onchange="checkLocationJobNo();refreshButaiField('s')"><option value="">責任者を選択してください</option></select>
       <button class="btn btn-secondary btn-sm add-inline-btn" onclick="openSettingsFor('s-leader')">➕</button>
     </div>
   </div>
-  <div class="member-section"><div class="member-label">同行メンバー（タップで選択）</div><div id="member-selector" class="member-grid"></div></div>
+  <div class="member-section"><div class="member-label">班員（タップで選択）</div><div id="member-selector" class="member-grid"></div></div>
   <label>メモ <span style="font-size:11px;color:#999;font-weight:400">🎤 キーボードのマイクで音声入力できます</span></label>
   <textarea id="s-memo" placeholder="作業内容など"></textarea>
   <label>カレンダーの色</label>
@@ -745,8 +745,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="toggle-row toggle-yakin" id="e-yakin-toggle" onclick="setMode('e','yakin')"><span class="t-icon">🌙</span><span class="t-label">夜勤</span></div>
   <div class="toggle-row toggle-yasumi" id="e-yasumi-toggle" onclick="setMode('e','yasumi')"><span class="t-icon">🏖️</span><span class="t-label">休み</span></div>
   <div class="toggle-row toggle-yotei" id="e-yotei-toggle" onclick="setMode('e','yotei')"><span class="t-icon">📌</span><span class="t-label">予定</span></div>
-  <div class="leader-select-wrap"><label>代表者</label><select id="e-leader" onchange="refreshButaiField('e')"><option value="">代表者を選択してください</option></select></div>
-  <div class="member-section"><div class="member-label">同行メンバー（タップで選択）</div><div id="e-member-selector" class="member-grid"></div></div>
+  <div class="leader-select-wrap"><label>責任者</label><select id="e-leader" onchange="refreshButaiField('e')"><option value="">責任者を選択してください</option></select></div>
+  <div class="member-section"><div class="member-label">班員（タップで選択）</div><div id="e-member-selector" class="member-grid"></div></div>
   <label>メモ</label><textarea id="e-memo"></textarea>
   <label>カレンダーの色</label>
   <div id="e-color-picker" class="color-picker-wrap"></div>
@@ -791,8 +791,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
       <li><b>元請名</b>をプルダウンから選択（なければ ➕ で追加）</li>
       <li><b>現場名</b>をプルダウンから選ぶ／🔍検索ボックスで絞り込み（最近使った順で並ぶ）。新規は「＋ 新規現場として追加」</li>
       <li><b>🚗 車両</b>（任意・グローライズのみ・複数選択可）— 同日に他予定で予約済みは選択不可。2 台で行く時は両方の chip を ON</li>
-      <li><b>代表者</b>を選ぶ（その日の現場責任者）</li>
-      <li><b>同行者</b>（代表以外のメンバー）を選ぶ</li>
+      <li><b>責任者</b>を選ぶ（その日の現場の責任者）</li>
+      <li><b>班員</b>（責任者以外のメンバー）を選ぶ</li>
       <li><b>出勤/退勤時間</b>と<b>メモ</b>を入力</li>
       <li>必要なら 🏭倉庫 / 🌙夜勤 / 🏖️休み / 📌予定 を選択</li>
       <li><b>登録する</b>ボタンで送信</li>
@@ -837,7 +837,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <p style="margin-top:8px;color:#1D9E75;font-weight:600">🆕 休み・倉庫モード時の挙動</p>
     <ul style="font-size:13px">
       <li>🏖️休み / 🏭倉庫 をONにすると <b>元請・現場・時間・メモ等の入力欄が自動で無効化</b>されます</li>
-      <li>入力した後にON にすると<b>入力済みの値は自動でクリア</b>されます（操作者・日付・代表者・同行メンバーは残ります）</li>
+      <li>入力した後にON にすると<b>入力済みの値は自動でクリア</b>されます（操作者・日付・責任者・班員は残ります）</li>
       <li>元請名は<b>入力不要</b>になります</li>
       <li>もう一度同じトグルを押すと解除され、入力欄が再び有効化されます</li>
     </ul>
@@ -918,8 +918,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <h3>🔢 工番事業部セレクタ（グローライズのみ）</h3>
     <p>新規現場を「現場作業」で入力すると「新規現場の工番事業部」セレクタが表示されます。</p>
     <ul>
-      <li>デフォルトは<b>代表者の事業部</b></li>
-      <li>初日だけ他事業部の人が代表する場合は手動で変更OK</li>
+      <li>デフォルトは<b>責任者の事業部</b></li>
+      <li>初日だけ他事業部の人が責任者になる場合は手動で変更OK</li>
       <li>選んだ事業部が工番の頭文字になります（例: ICT-26-001）</li>
       <li><b>工番が発行されないケース</b>: 作業区分が「現場作業」以外 / 🏭倉庫 / 🏖️休み / 📌予定</li>
     </ul>
@@ -976,7 +976,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <h3>🚗 車確認タブ（グローライズのみ） <span style="color:#1D9E75;font-size:12px">🆕</span></h3>
     <p>週次の <b>車両×日付マトリクス</b> で予約状況を一目で確認できます。</p>
     <ul>
-      <li>空きは「○」、使用中は<b>代表者名と行先</b>が表示される</li>
+      <li>空きは「○」、使用中は<b>責任者名と行先</b>が表示される</li>
       <li>週移動ボタン（◀▶）または左右スワイプで前週／翌週に移動</li>
       <li>他予定で予約済みの車両は新規予定登録時にプルダウンでグレーアウトされる（ダブルブッキング防止）</li>
     </ul>
@@ -988,7 +988,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <ul>
       <li><b>元請名 + 月</b>で絞り込み可能（月は元請の右側、デフォルトは「全期間」）</li>
       <li>月を選ぶとその月の現場リスト・日程一覧だけが表示される</li>
-      <li>チェックボックスで複数日選択 → <b>一括編集</b>で時間・元請・代表者・メンバー・車両等をまとめて変更</li>
+      <li>チェックボックスで複数日選択 → <b>一括編集</b>で時間・元請・責任者・メンバー・車両等をまとめて変更</li>
       <li>編集保存時、メンバーが他の予定とぶつかる場合は<b>被り警告</b>が出ます</li>
     </ul>
   </div>
@@ -1549,7 +1549,7 @@ function applyYasumiLock(p,clearValues){
     el.style.opacity=isLocked?'0.45':'';
     el.style.cursor=isLocked?'not-allowed':'';
   });
-  // 代表者は休み/倉庫モードでも選択可能（誰が休みを取ったか/誰が倉庫作業をするか記録するため）
+  // 責任者（保存値は '代表'）は休み/倉庫モードでも選択可能（誰が休みを取ったか/誰が倉庫作業をするか記録するため）
   const leaderEl=document.getElementById(p+'-leader');
   if(leaderEl){leaderEl.disabled=false;leaderEl.style.opacity='';leaderEl.style.cursor='';}
   // 車両 chip コンテナもロック（chip 自体はボタン群なので pointerEvents で制御）
@@ -1936,7 +1936,7 @@ function initMemberUI(){
   ['s-leader','e-leader'].forEach(id=>{
     const sel=document.getElementById(id);if(!sel)return;
     const cur=sel.value;
-    sel.innerHTML='<option value="">代表者を選択してください</option>'+getShokunin().map(n=>`<option value="${esc(n)}"${n===cur?' selected':''}>${esc(n)}</option>`).join('');
+    sel.innerHTML='<option value="">責任者を選択してください</option>'+getShokunin().map(n=>`<option value="${esc(n)}"${n===cur?' selected':''}>${esc(n)}</option>`).join('');
   });
   const opSel=document.getElementById('s-operator');
   if(opSel){
@@ -2318,7 +2318,7 @@ async function submitNippo(){
       return;
     }
   }
-  if(!leader){showAlert('代表者を選択してください','err');return;}
+  if(!leader){showAlert('責任者を選択してください','err');return;}
   // 異常値検出
   if(!yasumi){
     if(!yakin&&start&&end&&start>=end){showAlert('退勤時刻が出勤時刻以下です。時間を確認してください','err');return;}
@@ -3227,7 +3227,7 @@ function renderEventDetail(){
   document.getElementById('detail-fs-title').textContent=`${detailIdx+1} / ${detailGroups.length}`;
   const leader=g.members.find(m=>m.role==='代表');
   const fellows=g.members.filter(m=>m.role==='同行');
-  const memberLine=(leader?`<b>${esc(leader.name)}</b>（代表）`:'')+(fellows.length>0?(leader?'<br>':'')+fellows.map(m=>esc(m.name)).join('　'):'');
+  const memberLine=(leader?`<b>${esc(leader.name)}</b>（責任者）`:'')+(fellows.length>0?(leader?'<br>':'')+fellows.map(m=>esc(m.name)).join('　'):'');
   const totalKo=(g.kosu*g.members.length).toFixed(1);
   const badges=[];
   if(g.souko)badges.push('🏭 倉庫');
@@ -3248,7 +3248,7 @@ function renderEventDetail(){
     }
   }
   // 行の工番列が空でも、現場マスタに発行済みの工番があれば表示する
-  // （グローライズ以外の会社の代表が登録すると行の工番が空のまま保存されるため）
+  // （グローライズ以外の会社の責任者が登録すると行の工番が空のまま保存されるため）
   const masterJobNo=(!g.jobNo&&g.genba&&g.loc)?(((allJobsites||[]).find(j=>j.genba===g.genba&&j.loc===g.loc)||{}).jobNo||''):'';
   const displayJobNo=g.jobNo||masterJobNo;
   // ★レビュー修正ラウンド1・M-5: カードの「⏳未送信」印だけだと、詳細画面を
@@ -3610,7 +3610,7 @@ async function saveEdit(){
       return;
     }
   }
-  if(!leader){alert('代表者を選択してください');return;}
+  if(!leader){alert('責任者を選択してください');return;}
   if(!getUsername()){alert('編集者の名前が未設定です。右下の「変更」から名前を設定してください');openUsernameModal();return;}
   if(!yasumi){
     if(!yakin&&start&&end&&start>=end){alert('退勤時刻が出勤時刻以下です。時間を確認してください');return;}
@@ -4685,7 +4685,7 @@ async function shareGroup(g){
   const dateStr=`${lp[0]}年${lp[1]}月${lp[2]}日(${DOW[dt.getDay()]})`;
   const leader=g.members.find(m=>m.role==='代表');
   const fellows=g.members.filter(m=>m.role==='同行');
-  const memberLine=(leader?leader.name+'（代表）':'')+(fellows.length?'、'+fellows.map(m=>m.name).join('、'):'');
+  const memberLine=(leader?leader.name+'（責任者）':'')+(fellows.length?'、'+fellows.map(m=>m.name).join('、'):'');
   const lines=[];
   lines.push(`【${dateStr} の予定】`);
   if(g.yasumi)lines.push('🏖️ 休み');
