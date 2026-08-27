@@ -12,7 +12,7 @@ const BILLING_RATE_SHEET = '請求単価マスタ';
 const BILLING_CALC_SHEET = '請求計算';
 const ALLOCATION_SHEET = '事業部別按分';
 const OPLOG_SHEET = '操作ログ';
-const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両','拠点'];
+const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両','拠点','部隊'];
 const GROWISE = 'グローライズ';
 
 // ============================================================
@@ -59,6 +59,52 @@ function resolveKyoten_(explicit, jobsiteKyoten, company) {
   const j = String(jobsiteKyoten || '').trim();
   if (KYOTEN_VALUES.indexOf(j) >= 0) return j;
   return defaultKyotenForCompany_(company);
+}
+
+// ==============================================================
+// ★2026-08-27 フェーズ1: 部隊（1〜4部隊）
+//   社長決定（2026-08-24）の「1部隊・2部隊・3部隊・4部隊」。
+//   ★人（職人マスタ）に固定で持たせず、予定1件ごとに持つ。
+//     理由: GRは固定班ではなく案件ごとに人員を組み替える運用のため、
+//     人に固定すると「同じ責任者が1部隊と2部隊を同時に持つ」が表現できない。
+//     職人マスタの「既定部隊」は入力の初期値を入れるためだけに使う。
+// ==============================================================
+const BUTAI_VALUES = ['1部隊', '2部隊', '3部隊', '4部隊'];
+
+function normalizeButai_(v) {
+  const s = String(v == null ? '' : v).trim();
+  return BUTAI_VALUES.indexOf(s) >= 0 ? s : '';
+}
+
+// ★拠点で起きたバグを繰り返さないための設計:
+//   「画面が項目を送ってきたか」で分岐する。空欄を送ってきたら空欄のまま扱う。
+//   （空文字を「未指定」とみなして既定値で上書きすると、
+//     利用者が事務所・休みで部隊を消しても勝手に戻ってしまう）
+function resolveButai_(row, memberDefault) {
+  if (row && Object.prototype.hasOwnProperty.call(row, 'butai')) {
+    return normalizeButai_(row.butai);
+  }
+  return normalizeButai_(memberDefault);
+}
+
+// 職人マスタの「既定部隊」を 氏名→部隊 の対応表にする
+function getMemberButaiMap_(ss) {
+  const sheet = getOrCreateMemberSheet_(ss);
+  const data = sheet.getDataRange().getValues();
+  const map = {};
+  for (let i = 1; i < data.length; i++) {
+    const name = String(data[i][0] || '').trim();
+    if (!name) continue;
+    const b = normalizeButai_(data[i][4]);
+    if (b) map[name] = b;
+  }
+  return map;
+}
+
+// 「×」だけを無効とみなす。空欄・未記入は有効（既存の職人を巻き込まないため）。
+function normalizeMemberActive_(v) {
+  const s = String(v == null ? '' : v).trim();
+  return !(s === '×' || s === 'x' || s === 'X' || s === '✕');
 }
 
 // ==============================================================
@@ -473,6 +519,7 @@ function getJobsiteKyotenMap_(ss) {
 function buildDailyValues_(ss, rows, updatedBy) {
   const jobNoCache = {};
   const kyotenMap = getJobsiteKyotenMap_(ss);
+  const butaiMap = getMemberButaiMap_(ss);   // ★2026-08-27 フェーズ1
   let leaderDivision = null;
   const leaderRow = rows.find(r => r.role === '代表');
   const leaderName = leaderRow ? leaderRow.name : '';
@@ -512,7 +559,10 @@ function buildDailyValues_(ss, rows, updatedBy) {
       row.vehicle || '',
       // ★2026-08-26 拠点。画面が明示した値 > 現場マスタの拠点 > 会社からの既定値。
       //   決まった値をここで必ず保存する（読むときに会社から計算し直さない）。
-      resolveKyoten_(row.kyoten, kyotenMap[String(row.loc || '').trim()], row.company)
+      resolveKyoten_(row.kyoten, kyotenMap[String(row.loc || '').trim()], row.company),
+      // ★2026-08-27 フェーズ1: 部隊。画面が明示した値 > 職人マスタの既定部隊。
+      //   画面が butai を送ってきたら空欄でも尊重する（resolveButai_ の仕様）。
+      resolveButai_(row, butaiMap[String(row.name || '').trim()])
     ];
   });
 }
@@ -797,7 +847,8 @@ function doPost(e) {
       const division = String(body.division || '').trim();
       const rate = Number(body.rate || 0);
       if (!name || !company) return error('氏名と会社は必須です');
-      memberSheet.appendRow([name, company, division, rate]);
+      // ★2026-08-27 フェーズ1: 既定部隊は空、有効は○で作る
+      memberSheet.appendRow([name, company, division, rate, '', '○']);
       logOperation_(ss, 'add_member', name + '/' + company, '事業部=' + division + ', 単価=' + rate, updatedBy);
       return ok({added: name});
     }
@@ -1321,7 +1372,10 @@ function doGet(e) {
       name: String(r[0]||''),
       company: String(r[1]||''),
       division: String(r[2]||''),
-      rate: Number(r[3]||0)
+      rate: Number(r[3]||0),
+      // ★2026-08-27 フェーズ1
+      butai: normalizeButai_(r[4]),
+      active: normalizeMemberActive_(r[5])
     })).filter(m => !filterByCompany || m.company === requestedCompany) : [];
 
     const genbaSheet = getOrCreateGenbaSheet_(ss);
@@ -1384,12 +1438,15 @@ function getOrCreateMemberSheet_(ss) {
   let sheet = ss.getSheetByName(MEMBER_SHEET);
   if (!sheet) {
     sheet = ss.insertSheet(MEMBER_SHEET);
-    sheet.appendRow(['氏名', '会社', '事業部', '単価']);
+    sheet.appendRow(['氏名', '会社', '事業部', '単価', '既定部隊', '有効']);
   } else {
-    ensureColumns_(sheet, 4);
-    const headers = sheet.getRange(1, 1, 1, 4).getValues()[0];
+    ensureColumns_(sheet, 6);
+    const headers = sheet.getRange(1, 1, 1, 6).getValues()[0];
     if (String(headers[2] || '').trim() !== '事業部') sheet.getRange(1, 3).setValue('事業部');
     if (String(headers[3] || '').trim() !== '単価') sheet.getRange(1, 4).setValue('単価');
+    // ★2026-08-27 フェーズ1: 既定部隊（入力の初期値用）と 有効（空き人員から外す用）
+    if (String(headers[4] || '').trim() !== '既定部隊') sheet.getRange(1, 5).setValue('既定部隊');
+    if (String(headers[5] || '').trim() !== '有効') sheet.getRange(1, 6).setValue('有効');
   }
   return sheet;
 }
@@ -3131,6 +3188,10 @@ function archiveOldData_(ss, months) {
   const tz = Session.getScriptTimeZone();
   let archiveSheet = ss.getSheetByName(ARCHIVE_SHEET);
   if (!archiveSheet) { archiveSheet = ss.insertSheet(ARCHIVE_SHEET); archiveSheet.appendRow(HEADERS); }
+  // ★2026-08-27 フェーズ1: 既にあるアーカイブも見出しを最新の列数に揃える。
+  //   これが無いと列だけ伸びて見出しが空のままになり、sheetToRecords
+  //   （見出しの文字で列を引く）がアーカイブの新しい列を読めない。
+  ensureHeaders_(archiveSheet);
   const data = sheet.getDataRange().getValues();
   const rowsToArchive = [];
   const rowNumsToDelete = [];
