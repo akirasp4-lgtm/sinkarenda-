@@ -1830,14 +1830,13 @@ function switchTab(t){
 //   端末に保存されている操作者名も読み替える。
 //   これが無いと、名前を変えた人の端末だけ古い名前のまま「更新者」に書かれ続け、
 //   せっかくまとめた名前がまた2つに割れる。
-const MEMBER_MERGE_MAP={
-  '高田':'高田（関東）','髙田':'高田（関東）','GRME髙田':'高田（関東）','GRME高田':'高田（関東）',
-  '柳澤':'柳澤（関東）','栁澤':'柳澤（関東）','GRME栁澤':'柳澤（関東）','GRME柳澤':'柳澤（関東）',
-  '内村':'内村（関東）','GRME内村':'内村（関東）'
-};
+//   ★端末には会社の情報が無いので、GASの「更新者用の表」と同じものを使う。
+//     実測で更新者に出るのは「高田」76件だけ。他社に同名の別人はいない（職人マスタ68人を確認済み）。
+//     ※氏名の方は会社込みで判定する必要があるので、こちらの表には入れない。
+const UPDATER_MERGE={'高田':'高田（関東）'};
 function migrateUsername(v){
   const s=String(v||'').trim();
-  return MEMBER_MERGE_MAP[s]||s;
+  return UPDATER_MERGE[s]||s;
 }
 function initUsername(){
   try{
@@ -5168,12 +5167,15 @@ function renderSettings(){
     const memberOk=settingsMembersOk&&!!member&&member.rateOk;
     const div=(member&&member.division)||'';
     const rate=(member&&member.rate)||0;
-    const divSelect=isGrowise?`<select onchange="updateMemberDivision('${esc(s)}',this.value)" style="width:auto;margin:0;padding:4px 8px;font-size:12px;border:1px solid #ddd;border-radius:6px;background:#f9f9f9">
+    // ★2026-08-27 Codexレビュー[P2]#7: 画面の会社ではなく「その人の実際の会社」を渡す。
+    //   統合で 高田（関東）がGRミツマ所属になったため、グローライズ画面から
+    //   currentCompany を送ると該当行が見つからず、エラーも出ずに黙って効かなくなる。
+    const divSelect=isGrowise?`<select onchange="updateMemberDivision('${esc(s)}',this.value,'${esc(mCompany)}')" style="width:auto;margin:0;padding:4px 8px;font-size:12px;border:1px solid #ddd;border-radius:6px;background:#f9f9f9">
       <option value=""${!div?' selected':''}>（なし）</option>${DIVISIONS.map(d=>`<option value="${d}"${d===div?' selected':''}>${d}</option>`).join('')}</select>`:'';
     // 取得に失敗している間（全体または個人単位）は単価欄を編集不可にする。0や空欄のまま
     // 保存できてしまうと実際の給料データを0で上書きする恐れがあるため。
     const rateInput=memberOk
-      ?`<input type="number" value="${rate||''}" placeholder="単価" onchange="updateMemberRate('${esc(s)}',this.value)" style="width:80px;margin:0;padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:6px">`
+      ?`<input type="number" value="${rate||''}" placeholder="単価" onchange="updateMemberRate('${esc(s)}',this.value,'${esc(mCompany)}')" style="width:80px;margin:0;padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:6px">`
       :`<input type="text" value="取得できませんでした" disabled title="単価を取得できませんでした" style="width:130px;margin:0;padding:4px 6px;font-size:11px;border:1px solid #fca5a5;border-radius:6px;background:#fef2f2;color:#c00;cursor:not-allowed">`;
     // ★2026-08-27 フェーズ1: 既定部隊（予定入力の初期値）と 有効（空き人員に出すか）
     // ★見つからないときは保存しても空振りするので、部隊・有効の操作を出さない
@@ -5186,7 +5188,7 @@ function renderSettings(){
       <input type="checkbox" ${isActive?'checked':''} onchange="updateMemberActive('${esc(s)}','${esc(mCompany)}',this.checked)" style="margin:0">有効</label>`;
     return`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee;gap:6px;flex-wrap:wrap">
       <span style="font-size:15px;flex:1;min-width:80px">${esc(s)}</span>
-      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${divSelect}${butaiSelect}${activeChk}${rateInput}<button class="btn btn-danger btn-sm" onclick="removeShokunin(${i})">削除</button></div>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${divSelect}${butaiSelect}${activeChk}${rateInput}<button class="btn btn-danger btn-sm" onclick="removeShokunin(${i},'${esc(mCompany)}')">削除</button></div>
     </div>`;
   }).join('')||'<div style="color:#999;padding:12px;text-align:center">職人が登録されていません</div>';
 }
@@ -5202,10 +5204,13 @@ async function addShokunin(){
       refreshInBackground();
     }else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
-async function removeShokunin(i){
+async function removeShokunin(i,company){
+  const _co=company||currentCompany;
   const name=getShokunin()[i];if(!confirm(name+'を削除しますか？'))return;
-  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'remove_member',name,company:currentCompany}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();if(json.status==='ok'){allMembers=allMembers.filter(m=>!(m.name===name&&m.company===currentCompany));if(settingsMembers)settingsMembers=settingsMembers.filter(m=>!(m.name===name&&m.company===currentCompany));renderSettings();initMemberUI();refreshInBackground();}
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'remove_member',name,company:_co}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'&&json.removed===null){alert('この職人が見つかりませんでした（会社が違う可能性）。画面を更新してからもう一度お試しください。');return;}
+    if(json.status==='ok'){allMembers=allMembers.filter(m=>!(m.name===name&&m.company===_co));if(settingsMembers)settingsMembers=settingsMembers.filter(m=>!(m.name===name&&m.company===currentCompany));renderSettings();initMemberUI();refreshInBackground();}
     else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 // ★2026-08-27 フェーズ1: 既定部隊を保存する。
@@ -5237,8 +5242,9 @@ async function updateMemberActive(name,company,active){
     refreshInBackground();
   }catch(e){alert('エラー：'+e.message);renderSettings();}
 }
-async function updateMemberDivision(name,division){
-  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_division',name,company:currentCompany,division}),headers:{'Content-Type':'text/plain'}});
+async function updateMemberDivision(name,division,company){
+  const _co=company||currentCompany;
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_division',name,company:_co,division}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){
       const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.division=division;
       const sm=settingsMembers&&settingsMembers.find(x=>x.name===name&&x.company===currentCompany);if(sm)sm.division=division;
@@ -5249,7 +5255,7 @@ async function updateMemberDivision(name,division){
 }
 async function updateMemberRate(name,rateStr){
   const rate=Number(rateStr||0);
-  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_rate',name,company:currentCompany,rate}),headers:{'Content-Type':'text/plain'}});
+  try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_rate',name,company:_co,rate}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.rate=rate;const sm=settingsMembers&&settingsMembers.find(x=>x.name===name&&x.company===currentCompany);if(sm)sm.rate=rate;}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
 

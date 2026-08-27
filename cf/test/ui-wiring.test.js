@@ -125,9 +125,7 @@ describe('二重登録の統合に画面が追随していること（2026-08-27
       // せっかくまとめた名前がまた2つに割れる
       expect(src).toContain('function migrateUsername(');
       expect(src).toContain('currentUsername=migrateUsername(_raw)');
-      expect(src).toContain("'高田':'高田（関東）'");
-      expect(src).toContain("'GRME髙田':'高田（関東）'");
-      expect(src).toContain("'GRME内村':'内村（関東）'");
+      expect(src).toContain("const UPDATER_MERGE={'高田':'高田（関東）'}");
     });
 
     it(f + ': 第五部隊の部隊長名が統合後の名前になっている', () => {
@@ -135,13 +133,43 @@ describe('二重登録の統合に画面が追随していること（2026-08-27
     });
   });
 
-  it('★画面とGASの読み替え表が食い違っていない', () => {
+  it('★端末側は「更新者用の表」だけを持つ（氏名は会社込みでないと判定できない）', () => {
+    FILES.forEach(f => {
+      const src = read(f);
+      // 端末には会社の情報が無いので、氏名の読み替え表を持たせてはいけない。
+      // 持たせると他社の同姓同名を巻き込む（Codexレビュー[P1]#1と同じ穴）。
+      expect(src, f).not.toContain("'GRME髙田':");
+      expect(src, f).not.toContain('MEMBER_MERGE_BY_COMPANY');
+    });
+  });
+
+  it('★GAS側は (会社|氏名) の組で判定している', () => {
     const gas = read('gas.js');
-    const idx = read('index.html');
-    ['高田','髙田','GRME髙田','GRME高田','柳澤','栁澤','GRME栁澤','GRME柳澤','内村','GRME内村']
-      .forEach(n => {
-        expect(gas, 'gas.jsに' + n + 'が無い').toContain("'" + n + "':");
-        expect(idx, 'index.htmlに' + n + 'が無い').toContain("'" + n + "':");
-      });
+    ['GRミツマ|高田', 'グローライズ|GRME髙田', 'GRミツマ|柳澤', 'GRミツマ|栁澤',
+     'グローライズ|GRME栁澤', 'GRミツマ|内村', 'グローライズ|GRME内村']
+      .forEach(k => expect(gas, 'gas.jsに ' + k + ' が無い').toContain("'" + k + "':"));
+    // 実データで確認していない組は載せない
+    expect(gas).not.toContain("'GRミツマ|髙田':");
+    expect(gas).not.toContain("'グローライズ|GRME高田':");
+  });
+
+  it("★保存の入口でも読み替える（開いたままの端末が旧名を復活させない）", () => {
+    const gas = read('gas.js');
+    expect(gas).toContain('const _name = mergedMemberName_(row.company, row.name)');
+    expect(gas).toContain('const _by = mergedUpdaterName_(');
+  });
+
+  it('★職人マスタを触る操作が日報と同じロックを使う', () => {
+    const gas = read('gas.js');
+    expect(gas).toContain('const memberMutation =');
+    expect(gas).toContain('(employeeMutation || memberMutation) ? getDailyDataLock_()');
+  });
+
+  it('★admin の単価・事業部・削除が「その人の実際の会社」を送る', () => {
+    const src = read('admin.html');
+    expect(src).toContain("{action:'update_member_rate',name,company:_co,rate}");
+    expect(src).toContain("{action:'update_member_division',name,company:_co,division}");
+    expect(src).toContain("{action:'remove_member',name,company:_co}");
+    expect(src).not.toContain("{action:'update_member_rate',name,company:currentCompany,rate}");
   });
 });

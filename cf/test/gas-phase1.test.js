@@ -25,7 +25,7 @@ const EXPORT_SNIPPET = `
   //   本番（GAS）は同一環境なので起きないが、テストでは中で作る必要がある。
   makeDate_: function (y, m, d, h, mi) { return new Date(y, m, d, h || 0, mi || 0); },
   KNOWN_COMPANIES, fixMojibakeCompany_, mergeMemberRows_,
-  mergedMemberName_, MEMBER_MERGE_MAP, MEMBER_MERGE_COMPANY
+  mergedMemberName_, mergedUpdaterName_, MEMBER_MERGE_BY_COMPANY, UPDATER_MERGE, MEMBER_MERGE_COMPANY
 };`;
 
 let ctx;   // sandbox.__gas
@@ -615,37 +615,59 @@ describe('変更履歴の読みやすさ（2026-08-27 実機テストで見つ�
 });
 
 describe('同一人物の二重登録をまとめる（2026-08-27 利用者指示）', () => {
-  it('★まとめる先は「◯◯（関東）」', () => {
-    expect(ctx.mergedMemberName_('高田')).toBe('高田（関東）');
-    expect(ctx.mergedMemberName_('GRME髙田')).toBe('高田（関東）');
-    expect(ctx.mergedMemberName_('髙田')).toBe('高田（関東）');
-    expect(ctx.mergedMemberName_('柳澤')).toBe('柳澤（関東）');
-    expect(ctx.mergedMemberName_('栁澤')).toBe('柳澤（関東）');
-    expect(ctx.mergedMemberName_('GRME栁澤')).toBe('柳澤（関東）');
-    expect(ctx.mergedMemberName_('内村')).toBe('内村（関東）');
-    expect(ctx.mergedMemberName_('GRME内村')).toBe('内村（関東）');
+  it('★判定は (会社, 氏名) の組で行う（他社の同姓同名を巻き込まない）', () => {
+    expect(ctx.mergedMemberName_('GRミツマ', '高田')).toBe('高田（関東）');
+    expect(ctx.mergedMemberName_('グローライズ', 'GRME髙田')).toBe('高田（関東）');
+    expect(ctx.mergedMemberName_('GRミツマ', '柳澤')).toBe('柳澤（関東）');
+    expect(ctx.mergedMemberName_('GRミツマ', '栁澤')).toBe('柳澤（関東）');
+    expect(ctx.mergedMemberName_('グローライズ', 'GRME栁澤')).toBe('柳澤（関東）');
+    expect(ctx.mergedMemberName_('GRミツマ', '内村')).toBe('内村（関東）');
+    expect(ctx.mergedMemberName_('グローライズ', 'GRME内村')).toBe('内村（関東）');
+  });
+
+  it('★★他社に同姓同名の別人がいても巻き込まない（Codexレビュー[P1]#1）', () => {
+    // 和信カインドやラーテルに「高田」という別人が入っても、その人は変えない
+    expect(ctx.mergedMemberName_('和信カインド', '高田')).toBe('高田');
+    expect(ctx.mergedMemberName_('ラーテル', '高田')).toBe('高田');
+    expect(ctx.mergedMemberName_('GRHD', '内村')).toBe('内村');
+    expect(ctx.mergedMemberName_('グローライズ', '高田')).toBe('高田');   // 会社が違えば対象外
   });
 
   it('対象外の人は1文字も変えない', () => {
-    ['中島', '前﨑', '東', '鈴木', '奥田', '向', '河原', '元', '川端', '川端（達）', '', null, undefined]
-      .forEach(n => expect(ctx.mergedMemberName_(n)).toBe(String(n == null ? '' : n).trim()));
+    [['グローライズ','中島'],['グローライズ','前﨑'],['グローライズ','東'],
+     ['グローライズ','鈴木'],['グローライズ','奥田'],['和信カインド','元']]
+      .forEach(([c,n]) => expect(ctx.mergedMemberName_(c, n)).toBe(n));
   });
 
   it('★もう一度かけても結果が変わらない（二重実行しても壊れない）', () => {
-    const once = ctx.mergedMemberName_('GRME髙田');
-    expect(ctx.mergedMemberName_(once)).toBe(once);
-    expect(ctx.mergedMemberName_('高田（関東）')).toBe('高田（関東）');
+    const once = ctx.mergedMemberName_('グローライズ', 'GRME髙田');
+    expect(ctx.mergedMemberName_('GRミツマ', once)).toBe(once);
+    expect(ctx.mergedMemberName_('GRミツマ', '高田（関東）')).toBe('高田（関東）');
   });
 
   it('前後の空白があっても拾う', () => {
-    expect(ctx.mergedMemberName_('  高田 ')).toBe('高田（関東）');
+    expect(ctx.mergedMemberName_(' GRミツマ ', '  高田 ')).toBe('高田（関東）');
+  });
+
+  it('★更新者は会社が無いので別の表で読み替える（実測で高田76件だけ）', () => {
+    expect(ctx.mergedUpdaterName_('高田')).toBe('高田（関東）');
+    expect(ctx.mergedUpdaterName_('高田（関東）')).toBe('高田（関東）');
+    ['中島','向','元','東','柳澤','内村'].forEach(n =>
+      expect(ctx.mergedUpdaterName_(n)).toBe(n));
+  });
+
+  it('★実データで確認していない組は載せない（推測で足さない）', () => {
+    // 髙田 / GRME高田 / GRME柳澤 は実データに1件も無いので対象にしない
+    expect(ctx.MEMBER_MERGE_BY_COMPANY['GRミツマ|髙田']).toBeUndefined();
+    expect(ctx.MEMBER_MERGE_BY_COMPANY['グローライズ|GRME高田']).toBeUndefined();
+    expect(Object.keys(ctx.MEMBER_MERGE_BY_COMPANY).length).toBe(7);
   });
 
   it('★第五部隊の部隊長名も統合後の名前になっている', () => {
     expect(ctx.BUTAI_LEADERS['第五部隊']).toBe('高田（関東）');
   });
 
-  it('まとめたあとの会社はGRミツマ（関東支店の実態）', () => {
+  it('職人マスタでまとめたあとの会社はGRミツマ（関東支店の実態）', () => {
     expect(ctx.MEMBER_MERGE_COMPANY).toBe('GRミツマ');
   });
 });

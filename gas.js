@@ -630,15 +630,21 @@ function buildDailyValues_(ss, rows, updatedBy) {
         jobNo = jobNoCache[cacheKey];
       }
     }
+    // ★2026-08-27 Codexレビュー[P2]#6: 保存の入口でも旧名を読み替える。
+    //   移行の前から開きっぱなしの画面・未送信キューは古い名簿を持っているので、
+    //   ここで直さないと移行後に旧名が復活して、まとめた名前がまた割れる。
+    //   ここを通せば「放っておけば揃う（自己修復する）」状態になる。
+    const _name = mergedMemberName_(row.company, row.name);
+    const _by = mergedUpdaterName_(row.updatedBy || updatedBy || '');
     return [
       new Date().toLocaleString('ja-JP'),
-      row.date, row.genba, row.loc, row.name, row.role,
+      row.date, row.genba, row.loc, _name, row.role,
       String(row.start || ''), String(row.end || ''),
       Number(row.kosu), row.memo,
       row.souko ? '倉庫' : row.yotei ? '予定' : row.yasumi ? '休み' : row.yakin ? '夜勤' : '',
       row.company || '',
       row.id || '',
-      row.updatedBy || updatedBy || '',
+      _by,
       row.color || '',
       division,
       jobNo,
@@ -688,7 +694,12 @@ function doPost(e) {
   const employeeMutation = isEmployeeScheduleMutation_(action);
   // 社員の保存は全利用者共通の日報ロックだけを使う。管理処理は別の
   // UserLock で直列化し、集計・帳票の長時間処理から社員保存を分離する。
-  const lock = employeeMutation ? getDailyDataLock_() : LockService.getUserLock();
+  // ★2026-08-27 Codexレビュー[P1]#4: 職人マスタを触る操作も日報と同じロックにする。
+  //   以前は UserLock（利用者ごと）だったため、他の利用者や一括処理と排他されず、
+  //   読んでから書くまでの間に単価（給料の元数字）を古い値で上書きする穴があった。
+  const memberMutation = ['add_member', 'remove_member', 'update_member_division',
+    'update_member_rate', 'update_member_butai', 'update_member_active'].indexOf(action) >= 0;
+  const lock = (employeeMutation || memberMutation) ? getDailyDataLock_() : LockService.getUserLock();
   if (!lock.tryLock(10000)) {
     return error(employeeMutation
       ? '現在予定を更新中です。数秒待ってから再度お試しください。'
@@ -4031,129 +4042,176 @@ function cleanupMastersPhase1_APPLY() {
 //   同じ人が2つの名前で登録されているのが名簿に二重で出るようになった。
 //   利用者確認: 「その二重は確かに二重なので高田（関東）のように変えておいて」
 //
-//   | 今の名前 | 会社 | 予定の氏名 | まとめる先 |
-//   |---|---|---|---|
-//   | 高田 | GRミツマ | 62件 | 高田（関東） |
-//   | GRME髙田 | グローライズ | 40件 | 高田（関東） |
-//   | 柳澤 | GRミツマ | 8件 | 柳澤（関東） |
-//   | 栁澤 | GRミツマ | 1件 | 柳澤（関東） |
-//   | GRME栁澤 | グローライズ | 3件 | 柳澤（関東） |
-//   | 内村 | GRミツマ | 2件 | 内村（関東） |
-//   | GRME内村 | グローライズ | 0件 | 内村（関東） |
+//   ★★Codexレビュー[P1]で全面的に作り直した（2026-08-27）。当初案の誤り:
+//     1. 氏名だけで判定していた → 他社に同姓同名の別人がいたら巻き込む
+//     2. 日報を書き換えてから職人マスタの食い違いを検査していた
+//        → 食い違いが見つかると「予定だけ新名・マスタは旧名」で残り、戻せない
+//     3. 「会社は触らない」と書きながら職人マスタの会社を書き換えていた（説明が嘘）
+//     4. 開いたままの端末・未送信キューが旧名を復活させる経路を塞いでいなかった
 //
-//   ★★会社は絶対に触らない。
-//     「GRME髙田（グローライズ）」の40件は、関東の人が本社案件に入った記録であり
-//     正しいデータ。会社を書き換えると拠点の絞り込みと集計が壊れる。
-//     直すのは「氏名」と「更新者」だけ。
-//
-//   ★対象は 日報データ と アーカイブ の両方。
-//     アーカイブを忘れると、3ヶ月より前の集計だけ名前が割れたままになる。
+//   新しい方針:
+//     ・(会社, 氏名) の組で判定する。実データで件数を確認した組だけを対象にする
+//     ・**全部読んで検査してから書く**。1つでもおかしければ1文字も書かない
+//     ・保存の入口（buildDailyValues_）でも読み替える → 旧名が入ってきても自動で直る
+//       ＝71人が使ったまま移行しても、放っておけば揃う（自己修復する）
 // ==============================================================
 
-const MEMBER_MERGE_MAP = {
-  '高田': '高田（関東）',
-  '髙田': '高田（関東）',
-  'GRME髙田': '高田（関東）',
-  'GRME高田': '高田（関東）',
-  '柳澤': '柳澤（関東）',
-  '栁澤': '柳澤（関東）',
-  'GRME栁澤': '柳澤（関東）',
-  'GRME柳澤': '柳澤（関東）',
-  '内村': '内村（関東）',
-  'GRME内村': '内村（関東）'
+// (会社|氏名) → まとめる先の氏名。
+// ★2026-08-27 実測で件数を確認した組だけを載せる。推測で足さない。
+//   日報データの氏名: GRミツマ|高田=62 / グローライズ|GRME髙田=40 /
+//                     GRミツマ|柳澤=8 / GRミツマ|栁澤=1 / グローライズ|GRME栁澤=3 /
+//                     GRミツマ|内村=2 （合計116件）
+//   グローライズ|GRME内村 は職人マスタにだけ存在（予定0件）
+const MEMBER_MERGE_BY_COMPANY = {
+  'GRミツマ|高田': '高田（関東）',
+  'グローライズ|GRME髙田': '高田（関東）',
+  'GRミツマ|柳澤': '柳澤（関東）',
+  'GRミツマ|栁澤': '柳澤（関東）',
+  'グローライズ|GRME栁澤': '柳澤（関東）',
+  'GRミツマ|内村': '内村（関東）',
+  'グローライズ|GRME内村': '内村（関東）'
 };
 
-// まとめたあとの職人マスタで、この人たちを置く会社。
-// 実態は関東支店＝GRミツマ。§3.9でグローライズとGRミツマは1つの名簿なので、
-// どちらに置いても両方の画面に出る。
+// 「更新者」列には会社が無いので、氏名だけの表を別に持つ。
+// ★実測で確認: 更新者に出るのは「高田」76件だけ。
+//   和信カインド・ラーテル・GRHD に「高田」という別人はいない（職人マスタ68人を全部確認済み）。
+//   柳澤・栁澤・内村は更新者としては1件も使われていない。
+const UPDATER_MERGE = { '高田': '高田（関東）' };
+
+// 職人マスタで1人1行にまとめるとき、その人を置く会社。
+// ★これは「会社を書き換える」唯一の場所。日報データ・アーカイブの会社は1つも触らない。
+//   （GRME髙田(グローライズ)の40件は「関東の人が本社案件に入った」正しい記録なので、
+//     予定側の会社を書き換えると拠点の絞り込みと集計が壊れる）
+//   職人マスタは本人キーが(会社,氏名)なので、1行にまとめるには会社を揃えるしかない。
+//   実態は関東支店＝GRミツマ。§3.9でグローライズとGRミツマは1つの名簿なので
+//   どちらに置いても両方の画面に出る。
 const MEMBER_MERGE_COMPANY = 'GRミツマ';
 
-function mergedMemberName_(name) {
-  const s = String(name == null ? '' : name).trim();
-  return MEMBER_MERGE_MAP[s] || s;
+function mergedMemberName_(company, name) {
+  const c = String(company == null ? '' : company).trim();
+  const n = String(name == null ? '' : name).trim();
+  return MEMBER_MERGE_BY_COMPANY[c + '|' + n] || n;
 }
 
-// 1つのシートの「氏名」「更新者」列をまとめる先の名前へ置き換える。
-// 列ごとに1回の setValues で書く（1セルずつ書くとGASの6分制限に届く）。
-function mergeNamesInSheet_(sheet, apply) {
-  const out = { sheet: sheet ? sheet.getName() : '(無し)', 氏名: 0, 更新者: 0, 行数: 0 };
-  if (!sheet) return out;
+function mergedUpdaterName_(name) {
+  const n = String(name == null ? '' : name).trim();
+  return UPDATER_MERGE[n] || n;
+}
+
+// 1つのシートについて「どう変わるか」を作るだけ。まだ書かない。
+// 戻り値: {ok, sheet, 行数, 氏名の変更, 更新者の変更, 内訳, 書く内容}
+function planNameMerge_(sheet) {
+  const out = { ok: true, sheet: '', 行数: 0, 氏名の変更: 0, 更新者の変更: 0, 内訳: {}, _write: [] };
+  if (!sheet) { out.ok = false; out.理由 = 'シートが無い'; return out; }
+  out.sheet = sheet.getName();
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) return out;
   const headers = data[0];
   const nameIdx = headers.indexOf('氏名');
   const byIdx = headers.indexOf('更新者');
+  const coIdx = headers.indexOf('会社');
+  if (nameIdx < 0 || byIdx < 0 || coIdx < 0) {
+    out.ok = false;
+    out.理由 = '必要な列（氏名/更新者/会社）が見つからない: ' + JSON.stringify(headers.slice(0, 21));
+    return out;
+  }
   out.行数 = data.length - 1;
 
-  [['氏名', nameIdx, '氏名'], ['更新者', byIdx, '更新者']].forEach(function (pair) {
-    const idx = pair[1];
-    if (idx < 0) return;
-    const col = [];
-    let changed = 0;
-    for (let i = 1; i < data.length; i++) {
-      const before = String(data[i][idx] == null ? '' : data[i][idx]);
-      const after = mergedMemberName_(before);
-      if (after !== before) changed++;
-      col.push([after]);
+  const nameCol = [], byCol = [];
+  for (let i = 1; i < data.length; i++) {
+    const co = String(data[i][coIdx] == null ? '' : data[i][coIdx]).trim();
+    const beforeName = String(data[i][nameIdx] == null ? '' : data[i][nameIdx]);
+    const afterName = mergedMemberName_(co, beforeName);
+    if (afterName !== beforeName.trim()) {
+      out.氏名の変更++;
+      const k = co + '|' + beforeName.trim() + ' → ' + afterName;
+      out.内訳[k] = (out.内訳[k] || 0) + 1;
     }
-    out[pair[2]] = changed;
-    if (apply && changed > 0) {
-      sheet.getRange(2, idx + 1, col.length, 1).setValues(col);
+    nameCol.push([afterName]);
+
+    const beforeBy = String(data[i][byIdx] == null ? '' : data[i][byIdx]);
+    const afterBy = mergedUpdaterName_(beforeBy);
+    if (afterBy !== beforeBy.trim()) {
+      out.更新者の変更++;
+      const k2 = '更新者 ' + beforeBy.trim() + ' → ' + afterBy;
+      out.内訳[k2] = (out.内訳[k2] || 0) + 1;
     }
-  });
+    byCol.push([afterBy]);
+  }
+  if (out.氏名の変更 > 0) out._write.push({ col: nameIdx + 1, values: nameCol });
+  if (out.更新者の変更 > 0) out._write.push({ col: byIdx + 1, values: byCol });
+  out._sheet = sheet;
   return out;
 }
 
 /**
  * Apps Scriptのエディタから手で実行する。
- *   mergeDuplicateMembers()      … dry-run。何も書かずに結果だけログに出す
+ *   mergeDuplicateMembers()       … dry-run。何も書かずに結果だけログに出す
  *   mergeDuplicateMembers_APPLY() … 実行
  *
- * (1) 日報データ・アーカイブの「氏名」「更新者」をまとめる先の名前へ置換
- * (2) 職人マスタの重複行を1行にまとめる（非空の値を寄せる。食い違えば中止）
- * 行数は1行も増減しない。会社は1つも触らない。
+ * ★全部読んで検査してから書く。1つでもおかしければ1文字も書かない。
+ * 行数は1行も増減しない。日報データ・アーカイブの会社は1つも触らない。
  */
 function mergeDuplicateMembers(apply) {
-  const lock = LockService.getScriptLock();
+  const lock = getDailyDataLock_();   // ★職人マスタの更新と同じロック（Codexレビュー[P1]#4）
   if (!lock.tryLock(30000)) throw new Error('他の処理が動いています。少し待ってからもう一度実行してください。');
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const report = { dryRun: !apply, シート: [], 職人マスタ: {}, 食い違い: [] };
+    const report = { dryRun: !apply, シート: [], 職人マスタ: {}, 食い違い: [], 中止理由: '' };
 
-    // ── (1) 予定データの氏名・更新者
-    [SHEET_NAME, ARCHIVE_SHEET].forEach(function (n) {
-      report.シート.push(mergeNamesInSheet_(ss.getSheetByName(n), apply));
+    // ── (1) 予定データ側の計画を作る（まだ書かない）
+    const plans = [SHEET_NAME, ARCHIVE_SHEET].map(function (n) {
+      return planNameMerge_(ss.getSheetByName(n));
     });
+    plans.forEach(function (p) {
+      report.シート.push({ sheet: p.sheet || '(無し)', 行数: p.行数,
+        氏名の変更: p.氏名の変更, 更新者の変更: p.更新者の変更, 内訳: p.内訳, ok: p.ok, 理由: p.理由 });
+    });
+    const badPlan = plans.filter(function (p) { return !p.ok; });
+    if (badPlan.length) {
+      report.中止理由 = '予定データのシートを読めない: ' + badPlan.map(function (p) { return p.sheet + '(' + p.理由 + ')'; }).join(' / ');
+      Logger.log('中止: ' + report.中止理由);
+      return report;
+    }
 
-    // ── (2) 職人マスタ
-    const mSheet = apply ? getOrCreateMemberSheet_(ss) : ss.getSheetByName(MEMBER_SHEET);
-    if (!mSheet) { Logger.log('職人マスタがありません'); return report; }
+    // ── (2) 職人マスタの計画を作る（まだ書かない）
+    //   ★applyでもシートを勝手に作らない。無ければ中止（Codexレビュー[P2]#5）
+    const mSheet = ss.getSheetByName(MEMBER_SHEET);
+    if (!mSheet) {
+      report.中止理由 = '職人マスタが見つかりません';
+      Logger.log('中止: ' + report.中止理由);
+      return report;
+    }
     const mData = mSheet.getDataRange().getValues();
+    const mHeader = mData[0] || [];
+    if (String(mHeader[0] || '').trim() !== '氏名' || String(mHeader[1] || '').trim() !== '会社') {
+      report.中止理由 = '職人マスタの1列目が氏名、2列目が会社になっていません: ' + JSON.stringify(mHeader.slice(0, 6));
+      Logger.log('中止: ' + report.中止理由);
+      return report;
+    }
     const bodyRows = mData.slice(1).map(function (r) { return r.slice(0, 6); });
-
-    // 名前を置き換え、対象者は会社もGRミツマへ寄せる（本人キーが(会社,氏名)のため）
     const renamed = bodyRows.map(function (r) {
       const orig = String(r[0] == null ? '' : r[0]).trim();
-      const merged = mergedMemberName_(orig);
+      const co = String(r[1] == null ? '' : r[1]).trim();
+      const merged = mergedMemberName_(co, orig);
       const row = r.slice();
       row[0] = merged;
+      // ★会社を書き換えるのはここだけ（職人マスタを1人1行にするため。上のコメント参照）
       if (merged !== orig) row[1] = MEMBER_MERGE_COMPANY;
       return row;
     });
-
     const m = mergeMemberRows_(renamed);
     report.食い違い = m.conflicts;
-    report.職人マスタ = {
-      前: bodyRows.filter(function (r) { return String(r[0] || '').trim(); }).length,
-      後: m.merged.length,
-      まとめた数: bodyRows.filter(function (r) { return String(r[0] || '').trim(); }).length - m.merged.length
-    };
+    const beforeCount = bodyRows.filter(function (r) { return String(r[0] || '').trim(); }).length;
+    report.職人マスタ = { 前: beforeCount, 後: m.merged.length, まとめた数: beforeCount - m.merged.length };
     report.まとめた人 = m.merged
       .filter(function (r) { return String(r[0]).indexOf('（関東）') >= 0; })
-      .map(function (r) { return r[0] + '（' + r[1] + '・単価' + (r[3] || 0) + '）'; });
+      .map(function (r) { return r[0] + '（' + r[1] + '・事業部' + (r[2] || '無し') + '・単価' + (r[3] || 0) + '）'; });
 
+    // ★食い違いがあれば、予定データも含めて1文字も書かない（Codexレビュー[P1]#2）
     if (m.conflicts.length) {
-      Logger.log('中止: 値が食い違う重複があります\n' + JSON.stringify(m.conflicts, null, 2));
+      report.中止理由 = '職人マスタに値の食い違いがあります（単価など）。人が決めてからもう一度';
+      Logger.log('中止: ' + report.中止理由 + '\n' + JSON.stringify(m.conflicts, null, 2));
       return report;
     }
 
@@ -4162,22 +4220,32 @@ function mergeDuplicateMembers(apply) {
       return report;
     }
 
-    // 書く直前にもう一度読み、変わっていたら中止（cleanupと同じ守り）
-    const nowData = mSheet.getDataRange().getValues()
-      .slice(1).map(function (r) { return r.slice(0, 6); });
-    if (JSON.stringify(nowData) !== JSON.stringify(bodyRows)) {
-      Logger.log('中止: 読み取りのあとに職人マスタが変更されました。もう一度dry-runからやり直してください。');
-      report.中止理由 = '読み取り後に職人マスタが変更された';
-      return report;
-    }
-
-    // 上書き→余りを消す順（逆だと途中で落ちたとき空になる）
+    // ── (3) ここまで全部通ったので書く。予定データ → アーカイブ → 職人マスタ の順
+    plans.forEach(function (p) {
+      p._write.forEach(function (w) {
+        p._sheet.getRange(2, w.col, w.values.length, 1).setValues(w.values);
+      });
+    });
     const keep = m.merged;
     const oldLastRow = mSheet.getLastRow();
     if (keep.length) mSheet.getRange(2, 1, keep.length, 6).setValues(keep);
     const extraRows = oldLastRow - 1 - keep.length;
     if (extraRows > 0) mSheet.getRange(2 + keep.length, 1, extraRows, 6).clearContent();
     SpreadsheetApp.flush();
+
+    // 何を何に変えたかを変更履歴にも残す（後から追える）
+    try {
+      const entries = [];
+      Object.keys(MEMBER_MERGE_BY_COMPANY).forEach(function (k) {
+        entries.push({ oldId: '', newId: '', field: '氏名の統合',
+                       before: k, after: MEMBER_MERGE_BY_COMPANY[k] });
+      });
+      Object.keys(UPDATER_MERGE).forEach(function (k) {
+        entries.push({ oldId: '', newId: '', field: '更新者の統合',
+                       before: k, after: UPDATER_MERGE[k] });
+      });
+      logHistory_(ss, 'merge_members', entries, 'system');
+    } catch (e) {}
 
     logOperation_(ss, 'merge_duplicate_members', '職人マスタ/日報データ/アーカイブ',
       JSON.stringify(report.職人マスタ), 'system');
