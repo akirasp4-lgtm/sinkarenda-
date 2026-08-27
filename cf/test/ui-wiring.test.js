@@ -205,3 +205,49 @@ describe('保存時の重複警告が新ルールを使っていること（2026
     });
   });
 });
+
+describe('重複の知らせ（2026-08-27 フェーズ2 Task3）', () => {
+  const src = read('index.html');
+
+  it('★母集団は拠点で絞らない（本社ビューでも関東の重なりに気付ける）', () => {
+    expect(src).toMatch(/findConflicts\(companyNippos\(\),\s*\{\s*from:\s*todayYmd\(\)\s*\}\)/);
+  });
+
+  it('★今日以降だけを出す（過ぎた日の重複は直しようがない）', () => {
+    expect(src).toContain('function todayYmd(');
+    expect(src).toContain('function currentConflicts(');
+  });
+
+  it('0件のときはバナーを消す（常に出ていると読まれなくなる）', () => {
+    expect(src).toMatch(/if\(!list\.length\)\{el\.style\.display='none';return;\}/);
+  });
+
+  it('カレンダーの描画から呼ばれている', () => {
+    expect(src).toMatch(/try\{renderConflictBanner\(\);\}catch\(e\)\{\}/);
+  });
+
+  it('★知らせが落ちてもカレンダー本体は描く', () => {
+    // 重複の計算で例外が出ても、予定表そのものが真っ白になってはいけない
+    expect(src).toMatch(/try\{renderConflictBanner\(\);\}catch\(e\)\{\}[^\n]*\n\s*renderCalendar\(\);/);
+  });
+
+  it('★一覧から編集・削除をさせない（複数の現場と日にまたがるため）', () => {
+    const m = src.match(/function openConflictList\(\)\{[\s\S]*?\n\}/);
+    expect(m).toBeTruthy();
+    ['openEditModal', 'deleteNippo', 'gm-delete-bar', 'gm-edit-btn', 'toggleGmSelect']
+      .forEach(bad => expect(m[0], bad).not.toContain(bad));
+  });
+
+  it('氏名・現場名をそのままHTMLに入れていない（escを通している）', () => {
+    const m = src.match(/function openConflictList\(\)\{[\s\S]*?\n\}/);
+    expect(m[0]).toContain('esc(c.name)');
+    expect(m[0]).toContain('esc(j.genba)');
+  });
+
+  it('★新しいUIに class="tab" を増やしていない（下部ナビの添字がずれる）', () => {
+    // switchTab() は querySelectorAll('.tab') と tabs配列を添字で対応させている。
+    // .tab が1つ増えるだけで下部ナビの選択表示が全部ずれる
+    expect((read('index.html').match(/class="tab"/g) || []).length).toBe(4);
+    expect((read('admin.html').match(/class="tab"/g) || []).length).toBe(6);
+  });
+});

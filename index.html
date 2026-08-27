@@ -159,6 +159,12 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 @keyframes loadAnim{0%{width:0;margin-left:0}50%{width:60%}100%{width:0;margin-left:100%}}
 .notice-bar{background:#FFF3CD;color:#856404;padding:8px 16px;font-size:13px;text-align:center;display:none}
 .notice-bar.active{display:block}
+/* ★2026-08-27 フェーズ2: 人員の重複の知らせ。0件のときは要素ごと消す（常に出ていると読まれなくなる） */
+.conflict-bar{display:none;background:#FCEBEB;color:#A32D2D;border:1px solid #E8384F;border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:14px;font-weight:600;cursor:pointer;min-height:44px;box-sizing:border-box;text-align:left;line-height:1.5}
+.conflict-row{border-bottom:1px solid #eee;padding:10px 2px;font-size:14px}
+.conflict-row:last-child{border-bottom:none}
+.conflict-row b{color:#A32D2D}
+.conflict-job{font-size:13px;color:#555;padding-left:14px}
 .week-table{width:100%;border-collapse:collapse;font-size:13px}
 .week-table th{padding:6px 4px;text-align:center;font-weight:600;border-bottom:2px solid #ddd;font-size:12px;color:#666}
 .week-table td{padding:4px 2px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:12px}
@@ -428,6 +434,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="page-title">カレンダー</div>
   <button class="help-btn-inline" onclick="openHelp()">❓ 使い方</button>
 </div>
+<div class="conflict-bar" id="conflict-bar" onclick="openConflictList()"></div>
 <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:12px">
   <button class="btn btn-secondary btn-sm" onclick="changeListMonth(-1)">◀</button>
   <span id="list-month-label" style="font-size:15px;font-weight:600;min-width:100px;text-align:center"></span>
@@ -441,6 +448,13 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 
 <!-- カレンダー日付モーダル -->
+<div id="conflict-modal" class="modal-bg" onclick="if(event.target===this)this.classList.remove('active')">
+<div class="modal">
+  <div class="modal-title">同じ日に別の現場に入っている人</div>
+  <div id="conflict-content"></div>
+  <button class="btn btn-secondary" style="margin-top:12px" onclick="document.getElementById('conflict-modal').classList.remove('active')">閉じる</button>
+</div>
+</div>
 <div id="cal-day-modal" class="modal-bg" onclick="if(event.target===this)this.classList.remove('active')">
 <div class="modal">
   <div class="modal-title" id="cal-day-title"></div>
@@ -3195,10 +3209,50 @@ function formatDate(d){
 
 let calSelectedDate='';
 
+// ★2026-08-27 フェーズ2: 人員の重複の知らせ
+function todayYmd(){
+  const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+
+// 今日以降だけを出す。過ぎた日の重複は直しようがないので出しても意味がない
+// （実データでは典47件のうち今日以降が12件）。0件のときはバナーごと消す。
+function currentConflicts(){
+  return findConflicts(companyNippos(),{from:todayYmd()});
+}
+
+function renderConflictBanner(){
+  const el=document.getElementById('conflict-bar');
+  if(!el)return;
+  const list=currentConflicts();
+  if(!list.length){el.style.display='none';return;}
+  el.style.display='block';
+  el.textContent='⚠️ 同じ日に別の現場に入っている人が '+list.length+' 件あります（タップで一覧）';
+}
+
+// 読むだけ。ここから編集や削除はさせない
+//   （複数の現場・複数の日にまたがる一覧なので、一括操作を置くと事故になる）
+function openConflictList(){
+  const list=currentConflicts();
+  const box=document.getElementById('conflict-content');
+  if(!box)return;
+  if(!list.length){box.innerHTML='<div style="padding:12px;color:#666">重なっている人はいません。</div>';}
+  else{
+    box.innerHTML=list.map(c=>
+      '<div class="conflict-row"><b>'+esc(formatDate(c.date))+'</b>　'+esc(c.name)
+      +(c.bucket==='night'?'（夜勤）':'')
+      +c.jobs.map(j=>'<div class="conflict-job">・'+esc(j.genba)+'／'+esc(j.loc)+'</div>').join('')
+      +'</div>'
+    ).join('');
+  }
+  document.getElementById('conflict-modal').classList.add('active');
+}
+
 function renderList(){
   if(!listMonth){const now=new Date();listMonth=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');}
   const lp=listMonth.split('-');
   document.getElementById('list-month-label').textContent=lp[0]+'年'+Number(lp[1])+'月';
+  try{renderConflictBanner();}catch(e){}   // 知らせでカレンダー本体を止めない
   renderCalendar();
 }
 
