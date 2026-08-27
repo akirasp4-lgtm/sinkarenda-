@@ -946,6 +946,42 @@ function doPost(e) {
       return ok({updated: null});
     }
 
+    // ★2026-08-27 フェーズ1: 既定部隊。予定を作るときの初期値に使うだけで、
+    //   決まった値は予定1件ごとに保存する（人に固定で持たせない）。
+    if (action === 'update_member_butai') {
+      const memberSheet = getOrCreateMemberSheet_(ss);
+      const name = String(body.name || '').trim();
+      const company = String(body.company || '').trim();
+      const butai = normalizeButai_(body.butai);   // 知らない値は空になる
+      const data = memberSheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][0]).trim() === name && String(data[i][1]).trim() === company) {
+          memberSheet.getRange(i + 1, 5).setValue(butai);
+          logOperation_(ss, 'update_member_butai', name + '/' + company, '既定部隊=' + (butai || '(なし)'), updatedBy);
+          return ok({updated: name, butai: butai});
+        }
+      }
+      return ok({updated: null});
+    }
+
+    // 有効/無効。★削除ではない。過去の予定はそのまま残り、
+    //   空き人員のリストに出なくなるだけ（「デモ」「応援枠」などを外すため）。
+    if (action === 'update_member_active') {
+      const memberSheet = getOrCreateMemberSheet_(ss);
+      const name = String(body.name || '').trim();
+      const company = String(body.company || '').trim();
+      const active = body.active !== false && String(body.active) !== 'false';
+      const data = memberSheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][0]).trim() === name && String(data[i][1]).trim() === company) {
+          memberSheet.getRange(i + 1, 6).setValue(active ? '○' : '×');
+          logOperation_(ss, 'update_member_active', name + '/' + company, active ? '有効' : '無効', updatedBy);
+          return ok({updated: name, active: active});
+        }
+      }
+      return ok({updated: null});
+    }
+
     if (action === 'update_member_rate') {
       const memberSheet = getOrCreateMemberSheet_(ss);
       const name = String(body.name || '').trim();

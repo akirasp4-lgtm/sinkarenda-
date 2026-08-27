@@ -4910,6 +4910,10 @@ async function loadSettingsMembers(){
         throw new Error('職人マスタのヘッダに「氏名」または「単価」列が見つかりません: '+JSON.stringify(header));
       }
       const companyIdx=header.indexOf('会社'),divIdx=header.indexOf('事業部');
+      // ★2026-08-27 フェーズ1: 既定部隊・有効。
+      //   ★必須にしてはいけない（-1でも動くこと）。必須にすると、GASを出す前に
+      //   この画面を開いた瞬間に職人管理が死ぬ＝反映順の事故になる。
+      const butaiIdx=header.indexOf('既定部隊'),activeIdx=header.indexOf('有効');
       settingsMembers=data.slice(1).map(r=>{
         // ★3回目レビュー修正7: 行（氏名）は存在するが単価セルの値だけが欠落・
         // 非数値の場合、これまでは Number(...)||0 で一律0に正規化していた。
@@ -4929,7 +4933,11 @@ async function loadSettingsMembers(){
           company:String(companyIdx>=0?(r[companyIdx]||''):''),
           division:String(divIdx>=0?(r[divIdx]||''):''),
           rate:rateOk?Number(raw):0,
-          rateOk
+          rateOk,
+          // ★2026-08-27 フェーズ1。列がまだ無ければ 空／有効 として扱う
+          butai:String(butaiIdx>=0?(r[butaiIdx]||''):'').trim(),
+          active:activeIdx>=0?String(r[activeIdx]||'').trim()!=='×':true,
+          hasButaiCol:butaiIdx>=0
         };
       });
       settingsMembersOk=true;
@@ -4993,9 +5001,17 @@ function renderSettings(){
     const rateInput=memberOk
       ?`<input type="number" value="${rate||''}" placeholder="単価" onchange="updateMemberRate('${esc(s)}',this.value)" style="width:80px;margin:0;padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:6px">`
       :`<input type="text" value="取得できませんでした" disabled title="単価を取得できませんでした" style="width:130px;margin:0;padding:4px 6px;font-size:11px;border:1px solid #fca5a5;border-radius:6px;background:#fef2f2;color:#c00;cursor:not-allowed">`;
-    return`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee;gap:6px">
-      <span style="font-size:15px;flex:1">${esc(s)}</span>
-      <div style="display:flex;align-items:center;gap:6px">${divSelect}${rateInput}<button class="btn btn-danger btn-sm" onclick="removeShokunin(${i})">削除</button></div>
+    // ★2026-08-27 フェーズ1: 既定部隊（予定入力の初期値）と 有効（空き人員に出すか）
+    const mCompany=(member&&member.company)||currentCompany;
+    const curButai=(member&&member.butai)||'';
+    const isActive=member?member.active!==false:true;
+    const butaiSelect=`<select onchange="updateMemberButai('${esc(s)}','${esc(mCompany)}',this.value)" title="既定部隊（予定を作るときの初期値）" style="width:auto;margin:0;padding:4px 8px;font-size:12px;border:1px solid #ddd;border-radius:6px;background:#f9f9f9">
+      <option value=""${!curButai?' selected':''}>部隊なし</option>${BUTAI_VALUES.map(b=>`<option value="${b}"${b===curButai?' selected':''}>${b}</option>`).join('')}</select>`;
+    const activeChk=`<label title="外すと空き人員のリストに出なくなります（過去の予定は消えません）" style="display:flex;align-items:center;gap:3px;font-size:11px;color:#666;white-space:nowrap;margin:0">
+      <input type="checkbox" ${isActive?'checked':''} onchange="updateMemberActive('${esc(s)}','${esc(mCompany)}',this.checked)" style="margin:0">有効</label>`;
+    return`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee;gap:6px;flex-wrap:wrap">
+      <span style="font-size:15px;flex:1;min-width:80px">${esc(s)}</span>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${divSelect}${butaiSelect}${activeChk}${rateInput}<button class="btn btn-danger btn-sm" onclick="removeShokunin(${i})">削除</button></div>
     </div>`;
   }).join('')||'<div style="color:#999;padding:12px;text-align:center">職人が登録されていません</div>';
 }
@@ -5016,6 +5032,34 @@ async function removeShokunin(i){
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'remove_member',name,company:currentCompany}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){allMembers=allMembers.filter(m=>!(m.name===name&&m.company===currentCompany));if(settingsMembers)settingsMembers=settingsMembers.filter(m=>!(m.name===name&&m.company===currentCompany));renderSettings();initMemberUI();refreshInBackground();}
     else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+}
+// ★2026-08-27 フェーズ1: 既定部隊を保存する。
+//   保存後は settingsMembers（職人管理の自前キャッシュ）と allMembers の両方を
+//   更新する。捨てるのではなく更新する＝画面が古いままにならず、再取得も要らない。
+async function updateMemberButai(name,company,butai){
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_butai',name,company,butai}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status!=='ok'){alert('エラー：'+(json.message||'不明'));renderSettings();return;}
+    const sm=settingsMembers&&settingsMembers.find(m=>m.name===name&&m.company===company);
+    if(sm)sm.butai=butai;
+    const am=(allMembers||[]).find(m=>m.name===name&&m.company===company);
+    if(am)am.butai=butai;
+    refreshInBackground();
+  }catch(e){alert('エラー：'+e.message);renderSettings();}
+}
+// 有効/無効。★削除ではない。過去の予定はそのまま残り、空き人員のリストに出なくなるだけ。
+async function updateMemberActive(name,company,active){
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_active',name,company,active}),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status!=='ok'){alert('エラー：'+(json.message||'不明'));renderSettings();return;}
+    const sm=settingsMembers&&settingsMembers.find(m=>m.name===name&&m.company===company);
+    if(sm)sm.active=active;
+    const am=(allMembers||[]).find(m=>m.name===name&&m.company===company);
+    if(am)am.active=active;
+    refreshInBackground();
+  }catch(e){alert('エラー：'+e.message);renderSettings();}
 }
 async function updateMemberDivision(name,division){
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_division',name,company:currentCompany,division}),headers:{'Content-Type':'text/plain'}});
