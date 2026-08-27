@@ -251,3 +251,25 @@ describe('重複の知らせ（2026-08-27 フェーズ2 Task3）', () => {
     expect((read('admin.html').match(/class="tab"/g) || []).length).toBe(6);
   });
 });
+
+describe('重複判定の名簿のまとまり（2026-08-27 実機で発見した欠陥の再発防止）', () => {
+  FILES.forEach(f => {
+    it(f + ': ★判定側の名簿一覧が KYOTEN_COMPANIES と同じ内容', () => {
+      // ここがずれると「本社⇔関東をまたぐ応援の重複」を丸ごと見逃す。
+      // 実機で実測: 会社で分けると39件、1つの名簿として見ると47件（差の8件は全部本物）
+      const src = read(f);
+      const a = src.match(/const KYOTEN_COMPANIES=\[([^\]]*)\]/);
+      const b = src.match(/var CONFLICT_SAME_ROSTER = \[([^\]]*)\]/);
+      expect(a, 'KYOTEN_COMPANIES が見つからない').toBeTruthy();
+      expect(b, 'CONFLICT_SAME_ROSTER が見つからない').toBeTruthy();
+      const norm = (s) => s.split(',').map(x => x.trim().replace(/^'|'$/g, '')).filter(Boolean).sort();
+      expect(norm(b[1])).toEqual(norm(a[1]));
+    });
+
+    it(f + ': ★会社そのままで突き合わせていない', () => {
+      const src = read(f);
+      expect(src).toContain('rosterKey(n.company)');
+      expect(src).not.toMatch(/var key = \[String\(n\.date\), String\(n\.company/);
+    });
+  });
+});

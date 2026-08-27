@@ -2355,6 +2355,21 @@ var GENBA_WORKTYPES = ['現場作業', '置局', '着打ち', '撤去品返却']
 // 「きんでん」+「西A現場」と「きんでん西」+「A現場」を別物として扱うために必要
 var CONFLICT_SEP = '\u0001';
 
+// ★グローライズとGRミツマは1つの名簿（§3.9）。同じ人が本社案件と
+//   関東案件の両方に登録されるので、会社で分けると
+//   「応援に出ている人の重複」を丸ごと見逃す。
+//   ★実機で実測（2026-08-27）: 会社で分けると39件／今日以降11件、
+//     1つの名簿として見ると47件／12件。差の8件はすべて
+//     本社⇔関東をまたぐ本物の重複だった（設計書§1.1の実測値 47/12 と一致）。
+//   ★この一覧は画面の KYOTEN_COMPANIES と同じ内容でなければならない
+//     （cf/test/ui-wiring.test.js が違っていたら落とす）。
+var CONFLICT_SAME_ROSTER = ['グローライズ', 'GRミツマ'];
+
+function rosterKey(company) {
+  var c = String(company || '').trim();
+  return CONFLICT_SAME_ROSTER.indexOf(c) >= 0 ? 'GR' : c;
+}
+
 function isGenbaWork(n) {
   return GENBA_WORKTYPES.indexOf(String((n && n.workType) || '').trim()) >= 0;
 }
@@ -2383,7 +2398,7 @@ function findConflicts(nippos, opts) {
     if (!countsForConflict(n)) return;
     if (from && String(n.date) < from) return;
     // 会社を混ぜない。和信カインドの「元」とラーテルの「元」は別人
-    var key = [String(n.date), String(n.company || '').trim(),
+    var key = [String(n.date), rosterKey(n.company),
                String(n.name).trim(), conflictBucket(n)].join(CONFLICT_SEP);
     if (!map.has(key)) map.set(key, new Map());
     var jobs = map.get(key);
@@ -2400,8 +2415,10 @@ function findConflicts(nippos, opts) {
   map.forEach(function (jobs, key) {
     if (jobs.size < 2) return;
     var p = key.split(CONFLICT_SEP);
+    // roster は会社名そのものではなく「同じ名簿のまとまり」。
+    // グローライズとGRミツマはどちらも 'GR' になる
     out.push({
-      date: p[0], company: p[1], name: p[2], bucket: p[3],
+      date: p[0], roster: p[1], name: p[2], bucket: p[3],
       jobs: Array.from(jobs.values())
     });
   });
@@ -2416,7 +2433,7 @@ function findConflicts(nippos, opts) {
 // 元から重なっていた分まで出すと、毎回同じ警告が出て読まれなくなる。
 function conflictsIfAdded(existing, candidates) {
   if (!candidates || !candidates.length) return [];
-  var sig = function (c) { return [c.date, c.company, c.name, c.bucket].join(CONFLICT_SEP); };
+  var sig = function (c) { return [c.date, c.roster, c.name, c.bucket].join(CONFLICT_SEP); };
   var before = new Set(findConflicts(existing).map(sig));
   return findConflicts((existing || []).concat(candidates)).filter(function (c) {
     return !before.has(sig(c));
