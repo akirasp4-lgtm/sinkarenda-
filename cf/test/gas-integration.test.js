@@ -14,7 +14,7 @@ const GAS_PATH = join(here, '..', '..', 'gas.js');
 const CODE = readFileSync(GAS_PATH, 'utf8');
 
 const EXPORT = `
-;globalThis.__gas = { HEADERS, buildDailyValues_, getMemberButaiMap_, diffDailyRows_, rowFullJson_ };`;
+;globalThis.__gas = { HEADERS, buildDailyValues_, getMemberButaiMap_, lookupMemberButai_, memberKey_, diffDailyRows_, rowFullJson_ };`;
 
 // ── 最低限のスプレッドシートの真似
 function makeSheet(rows) {
@@ -174,10 +174,54 @@ describe('buildDailyValues_（実際にシートを読んで行を組み立て�
     expect(out[1][ctx.g.HEADERS.indexOf('部隊')]).toBe('');
   });
 
-  it('getMemberButaiMap_ は有効/無効に関係なく既定部隊を返す（無効化は空きリスト用）', () => {
+  it('★既定部隊の鍵は (会社, 氏名)（同名の別会社を取り違えない）', () => {
     const map = ctx.g.getMemberButaiMap_(ctx.ss);
-    expect(map['元']).toBe('2部隊');
-    expect(map['中島']).toBeUndefined();
+    expect(map[ctx.g.memberKey_('グローライズ', '元')]).toBe('2部隊');
+    expect(ctx.g.lookupMemberButai_(map, 'グローライズ', '元')).toBe('2部隊');
+    expect(ctx.g.lookupMemberButai_(map, 'グローライズ', '中島')).toBe('');
+  });
+
+  it('会社が分からなくても氏名で引ける（1人しかいない名前なら）', () => {
+    const map = ctx.g.getMemberButaiMap_(ctx.ss);
+    expect(ctx.g.lookupMemberButai_(map, '', '元')).toBe('2部隊');
+  });
+
+  it('★同名が別会社にいて部隊が違うときは氏名だけでは引かない（取り違え防止）', () => {
+    const ctx2 = makeContext({
+      '日報データ': makeSheet([[]]),
+      '職人マスタ': makeSheet([
+        ['氏名', '会社', '事業部', '単価', '既定部隊', '有効'],
+        ['元', 'グローライズ', '', 0, '2部隊', '○'],
+        ['元', 'GRミツマ', '', 0, '3部隊', '○']
+      ]),
+      '現場マスタ': makeSheet(JOBSITE_ROWS.map(r => r.slice())),
+      '元請マスタ': makeSheet([['元請名', '会社', '読み']])
+    });
+    const map = ctx2.g.getMemberButaiMap_(ctx2.ss);
+    expect(ctx2.g.lookupMemberButai_(map, 'グローライズ', '元')).toBe('2部隊');
+    expect(ctx2.g.lookupMemberButai_(map, 'GRミツマ', '元')).toBe('3部隊');
+    expect(ctx2.g.lookupMemberButai_(map, '', '元')).toBe('');   // どちらか分からないので入れない
+  });
+
+  it('会社が違えば既定部隊も会社ごとに正しく入る', () => {
+    const ctx2 = makeContext({
+      '日報データ': makeSheet([[]]),
+      '職人マスタ': makeSheet([
+        ['氏名', '会社', '事業部', '単価', '既定部隊', '有効'],
+        ['元', 'グローライズ', '', 0, '2部隊', '○'],
+        ['元', 'GRミツマ', '', 0, '3部隊', '○']
+      ]),
+      '現場マスタ': makeSheet(JOBSITE_ROWS.map(r => r.slice())),
+      '元請マスタ': makeSheet([['元請名', '会社', '読み']])
+    });
+    const base = {
+      date: '2026-08-28', genba: 'きんでん西', loc: 'A現場', name: '元', role: '代表',
+      start: '08:00', end: '17:00', kosu: 1, memo: '', id: 'ID1',
+      updatedBy: '向', color: '', workType: '現場作業', vehicle: ''
+    };
+    const bi = ctx2.g.HEADERS.indexOf('部隊');
+    expect(ctx2.g.buildDailyValues_(ctx2.ss, [{ ...base, company: 'グローライズ' }], '向')[0][bi]).toBe('2部隊');
+    expect(ctx2.g.buildDailyValues_(ctx2.ss, [{ ...base, company: 'GRミツマ' }], '向')[0][bi]).toBe('3部隊');
   });
 });
 

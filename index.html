@@ -1738,6 +1738,18 @@ function getShokunin(){
   }
   return allMembers.filter(m=>m.company===currentCompany).map(m=>m.name);
 }
+// ★Codexレビュー[P2]#8: 「有効」列を作っただけで、どこでも使っていなかった。
+//   職人管理で無効にしても空き人員に出続ける＝機能していない状態だった。
+//   ★空き確認の一覧だけを絞る。責任者・班員の選択肢や職人管理は絞らない:
+//     - 職人管理を絞ると、一度無効にした人を二度と戻せなくなる
+//     - 選択肢を絞ると、既存の予定を編集したときに無効の人が外れてしまう
+//   画面の説明文（「空き人員のリストに出なくなります」）と一致させる。
+function getActiveShokunin(){
+  const names=getShokunin();
+  const off={};
+  (allMembers||[]).forEach(m=>{ if(m&&m.active===false)off[String(m.name||'').trim()]=true; });
+  return names.filter(n=>!off[String(n||'').trim()]);
+}
 
 let allowedCompanies=[];
 let isAdmin=false;
@@ -2074,11 +2086,18 @@ const BUTAI_VALUES=['1部隊','2部隊','3部隊','4部隊'];
 const butaiTouched={s:false,e:false};
 function onButaiChanged(p){butaiTouched[p]=true;}
 function normalizeButai(v){const s=String(v==null?'':v).trim();return BUTAI_VALUES.includes(s)?s:'';}
+// ★Codexレビュー[P2]#9: 氏名だけで引くと、同名が別会社にいたとき
+//   配列順で先に出てきた人の部隊が使われる。まず今見ている会社で探す。
+//   見つからないときは、同名が1人しかいない場合にかぎり氏名で引く。
 function memberDefaultButai(name){
   const n=String(name||'').trim();
   if(!n)return '';
-  const m=(allMembers||[]).find(x=>String(x.name||'').trim()===n);
-  return m?normalizeButai(m.butai):'';
+  const same=(allMembers||[]).filter(x=>String(x.name||'').trim()===n);
+  if(!same.length)return '';
+  const mine=same.find(x=>String(x.company||'').trim()===currentCompany);
+  if(mine)return normalizeButai(mine.butai);
+  const vals=[...new Set(same.map(x=>normalizeButai(x.butai)))];
+  return vals.length===1?vals[0]:'';   // 食い違うなら勝手に決めない
 }
 // 責任者を選んだら、その人の既定部隊を初期値として入れる（手で変えた後は上書きしない）
 function refreshButaiField(p,opts){
@@ -2115,6 +2134,15 @@ function butaiTag(v){
 //   これが無いと、部隊と無関係な編集（時間を直す等）をしただけで
 //   保存済みの部隊が空欄で上書きされて消える（Codexレビュー[P1]#1）。
 //   拠点で同じ事故を起こしているので、必ず入口をまとめて1つの関数にする。
+// ★Codexレビュー[P2]#6: コピー経路は責任者をDOMへ入れるだけで onchange が
+//   発火しないため、直前にフォームに残っていた部隊がそのまま送られていた。
+//   コピー元の部隊を明示的に入れる。
+function applyCopyButai(g){
+  butaiTouched.s=false;
+  const el=document.getElementById('s-butai');
+  if(!el)return;
+  el.value=normalizeButai(g&&g.butai);
+}
 function applyEditButai(g){
   butaiTouched.e=false;
   bulkOrigButai={};                     // 前回の一括編集の控えを残さない
@@ -3442,6 +3470,7 @@ function copyGroupToInput_(g){
   renderMemberChips('member-selector',selectedMembers,toggleMember);
   initColorPicker('s', g.color||CAL_COLORS[0]);
   updateLocationSuggestions();checkLocationJobNo();
+  applyCopyButai(g);          // ★2026-08-27 部隊もコピーする
   showAlert('予定をコピーしました。日付を確認して登録してください。','ok');
 }
 
@@ -3529,6 +3558,7 @@ function copyToInput(idx){
   g.members.filter(m=>m.role==='同行').forEach(m=>{const i=shokunin.indexOf(m.name);if(i>=0)selectedMembers.push(i);});
   renderMemberChips('member-selector',selectedMembers,toggleMember);
   updateLocationSuggestions();checkLocationJobNo();
+  applyCopyButai(g);          // ★2026-08-27 部隊もコピーする
   showAlert('予定をコピーしました。日付を入力して登録してください。','ok');
 }
 
@@ -3993,7 +4023,7 @@ function renderAvailWeek(){
   }
   const dayNames=['日','月','火','水','木','金','土'];
   document.getElementById('avail-week-label').textContent=days[0].label+'〜'+days[6].label;
-  const cn=filteredNippos();const shokunin=getShokunin();
+  const cn=filteredNippos();const shokunin=getActiveShokunin();   // ★無効の人は空きに出さない
   if(shokunin.length===0){document.getElementById('avail-weekly').innerHTML='<div style="color:#999;text-align:center;padding:20px">更新ボタンを押してください</div>';return;}
   let html='<table class="week-table"><thead><tr><th></th>';
   days.forEach(d=>{const cls=d.dow===0?' class="week-sun"':d.dow===6?' class="week-sat"':'';html+=`<th${cls}>${d.label}<br>${dayNames[d.dow]}</th>`;});
@@ -4025,7 +4055,7 @@ function renderAvailList(){
     days.push({date:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),m:d.getMonth()+1,dd:d.getDate(),dow:d.getDay()});
   }
   const dayNames=['日','月','火','水','木','金','土'];
-  const cn=filteredNippos();const shokunin=getShokunin();
+  const cn=filteredNippos();const shokunin=getActiveShokunin();   // ★無効の人は空きに出さない
   let html='';
   days.forEach(d=>{
     const buckets={busy:[],yasumi:[],souko:[],free:[]};

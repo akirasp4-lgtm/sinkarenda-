@@ -88,18 +88,41 @@ function resolveButai_(row, memberDefault) {
   return normalizeButai_(memberDefault);
 }
 
-// 職人マスタの「既定部隊」を 氏名→部隊 の対応表にする
+// 職人マスタの「既定部隊」の対応表。
+// ★Codexレビュー[P2]#9: 掃除も管理更新も本人キーは (会社, 氏名) なのに、
+//   ここだけ氏名だけで引いていた。同名が別会社にいると、シートの並び順で
+//   たまたま先に出てきた人の部隊が使われる。会社込みの鍵を正とし、
+//   会社が分からない呼び出しのために氏名だけの索引も併せて返す。
+function memberKey_(company, name) {
+  return String(company || '').trim() + '|||' + String(name || '').trim();
+}
 function getMemberButaiMap_(ss) {
   const sheet = getOrCreateMemberSheet_(ss);
   const data = sheet.getDataRange().getValues();
   const map = {};
+  const byName = {};
+  const dupName = {};
   for (let i = 1; i < data.length; i++) {
     const name = String(data[i][0] || '').trim();
     if (!name) continue;
+    const company = String(data[i][1] || '').trim();
     const b = normalizeButai_(data[i][4]);
-    if (b) map[name] = b;
+    if (b) map[memberKey_(company, name)] = b;
+    // 同名が複数会社にいる場合、氏名だけの索引は当てにならないので使わせない
+    if (byName[name] !== undefined && byName[name] !== b) dupName[name] = true;
+    if (byName[name] === undefined) byName[name] = b;
   }
+  Object.keys(dupName).forEach(function (n) { delete byName[n]; });
+  map.__byName = byName;
   return map;
+}
+// 会社が分かればそれで引く。分からない/見つからないときだけ氏名で引く。
+function lookupMemberButai_(map, company, name) {
+  if (!map) return '';
+  const exact = map[memberKey_(company, name)];
+  if (exact) return exact;
+  const byName = map.__byName || {};
+  return byName[String(name || '').trim()] || '';
 }
 
 // 「×」だけを無効とみなす。空欄・未記入は有効（既存の職人を巻き込まないため）。
@@ -595,7 +618,7 @@ function buildDailyValues_(ss, rows, updatedBy) {
       resolveKyoten_(row.kyoten, kyotenMap[String(row.loc || '').trim()], row.company),
       // ★2026-08-27 フェーズ1: 部隊。画面が明示した値 > 職人マスタの既定部隊。
       //   画面が butai を送ってきたら空欄でも尊重する（resolveButai_ の仕様）。
-      resolveButai_(row, butaiMap[String(row.name || '').trim()])
+      resolveButai_(row, lookupMemberButai_(butaiMap, row.company, row.name))
     ];
   });
 }
@@ -670,7 +693,11 @@ function doPost(e) {
           return { oldId: '', newId: String(v[idCol] || ''), field: '(新規)',
                    before: '', after: rowSummary_(HEADERS, v) };
         }), updatedBy);
-      } catch (e) {}
+      } catch (e) {
+        // ★Codexレビュー[P2]#10: 登録は止めない（履歴シートの不調で新規登録が
+        //   全部死ぬ方が有害）。ただし黙って捨てず、操作ログに必ず残して気付けるようにする。
+        try { logOperation_(ss, 'history_failed', 'add', String(e), updatedBy); } catch (e2) {}
+      }
       logOperation_(ss, 'add', rows[0].genba + '/' + (rows[0].loc || ''), '行数=' + rows.length, updatedBy);
       return ok({count: rows.length});
     }
@@ -3833,7 +3860,13 @@ function cleanupMastersPhase1(apply) {
                      食い違い: [], 予定0件の候補: [] };
 
     // (1) 重複の統合
-    const mSheet = getOrCreateMemberSheet_(ss);          // ここで6列に拡張される
+    // ★Codexレビュー[P3]#11: dry-run では列追加・ヘッダ書換えもしない。
+    //   getOrCreateMemberSheet_ を呼ぶと「書き込みはしていません」と食い違う。
+    const mSheet = apply ? getOrCreateMemberSheet_(ss) : ss.getSheetByName(MEMBER_SHEET);
+    if (!mSheet) { Logger.log('職人マスタがありません'); return report; }
+    const mHeader = mSheet.getRange(1, 1, 1, Math.max(mSheet.getLastColumn(), 1)).getValues()[0];
+    report.列追加が必要 = !apply && (String(mHeader[4] || '').trim() !== '既定部隊'
+                                    || String(mHeader[5] || '').trim() !== '有効');
     const mData = mSheet.getDataRange().getValues();
     const bodyRows = mData.slice(1).map(function (r) { return r.slice(0, 6); });
     const beforeCount = bodyRows.filter(function (r) { return String(r[0] || '').trim(); }).length;
@@ -3887,6 +3920,18 @@ function cleanupMastersPhase1(apply) {
 
     if (!apply) {
       Logger.log('【dry-run】書き込みはしていません\n' + JSON.stringify(report, null, 2));
+      return report;
+    }
+
+    // ★Codexレビュー[P1]#3: 掃除は ScriptLock、職人マスタの更新は UserLock で
+    //   別種のロックなので互いに排他されない。読んでから書くまでの間に管理者が
+    //   単価や有効を変えると、古い内容で無言に上書きしてしまう（単価は給与の元データ）。
+    //   書く直前にもう一度読み、1文字でも変わっていたら中止する。
+    const nowData = mSheet.getDataRange().getValues()
+      .slice(1).map(function (r) { return r.slice(0, 6); });
+    if (JSON.stringify(nowData) !== JSON.stringify(bodyRows)) {
+      Logger.log('中止: 読み取りのあとに職人マスタが変更されました。もう一度dry-runからやり直してください。');
+      report.中止理由 = '読み取り後に職人マスタが変更された';
       return report;
     }
 

@@ -2145,6 +2145,18 @@ function getShokunin(){
   }
   return allMembers.filter(m=>m.company===currentCompany).map(m=>m.name);
 }
+// ★Codexレビュー[P2]#8: 「有効」列を作っただけで、どこでも使っていなかった。
+//   職人管理で無効にしても空き人員に出続ける＝機能していない状態だった。
+//   ★空き確認の一覧だけを絞る。責任者・班員の選択肢や職人管理は絞らない:
+//     - 職人管理を絞ると、一度無効にした人を二度と戻せなくなる
+//     - 選択肢を絞ると、既存の予定を編集したときに無効の人が外れてしまう
+//   画面の説明文（「空き人員のリストに出なくなります」）と一致させる。
+function getActiveShokunin(){
+  const names=getShokunin();
+  const off={};
+  (allMembers||[]).forEach(m=>{ if(m&&m.active===false)off[String(m.name||'').trim()]=true; });
+  return names.filter(n=>!off[String(n||'').trim()]);
+}
 function getGenbaMasterNames(){
   if(currentCompany==='全社')return [...new Set(allGenbaMaster.map(g=>g.name))].sort();
   return [...new Set(allGenbaMaster.filter(g=>g.company===currentCompany||!g.company).map(g=>g.name))].sort();
@@ -2765,11 +2777,18 @@ const BUTAI_VALUES=['1部隊','2部隊','3部隊','4部隊'];
 const butaiTouched={s:false,e:false};
 function onButaiChanged(p){butaiTouched[p]=true;}
 function normalizeButai(v){const s=String(v==null?'':v).trim();return BUTAI_VALUES.includes(s)?s:'';}
+// ★Codexレビュー[P2]#9: 氏名だけで引くと、同名が別会社にいたとき
+//   配列順で先に出てきた人の部隊が使われる。まず今見ている会社で探す。
+//   見つからないときは、同名が1人しかいない場合にかぎり氏名で引く。
 function memberDefaultButai(name){
   const n=String(name||'').trim();
   if(!n)return '';
-  const m=(allMembers||[]).find(x=>String(x.name||'').trim()===n);
-  return m?normalizeButai(m.butai):'';
+  const same=(allMembers||[]).filter(x=>String(x.name||'').trim()===n);
+  if(!same.length)return '';
+  const mine=same.find(x=>String(x.company||'').trim()===currentCompany);
+  if(mine)return normalizeButai(mine.butai);
+  const vals=[...new Set(same.map(x=>normalizeButai(x.butai)))];
+  return vals.length===1?vals[0]:'';   // 食い違うなら勝手に決めない
 }
 // 責任者を選んだら、その人の既定部隊を初期値として入れる（手で変えた後は上書きしない）
 function refreshButaiField(p,opts){
@@ -2948,6 +2967,15 @@ function applyEditKyoten(g){
 //   これが無いと、部隊と無関係な編集（時間を直す等）をしただけで
 //   保存済みの部隊が空欄で上書きされて消える（Codexレビュー[P1]#1）。
 //   拠点で同じ事故を起こしているので、必ず入口をまとめて1つの関数にする。
+// ★Codexレビュー[P2]#6: コピー経路は責任者をDOMへ入れるだけで onchange が
+//   発火しないため、直前にフォームに残っていた部隊がそのまま送られていた。
+//   コピー元の部隊を明示的に入れる。
+function applyCopyButai(g){
+  butaiTouched.s=false;
+  const el=document.getElementById('s-butai');
+  if(!el)return;
+  el.value=normalizeButai(g&&g.butai);
+}
 function applyEditButai(g){
   butaiTouched.e=false;
   bulkOrigButai={};                     // 前回の一括編集の控えを残さない
@@ -3631,6 +3659,7 @@ function copyGroupToInput_(g){
   const leader=g.members.find(m=>m.role==='代表');document.getElementById('s-leader').value=leader?leader.name:'';
   selectedMembers=[];const shokunin=getShokunin();g.members.filter(m=>m.role==='同行').forEach(m=>{const i=shokunin.indexOf(m.name);if(i>=0)selectedMembers.push(i);});
   renderMemberChips('member-selector',selectedMembers,toggleMember);initColorPicker('s',g.color||CAL_COLORS[0]);
+  applyCopyButai(g);          // ★2026-08-27 部隊もコピーする
   updateLocationSuggestions();checkLocationJobNo();showAlert('予定をコピーしました。','ok');
 }
 function calOpenEdit(idx){
@@ -4238,7 +4267,7 @@ function renderAvailWeek(){
   const days=[];for(let i=0;i<7;i++){const d=new Date(availWeekStart.getFullYear(),availWeekStart.getMonth(),availWeekStart.getDate()+i);days.push({date:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),label:(d.getMonth()+1)+'/'+d.getDate(),dow:d.getDay()});}
   const dayNames=['日','月','火','水','木','金','土'];
   document.getElementById('avail-week-label').textContent=days[0].label+'〜'+days[6].label;
-  const cn=filteredNippos();const shokunin=getShokunin();
+  const cn=filteredNippos();const shokunin=getActiveShokunin();   // ★無効の人は空きに出さない
   if(shokunin.length===0){document.getElementById('avail-weekly').innerHTML='<div style="color:#999;text-align:center;padding:20px">更新ボタンを押してください</div>';return;}
   let html='<table class="week-table"><thead><tr><th></th>';
   days.forEach(d=>{const cls=d.dow===0?' class="week-sun"':d.dow===6?' class="week-sat"':'';html+=`<th${cls}>${d.label}<br>${dayNames[d.dow]}</th>`;});
@@ -4264,7 +4293,7 @@ function renderAvailList(){
     days.push({date:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),m:d.getMonth()+1,dd:d.getDate(),dow:d.getDay()});
   }
   const dayNames=['日','月','火','水','木','金','土'];
-  const cn=filteredNippos();const shokunin=getShokunin();
+  const cn=filteredNippos();const shokunin=getActiveShokunin();   // ★無効の人は空きに出さない
   let html='';
   days.forEach(d=>{
     const buckets={busy:[],yasumi:[],souko:[],free:[]};
@@ -4859,12 +4888,15 @@ async function openJobNoFix(){
           <button class="btn btn-sm" style="flex-shrink:0;background:#3B82F6;color:#fff" onclick="saveSiteRevenue(${idx},this.dataset.genba,this.dataset.loc)" data-genba="${esc(genba)}" data-loc="${esc(loc)}">売上保存</button>
         </div>
         <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
-          <label style="font-size:11px;color:#666;white-space:nowrap;margin:0">ステータス:</label>
-          <label style="font-size:12px;flex:1;display:flex;align-items:center;gap:6px;cursor:pointer">
-            <input type="checkbox" ${completed?'checked':''} onchange="toggleJnfixCompleted(this,this.dataset.genba,this.dataset.loc,${idx})" data-genba="${esc(genba)}" data-loc="${esc(loc)}" style="width:18px;height:18px;margin:0">
-            <span>完了にする（現場名プルダウンから非表示／工番・既存日報は不変）</span>
-          </label>
+          <label style="font-size:11px;color:#666;white-space:nowrap;margin:0">案件ステータス:</label>
+          <!-- ★Codexレビュー[P2]#7: 完了/進行中の2値チェックだと、
+               管理者が設定した 延期・中止・残工事・準備中 を勝手に上書きしてしまう。
+               現場管理と同じ8段階のプルダウンに揃える。 -->
+          <select onchange="setSiteStatus(this.dataset.genba,this.dataset.loc,this)" data-genba="${esc(genba)}" data-loc="${esc(loc)}" style="flex:1;margin:0;padding:5px 8px;font-size:13px">
+            ${SITE_STATUSES.map(v=>`<option value="${v}"${v===siteStatusOf_(genba,loc)?' selected':''}>${v}</option>`).join('')}
+          </select>
         </div>
+        <div style="font-size:11px;color:#999;margin:-2px 0 6px">完工・中止にすると現場名プルダウンから外れます（工番・既存日報は不変）</div>
         <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end">
           <button class="btn btn-sm" style="background:#fff;color:#dc2626;border:1px solid #FCA5A5;font-size:11px;padding:4px 10px" onclick="deleteSiteFromJnfix(this.dataset.genba,this.dataset.loc)" data-genba="${esc(genba)}" data-loc="${esc(loc)}">🗑️ この現場を削除</button>
         </div>
@@ -4902,47 +4934,9 @@ async function saveSiteRevenue(idx,genba,loc){
   }catch(e){alert('エラー：'+e.message);}
 }
 
-// 工番修正モーダル内の「完了」チェックボックス変更ハンドラ
-async function toggleJnfixCompleted(checkbox,genba,loc,idx){
-  const completed=checkbox.checked;
-  const msg=completed?`「${loc||'（現場名なし）'}」を完了にしますか？\n以後、現場名プルダウンに表示されなくなります。\n（工番・売上・既存の日報には影響しません）`:`「${loc||'（現場名なし）'}」を進行中に戻しますか？`;
-  if(!confirm(msg)){checkbox.checked=!completed;return;}
-  try{
-    // ★2026-08-27 フェーズ1: 8段階のステータスへ寄せる。
-    //   旧 update_site_status は「ステータス設定済みなら拒否」になったため、
-    //   こちらも set_site_status を使わないと、延期・中止の現場でエラーになる。
-    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'set_site_status',genba,loc,status:completed?'完工':'施工中',updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();
-    if(json.status==='ok'){
-      // allJobsites 更新
-      const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
-      if(j)j.completed=completed;
-      else allJobsites.push({genba,loc,jobNo:'',completed});
-      showAlert(completed?`✓ 「${loc||genba}」を完了にしました`:`↩ 「${loc||genba}」を進行中に戻しました`,'ok');
-      // 行の色をすぐ更新（再オープン無し）
-      const card=checkbox.closest('[data-search]');
-      if(card){
-        card.style.background=completed?'#F0FDF4':'#fafafa';
-        card.style.borderColor=completed?'#86EFAC':'#ddd';
-        card.dataset.completed=completed?'1':'0';
-        // バッジ追加・削除
-        const titleDiv=card.querySelector('div:first-child');
-        const existingBadge=titleDiv?.querySelector('span[style*="✅"]');
-        if(completed && !existingBadge && titleDiv){
-          titleDiv.insertAdjacentHTML('beforeend','<span style="background:#1D9E75;color:#fff;font-size:10px;padding:2px 6px;border-radius:10px;margin-left:6px">✅ 完了</span>');
-        }else if(!completed && existingBadge){
-          existingBadge.remove();
-        }
-      }
-      // プルダウンが開いている可能性に備えて再描画
-      populateLocationSelect&&populateLocationSelect('s');
-      populateLocationSelect&&populateLocationSelect('e');
-      // ★2026-08-24修正4: D1切替後に他画面が古いcompletedを読まないよう、裏でsyncしておく
-      // （レビュー指摘: この経路だけ同期が抜けていた）。
-      refreshInBackground();
-    }else{checkbox.checked=!completed;alert('エラー：'+(json.message||'不明'));}
-  }catch(e){checkbox.checked=!completed;alert('エラー：'+e.message);}
-}
+// ★Codexレビュー[P2]#7: toggleJnfixCompleted は削除した。
+//   完了/進行中の2値で現場マスタを書く経路を残すと、8段階のステータスを上書きする。
+//   工番修正モーダルも現場管理と同じ setSiteStatus（8段階）に一本化した。
 
 // 工番修正モーダル内：1 現場を削除（日報参照あれば拒否、売上ありなら警告→force）
 async function deleteSiteFromJnfix(genba,loc){
