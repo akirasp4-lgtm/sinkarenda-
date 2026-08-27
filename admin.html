@@ -58,6 +58,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;bac
 @media(max-width:600px){
   .kyoten-chip{min-height:46px;font-size:15px}
 }
+.butai-tag{display:inline-block;font-size:10px;padding:1px 5px;border-radius:3px;background:#EDE7F6;color:#5E35B1;border:1px solid #B39DDB;margin-left:3px;vertical-align:middle}
 .kyoten-tag{display:inline-block;font-size:9px;line-height:1;padding:1px 3px;border-radius:3px;margin-right:3px;vertical-align:middle;font-weight:700}
 .kyoten-tag.k-kanto{background:#ffd8a8;color:#8a4b00}
 .kyoten-tag.k-both{background:#d3f9d8;color:#1a6b2e}
@@ -372,6 +373,17 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
       <option value="両方">両方（本社・関東の合同）</option>
     </select>
   </div>
+  <div id="s-butai-row" style="margin-bottom:12px">
+    <label>部隊 <span style="font-weight:400;color:#888;font-size:11px">（責任者から自動。違うときだけ変更）</span></label>
+    <select id="s-butai" onchange="onButaiChanged('s')" style="margin-bottom:0">
+      <option value="">部隊なし</option>
+      <option value="1部隊">1部隊</option>
+      <option value="2部隊">2部隊</option>
+      <option value="3部隊">3部隊</option>
+      <option value="4部隊">4部隊</option>
+    </select>
+  </div>
+
   <datalist id="s-location-list"></datalist>
   <div id="s-vehicle-wrap">
     <label>🚗 車両<span style="font-size:11px;font-weight:400;color:#666;margin-left:6px">(複数選択可・未選択=使用しない)</span></label>
@@ -404,7 +416,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="leader-select-wrap">
     <label>代表者<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
     <div class="select-add-wrap" style="margin-bottom:0">
-      <select id="s-leader" onchange="checkLocationJobNo()"><option value="">代表者を選択してください</option></select>
+      <select id="s-leader" onchange="checkLocationJobNo();refreshButaiField('s')"><option value="">代表者を選択してください</option></select>
       <button class="btn btn-secondary btn-sm add-inline-btn" onclick="openSettingsFor('s-leader')">➕</button>
     </div>
   </div>
@@ -776,6 +788,17 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
       <option value="両方">両方（本社・関東の合同）</option>
     </select>
   </div>
+  <div id="e-butai-row" style="margin-bottom:12px">
+    <label>部隊 <span style="font-weight:400;color:#888;font-size:11px">（責任者から自動。違うときだけ変更）</span></label>
+    <select id="e-butai" onchange="onButaiChanged('e')" style="margin-bottom:0">
+      <option value="">部隊なし</option>
+      <option value="1部隊">1部隊</option>
+      <option value="2部隊">2部隊</option>
+      <option value="3部隊">3部隊</option>
+      <option value="4部隊">4部隊</option>
+    </select>
+  </div>
+
   <datalist id="e-location-list"></datalist>
   <div id="e-vehicle-wrap">
     <label>🚗 車両<span style="font-size:11px;font-weight:400;color:#666;margin-left:6px">(複数選択可・未選択=使用しない)</span></label>
@@ -795,7 +818,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="toggle-row toggle-yakin" id="e-yakin-toggle" onclick="setMode('e','yakin')"><span class="t-icon">🌙</span><span class="t-label">夜勤</span></div>
   <div class="toggle-row toggle-yasumi" id="e-yasumi-toggle" onclick="setMode('e','yasumi')"><span class="t-icon">🏖️</span><span class="t-label">休み</span></div>
   <div class="toggle-row toggle-yotei" id="e-yotei-toggle" onclick="setMode('e','yotei')"><span class="t-icon">📌</span><span class="t-label">予定</span></div>
-  <div class="leader-select-wrap"><label>代表者</label><select id="e-leader"><option value="">代表者を選択してください</option></select></div>
+  <div class="leader-select-wrap"><label>代表者</label><select id="e-leader" onchange="refreshButaiField('e')"><option value="">代表者を選択してください</option></select></div>
   <div class="member-section"><div class="member-label">同行メンバー（タップで選択）</div><div id="e-member-selector" class="member-grid"></div></div>
   <label>メモ</label><textarea id="e-memo"></textarea>
   <label>カレンダーの色</label>
@@ -2160,7 +2183,10 @@ function saveSnapshot(company,json){
     localStorage.setItem(CAL_CACHE_KEY,JSON.stringify({
       v:1,company:String(company||''),
       compact:json.compact?1:0,headers:json.headers||[],rows:json.rows||[],
-      members:(json.members||[]).map(m=>({name:m.name,company:m.company,division:m.division})),
+      // ★2026-08-27 フェーズ1: 既定部隊と有効も端末に残す。書かないと
+      //   キャッシュから描く2回目以降の起動だけ既定部隊が空になる（再現しにくい不具合）。
+      //   単価(rate)は引き続き残さない（給料情報のため意図的に捨てている）。
+      members:(json.members||[]).map(m=>({name:m.name,company:m.company,division:m.division,butai:m.butai||'',active:m.active!==false})),
       genbaMaster:json.genbaMaster||[],jobsites:json.jobsites||[]
     }));
   }catch(e){/* 容量超過等は無視。キャッシュは無くても動く */}
@@ -2265,7 +2291,10 @@ function parseRows(rows,company){
     color:String(r['色']||''),division:String(r['事業部']||''),jobNo:String(r['工番']||''),
     workType:String(r['作業区分']||''),
     vehicle:String(r['車両']||''),
-    kyoten:String(r['拠点']||'')      // ★2026-08-26 拠点（本社/関東支店/両方）
+    kyoten:String(r['拠点']||''),     // ★2026-08-26 拠点（本社/関東支店/両方）
+    butai:String(r['部隊']||'')       // ★2026-08-27 部隊（1〜4部隊）。
+    // ★ここに書かないと部隊が画面のデータから消え、部隊と無関係な編集をしただけで
+    //   保存済みの部隊が失われる（拠点で起きたバグと同じ形・Codexレビュー[P1]#1）
   }));
 }
 // 退勤<出勤の日付跨ぎレコードに翌日のゴーストを生成（クライアント側のみ）
@@ -2711,6 +2740,41 @@ function jobsiteKyoten(loc){
   return hit?String(hit.kyoten).trim():'';
 }
 // touched=true なら「利用者が触った」＝自動では変えない
+// ==============================================================
+// ★2026-08-27 フェーズ1: 部隊（1〜4部隊）
+//   拠点と同じ「手で変えた値は上書きしない」方式。
+//   ★部隊は人に固定で持たせず予定1件ごとに持つ（案件ごとに人員を組み替える運用のため）。
+//     職人マスタの「既定部隊」は入力の初期値を入れるためだけに使う。
+// ==============================================================
+const BUTAI_VALUES=['1部隊','2部隊','3部隊','4部隊'];
+const butaiTouched={s:false,e:false};
+function onButaiChanged(p){butaiTouched[p]=true;}
+function normalizeButai(v){const s=String(v==null?'':v).trim();return BUTAI_VALUES.includes(s)?s:'';}
+function memberDefaultButai(name){
+  const n=String(name||'').trim();
+  if(!n)return '';
+  const m=(allMembers||[]).find(x=>String(x.name||'').trim()===n);
+  return m?normalizeButai(m.butai):'';
+}
+// 責任者を選んだら、その人の既定部隊を初期値として入れる（手で変えた後は上書きしない）
+function refreshButaiField(p,opts){
+  const force=!!(opts&&opts.force);
+  const el=document.getElementById(p+'-butai');
+  if(!el)return;
+  if(butaiTouched[p]&&!force)return;
+  const leader=document.getElementById(p+'-leader');
+  el.value=memberDefaultButai(leader?leader.value:'');
+}
+function readButai(p){
+  const el=document.getElementById(p+'-butai');
+  return el?normalizeButai(el.value):'';
+}
+function butaiTag(v){
+  const b=normalizeButai(v&&v.butai!==undefined?v.butai:v);
+  if(!b)return '';
+  return '<span class="butai-tag">'+esc(b.replace('部隊','部'))+'</span>';
+}
+
 const kyotenTouched={s:false,e:false};
 function onKyotenChanged(p){kyotenTouched[p]=true;}
 function refreshKyotenField(p,opts){
@@ -2738,6 +2802,27 @@ function applyEditKyoten(g){
   row.style.display='';
   const cur=String(g.kyoten||'').trim();
   sel.value=KYOTEN_CHOICES.includes(cur)?cur:(jobsiteKyoten(g.loc)||defaultKyotenForCompany(g.company)||KYOTEN_HONSHA);
+}
+
+// ★2026-08-27 フェーズ1: 編集モーダルを開くとき、その予定に保存されている部隊を読み戻す。
+//   これが無いと、部隊と無関係な編集（時間を直す等）をしただけで
+//   保存済みの部隊が空欄で上書きされて消える（Codexレビュー[P1]#1）。
+//   拠点で同じ事故を起こしているので、必ず入口をまとめて1つの関数にする。
+function applyEditButai(g){
+  butaiTouched.e=false;
+  const el=document.getElementById('e-butai');
+  if(!el||!g)return;
+  el.value=normalizeButai(g.butai);
+}
+// 一括編集用: 選んだ予定の部隊が全部同じときだけ初期値に入れる。
+//   バラバラなら空＝「変更しない」。直前に開いた単一編集の値が残っていると
+//   無関係な複数予定へ誤って適用されるため、必ずここで初期化する。
+function applyBulkEditButai(groups){
+  butaiTouched.e=false;
+  const el=document.getElementById('e-butai');
+  if(!el)return;
+  const set=[...new Set((groups||[]).map(g=>normalizeButai(g&&g.butai)))];
+  el.value=(set.length===1)?set[0]:'';
 }
 
 function readKyoten(p,company){
@@ -2881,8 +2966,10 @@ async function submitNippo(){
       if(result.action==='existing'){loc=result.loc;document.getElementById('s-location').value=loc;checkLocationJobNo();}
     }
   }
-  const members=[{name:leader,role:'代表'}];
-  const shokunin=getShokunin();selectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
+  // ★2026-08-27 フェーズ1: 部隊。グループ全員に同じ値を載せる
+  const _butai=readButai('s');
+  const members=[{name:leader,role:'代表',butai:_butai}];
+  const shokunin=getShokunin();selectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行',butai:_butai});});
   const color=selectedColor.s||CAL_COLORS[0];const dates=getDateRange(dateStart,dateEnd);
   // メンバー被りチェック（予定モード以外）
   if(!yotei){
@@ -2945,6 +3032,7 @@ async function submitNippo(){
     // ★Codexレビュー[P1]#5: 拠点も初期化する。ここを忘れると、一度手で
     //   「両方」にした人の次の予定にもそれが流用される。
     kyotenTouched.s=false;refreshKyotenField('s',{force:true});
+    butaiTouched.s=false;refreshButaiField('s',{force:true});   // ★2026-08-27 部隊
     applyMode('s','');selectedMembers=[];renderMemberChips('member-selector',selectedMembers,toggleMember);
   };
 
@@ -3008,8 +3096,8 @@ function groupNippos(nippos){
   const groups={};
   nippos.forEach(n=>{
     const key=n.id||`${n.date}__${n.genba}__${n.loc}__${n.start}__${n.end}__${n.kosu}__${n.memo}`;
-    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,timestamp:n.timestamp||'',color:n.color,jobNo:n.jobNo,workType:n.workType||'',vehicle:n.vehicle||'',isGhost:!!n.isGhost,isPending:!!n.isPending,originalId:n.originalId||''};
-    groups[key].members.push({name:n.name,role:n.role});if(n.id)groups[key].ids.push(n.id);
+    if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,timestamp:n.timestamp||'',color:n.color,jobNo:n.jobNo,workType:n.workType||'',vehicle:n.vehicle||'',butai:n.butai||'',isGhost:!!n.isGhost,isPending:!!n.isPending,originalId:n.originalId||''};
+    groups[key].members.push({name:n.name,role:n.role,butai:n.butai||''});if(n.id)groups[key].ids.push(n.id);
     // グループ内で最新の登録日時 + その時の更新者を採用（Date 経由で比較）
     if(n.timestamp && tsValue(n.timestamp)>tsValue(groups[key].timestamp)){
       groups[key].timestamp=n.timestamp;
@@ -3098,7 +3186,7 @@ function renderCalendar(){
         }
       }
       // ★2026-08-26 全拠点ビューでは「どちらの予定か一目で分かる」印を付ける（依頼書②）
-      eventsHtml+=`<div class="cal-event" style="background:${g.color||map[type]}">${kyotenTag(g)}${esc(label)}</div>`;
+      eventsHtml+=`<div class="cal-event" style="background:${g.color||map[type]}">${kyotenTag(g)}${butaiTag(g)}${esc(label)}</div>`;
     });
     if(overflow>0)eventsHtml+=`<div class="cal-overflow">+${overflow}</div>`;
     html+=`<div class="${cls}" onclick="openCalDay('${dateStr}')"><div class="cal-day-num">${d}</div>${holiday?`<div class="cal-holiday-name">${esc(holiday)}</div>`:''}${eventsHtml}</div>`;
@@ -3470,6 +3558,7 @@ function openEditModal(idx,groupsOverride){
   // ★Codexレビュー[P1]#2#3: 既存の拠点を読み込む（無いと編集で拠点が勝手に変わる）。
   //   判定は画面の currentCompany ではなく「その予定の会社」で行う。
   applyEditKyoten(g);
+  applyEditButai(g);                    // ★2026-08-27 部隊も読み戻す
   document.getElementById('edit-modal').classList.add('active');
 }
 // ★2026-08-25 利用者要望: 予定を保存しても、開いたままの「日付の小窓」の中身が
@@ -3520,7 +3609,8 @@ async function saveEdit(){
   if(!yasumi){
     if(!yakin&&start&&end&&start>=end){alert('退勤時刻が出勤時刻以下です。時間を確認してください');return;}
   }
-  const members=[{name:leader,role:'代表'}];const shokunin=getShokunin();
+  const _butai=readButai('e');
+  const members=[{name:leader,role:'代表',butai:_butai}];const shokunin=getShokunin();
   editSelectedMembers.forEach(i=>{if(shokunin[i]!==leader)members.push({name:shokunin[i],role:'同行'});});
   // 全社ビューでの編集は元レコードの会社を保持（空にすると会社別ビューから予定が消える）
   const _origRec=allNippos.find(n=>!n.isGhost&&(editIds||[]).includes(n.id));
@@ -3709,6 +3799,8 @@ function openBulkEditModal(){
   // ★Codexレビュー[P1]#2#3: 既存の拠点を読み込む（無いと編集で拠点が勝手に変わる）。
   //   判定は画面の currentCompany ではなく「その予定の会社」で行う。
   applyEditKyoten(g);
+  applyEditButai(g);                    // ★2026-08-27 部隊も読み戻す
+    applyBulkEditButai(targets);          // ★2026-08-27 部隊。全部同じときだけ初期値、バラバラなら空＝変更しない
   document.getElementById('edit-modal').classList.add('active');
 }
 async function deleteGmChecked(){
