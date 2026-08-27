@@ -323,3 +323,50 @@ describe('詳しく探す（2026-08-27 フェーズ2 Task4）', () => {
     expect(src).toMatch(/function searchNippos\(\)\s*\{[\s\S]*?filteredNippos\(\)/);
   });
 });
+
+describe('空き人員の名前リスト（2026-08-27 フェーズ2 Task5・要件4と要件8後半）', () => {
+  const src = read('index.html');
+
+  it('日付を選ぶ欄と結果の枠がある', () => {
+    expect(src).toContain('id="avail-day"');
+    expect(src).toContain('id="avail-day-result"');
+    expect(src).toContain('function renderAvailDay(');
+  });
+
+  it('★母集団は拠点で絞らない（関東の現場に入っている人を「空き」にしない）', () => {
+    const m = src.match(/function renderAvailDay\(\)\s*\{[\s\S]*?\n\}/);
+    expect(m).toBeTruthy();
+    expect(m[0]).toContain('companyNippos()');
+    expect(m[0]).not.toContain('filteredNippos()');
+  });
+
+  it('★名簿は有効な人だけ（職人マスタで無効にした人を空きに数えない）', () => {
+    const m = src.match(/function renderAvailDay\(\)\s*\{[\s\S]*?\n\}/);
+    expect(m[0]).toContain('getActiveShokunin()');
+  });
+
+  it('★同じ日に休みと出勤が両方あるときは「出勤」とみなす（空きに数えない）', () => {
+    const m = src.match(/function renderAvailDay\(\)\s*\{[\s\S]*?\n\}/);
+    expect(m[0]).toContain("if (cur === 'busy') return;");
+  });
+
+  it('延期・中止になった現場の人を別枠で出す（要件8の後半）', () => {
+    expect(src).toContain('function releasedByStatus(');
+    expect(src).toMatch(/st === '延期' \|\| st === '中止'/);
+  });
+
+  it('★元請と現場名を区切ってから突き合わせる', () => {
+    const m = src.match(/function releasedByStatus\(date\)\s*\{[\s\S]*?\n\}/);
+    expect(m[0]).toContain("String(j.genba || '') + '|' + String(j.loc || '')");
+  });
+
+  it('データを読み直したときにも描き直す', () => {
+    expect(src).toContain('try{renderAvailDay();}catch(e){}if(vehicleWeekStart)');
+    expect(src).toContain("if(t==='avail'){renderAvailList();try{renderAvailDay();}catch(e){}}");
+  });
+
+  it('氏名をそのままHTMLに入れていない', () => {
+    const m = src.match(/function renderAvailDay\(\)\s*\{[\s\S]*?\n\}/);
+    expect(m[0]).toContain('esc(n)');
+  });
+});

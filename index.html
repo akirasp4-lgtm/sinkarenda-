@@ -483,6 +483,13 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 
 <div id="screen-avail" class="screen">
 <div class="page-title">空き確認</div>
+<!-- ★日付を指定して「その日に動ける人」を名前で出す（2026-08-27 フェーズ2・要件4）
+     週の表は色しか分からないので、「今日誰が空いているか」を一発で出す -->
+<div class="card" style="padding:12px 16px">
+  <label>この日に動ける人を見る</label>
+  <input type="date" id="avail-day" onchange="renderAvailDay()" style="margin-bottom:0">
+  <div id="avail-day-result"></div>
+</div>
 <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:12px">
   <button class="btn btn-secondary btn-sm" onclick="changeAvailWeek(-1)">◀</button>
   <span id="avail-week-label" style="font-size:15px;font-weight:600;min-width:180px;text-align:center"></span>
@@ -2018,7 +2025,7 @@ function switchTab(t){
   if(t==='list')renderList();
   if(t==='input')initColorPicker('s',selectedColor.s);
   if(t==='vehicle'){if(!vehicleWeekStart)initVehicleWeek();renderVehicleWeek();renderVehicleList();}
-  if(t==='avail')renderAvailList();
+  if(t==='avail'){renderAvailList();try{renderAvailDay();}catch(e){}}
   hapticTap();
 }
 
@@ -4328,6 +4335,71 @@ function getMonday(d){const dt=new Date(d);const day=dt.getDay();const diff=dt.g
 function initAvailWeek(){availWeekStart=getMonday(new Date());renderAvailWeek();renderAvailList();}
 function changeAvailWeek(delta){availWeekStart=new Date(availWeekStart.getFullYear(),availWeekStart.getMonth(),availWeekStart.getDate()+delta*7);renderAvailWeek();renderAvailList();hapticTap();}
 
+// ============================================================
+// ★ 空き人員（2026-08-27 フェーズ2・要件4）
+//   週の表は色しか分からないので、日付を指定して名前で出す。
+// ★母集団は companyNippos()（拠点で絞らない）。
+//   本社ビューで見ていても、関東の現場に入っている人は「空き」ではない。
+// ★名簿は getActiveShokunin()（職人マスタの 有効=× を外した一覧）。
+// ============================================================
+function renderAvailDay() {
+  const d = searchFilterValue('avail-day');
+  const box = document.getElementById('avail-day-result');
+  if (!box) return;
+  if (!d) { box.innerHTML = ''; return; }
+  const cn = companyNippos().filter(n => !n.isGhost && n.date === d);
+  const state = {};   // 氏名 → busy / yasumi / souko
+  cn.forEach(n => {
+    const cur = state[n.name];
+    // 現場に出ているが优先。同じ日に休みと出勤が両方あるときは「出勤」と見なす
+    if (cur === 'busy') return;
+    state[n.name] = n.yasumi ? 'yasumi' : (n.souko ? 'souko' : 'busy');
+  });
+  const roster = getActiveShokunin();
+  const free = roster.filter(name => !state[name]);
+  const yasumi = roster.filter(name => state[name] === 'yasumi');
+  const souko = roster.filter(name => state[name] === 'souko');
+  const busy = roster.filter(name => state[name] === 'busy');
+  const chip = (names) => names.length
+    ? names.map(n => '<span class="member-chip" style="pointer-events:none">' + esc(n) + '</span>').join('')
+    : '<span style="color:#999;font-size:13px">いません</span>';
+  let html = '<div style="margin-top:12px">'
+    + '<div style="font-size:14px;font-weight:600;color:#1D9E75;margin-bottom:6px">空いている ' + free.length + ' 人</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">' + chip(free) + '</div>'
+    + '<div style="font-size:13px;color:#666;margin-bottom:4px">休み ' + yasumi.length + ' 人　倉庫 ' + souko.length + ' 人　出勤 ' + busy.length + ' 人</div>';
+  const released = releasedByStatus(d);
+  if (released.length) {
+    html += '<div style="font-size:14px;font-weight:600;color:#A32D2D;margin:12px 0 6px">'
+      + '現場が延期・中止になった人 ' + released.length + ' 人（動かせる候補）</div>'
+      + '<div style="display:flex;flex-wrap:wrap;gap:6px">'
+      + released.map(r => '<span class="member-chip" style="pointer-events:none">' + esc(r.name)
+        + '<span style="font-size:11px;color:#666">（' + esc(r.status) + '：' + esc(r.loc) + '）</span></span>').join('')
+      + '</div>';
+  }
+  html += '</div>';
+  box.innerHTML = html;
+}
+
+// ★要件8の後半。延期・中止にした現場の人は、予定表の上では埋まって見えるが
+//   実際には動かせる。現場マスタのステータスを見て拾う。
+function releasedByStatus(date) {
+  const stopped = {};
+  (allJobsites || []).forEach(j => {
+    const st = String(j.status || '').trim();
+    if (st === '延期' || st === '中止') stopped[String(j.genba || '') + '|' + String(j.loc || '')] = st;
+  });
+  if (!Object.keys(stopped).length) return [];
+  const out = [], seen = {};
+  companyNippos().forEach(n => {
+    if (n.isGhost || n.date !== date) return;
+    const st = stopped[String(n.genba || '') + '|' + String(n.loc || '')];
+    if (!st || seen[n.name]) return;
+    seen[n.name] = true;
+    out.push({ name: n.name, status: st, genba: n.genba, loc: n.loc });
+  });
+  return out;
+}
+
 function renderAvailWeek(){
   const days=[];
   for(let i=0;i<7;i++){
@@ -4356,7 +4428,7 @@ function renderAvailWeek(){
   document.getElementById('avail-weekly').innerHTML=html;
 }
 
-function updateAvailability(){renderAvailWeek();renderAvailList();if(vehicleWeekStart)renderVehicleWeek();renderVehicleList();}
+function updateAvailability(){renderAvailWeek();renderAvailList();try{renderAvailDay();}catch(e){}if(vehicleWeekStart)renderVehicleWeek();renderVehicleList();}
 
 // スマホ用: 空き確認をリスト形式で表示
 function renderAvailList(){
