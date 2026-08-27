@@ -2346,6 +2346,9 @@ function addLocalRows(rows,opts){
     yakin:!!r.yakin,yasumi:!!r.yasumi,yotei:!!r.yotei,souko:!!r.souko,
     company:r.company||currentCompany,updatedBy:r.updatedBy||'',color:r.color||'',
     division:String(r.jobNoDivision||''),jobNo:'',workType:r.workType||'',vehicle:r.vehicle||'',
+    // ★2026-08-27: 送信前の楽観表示にも拠点・部隊を載せる。無いと送信が終わるまで
+    //   タグが出ず「消えた？」と見える（拠点は2026-08-26から落ちていた取りこぼし）。
+    kyoten:String(r.kyoten||''),butai:String(r.butai||''),
     isPending:pending
   }));
   allNippos=allNippos.concat(added).concat(generateGhosts(added));
@@ -3135,7 +3138,7 @@ async function submitNippo(){
     }
   }
   const rows=[];
-  dates.forEach(date=>{const dayId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company:currentCompany,id:dayId,updatedBy:operator,color,jobNoDivision,workType,vehicle,kyoten:readKyoten('s')});});});
+  dates.forEach(date=>{const dayId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company:currentCompany,id:dayId,updatedBy:operator,color,jobNoDivision,workType,vehicle,kyoten:readKyoten('s'),butai:readButai('s')});});});
   const btn=document.getElementById('submit-btn');
   const clearForm=()=>{
     document.getElementById('s-genba').value='';document.getElementById('s-genba-select').value='';document.getElementById('s-genba').style.display='none';document.getElementById('s-location').value='';
@@ -3771,7 +3774,7 @@ async function saveEdit(){
     }
   }
   const rows=[];
-  dates.forEach(date=>{const newId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:yasumi?0:kosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company)});});});
+  dates.forEach(date=>{const newId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:yasumi?0:kosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company),butai:readButai('e')});});});
   btn.textContent='保存中...';btn.disabled=true;
   try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update',ids:editIds,rows}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){closeEditModal();bulkEditMode=false;removeLocalByIds(editIds);addLocalRows(rows);renderGmList();refreshCalDayIfOpen();refreshInBackground(renderGmList);}
