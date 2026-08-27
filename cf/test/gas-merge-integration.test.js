@@ -87,7 +87,8 @@ function build() {
       row('東', 'グローライズ', '東', 'B3')          // 対象外
     ]),
     '職人マスタ': makeSheet([
-      ['氏名','会社','事業部','単価','既定部隊','有効'],
+      // ★本番の職人マスタは A1 が空欄（2026-08-27 実機で確認）。テストも本番と同じ形にする
+      ['','会社','事業部','単価','既定部隊','有効'],
       ['高田', 'GRミツマ', '', 30000, '', '○'],
       ['GRME髙田', 'グローライズ', 'ICT', 0, '', '○'],
       ['柳澤', 'GRミツマ', '', 0, '', '○'],
@@ -116,7 +117,12 @@ function build() {
 }
 
 const col = (sheet, h) => {
-  const d = sheet._data, i = d[0].indexOf(h);
+  const d = sheet._data;
+  // ★職人マスタは本番と同じで A1 が空欄。氏名は必ず1列目にある。
+  //   見つからないまま -1 で読むと「全部空」に見えて、壊れているのに通ってしまう
+  let i = d[0].indexOf(h);
+  if (i < 0 && h === '氏名') i = 0;
+  if (i < 0) throw new Error('見出しが見つからない: ' + h + ' / ' + JSON.stringify(d[0]));
   return d.slice(1).map(r => String(r[i] == null ? '' : r[i]));
 };
 
@@ -256,6 +262,34 @@ describe('★Codexレビューで直した点の追試', () => {
     const rep = ctx.g.mergeDuplicateMembers(true);
     expect(rep.中止理由).toContain('職人マスタ');
     expect(JSON.stringify(ctx.sheets['日報データ']._data)).toBe(before);
+  });
+
+  // ★2026-08-27 実機のdry-runが「1列目が氏名になっていない」で中止した。
+  //   本番の職人マスタは A1 が空欄。テストが本番と違う形だったので気付けなかった。
+  it('★A1が空欄でも動く（本番の職人マスタの実際の形）', () => {
+    expect(ctx.sheets['職人マスタ']._data[0][0]).toBe('');   // 前提の確認
+    const rep = ctx.g.mergeDuplicateMembers(true);
+    expect(rep.中止理由).toBe('');
+    expect(col(ctx.sheets['職人マスタ'], '氏名').filter(Boolean).sort())
+      .toEqual(['中島', '内村（関東）', '柳澤（関東）', '高田（関東）']);
+  });
+
+  it('★本当に別の形のシートなら今も止まる（2列目が会社でない）', () => {
+    ctx.sheets['職人マスタ']._data[0] = ['', '氏名', '事業部', '単価', '既定部隊', '有効'];
+    const beforeD = JSON.stringify(ctx.sheets['日報データ']._data);
+    const beforeM = JSON.stringify(ctx.sheets['職人マスタ']._data);
+    const rep = ctx.g.mergeDuplicateMembers(true);
+    expect(rep.中止理由).toContain('会社');
+    expect(JSON.stringify(ctx.sheets['日報データ']._data)).toBe(beforeD);
+    expect(JSON.stringify(ctx.sheets['職人マスタ']._data)).toBe(beforeM);
+  });
+
+  it('★1列目に見覚えのない見出しが入っていたら止まる', () => {
+    ctx.sheets['職人マスタ']._data[0] = ['名前', '会社', '事業部', '単価', '既定部隊', '有効'];
+    const beforeM = JSON.stringify(ctx.sheets['職人マスタ']._data);
+    const rep = ctx.g.mergeDuplicateMembers(true);
+    expect(rep.中止理由).toContain('職人マスタ');
+    expect(JSON.stringify(ctx.sheets['職人マスタ']._data)).toBe(beforeM);
   });
 
   it('★[P2]#6 保存の入口でも旧名を読み替える（開いたままの端末が復活させない）', () => {

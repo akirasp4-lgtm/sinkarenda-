@@ -4184,8 +4184,13 @@ function mergeDuplicateMembers(apply) {
     }
     const mData = mSheet.getDataRange().getValues();
     const mHeader = mData[0] || [];
-    if (String(mHeader[0] || '').trim() !== '氏名' || String(mHeader[1] || '').trim() !== '会社') {
-      report.中止理由 = '職人マスタの1列目が氏名、2列目が会社になっていません: ' + JSON.stringify(mHeader.slice(0, 6));
+    // ★2026-08-27 実機で判明: 本番の職人マスタは A1 が空欄（昔からずっと）。
+    //   既存コードも A1/B1 は一度も直していない（getOrCreateMemberSheet_ は3〜6列目だけ）。
+    //   なので1列目は「空 or 氏名」を許す。2列目の '会社' は必須
+    //   （本人の判定を(会社,氏名)の組でやるので、ここが違うと別人を巻き込む）。
+    const h0 = String(mHeader[0] || '').trim();
+    if ((h0 !== '' && h0 !== '氏名') || String(mHeader[1] || '').trim() !== '会社') {
+      report.中止理由 = '職人マスタの1列目が氏名（または空欄）、2列目が会社になっていません: ' + JSON.stringify(mHeader.slice(0, 6));
       Logger.log('中止: ' + report.中止理由);
       return report;
     }
