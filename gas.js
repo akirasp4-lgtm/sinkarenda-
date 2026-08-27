@@ -637,6 +637,13 @@ function doPost(e) {
     if (!calAuthOk_(body.k)) return authError_();
     action = body.action || 'add';
     updatedBy = String(body.updatedBy || '');
+    // ★2026-08-27 実機テストで判明: 画面からの直接送信（index.html:2495 /
+    //   admin.html:3242）はトップレベルの updatedBy を送っておらず、行の中にだけ入れている。
+    //   そのままだと変更履歴の「実行者」が空になり、依頼⑦の
+    //   「誰が登録・変更・削除したか」を満たせない。行から拾って補う。
+    if (!updatedBy && body.rows && body.rows.length) {
+      updatedBy = String((body.rows[0] && body.rows[0].updatedBy) || '');
+    }
     if (isPresidentAction_(action)) {
       return handlePresidentAction_(body, action, updatedBy);
     }
@@ -1788,9 +1795,15 @@ function getOrCreateHistorySheet_(ss) {
 
 // 予定1件を人が読める1行にまとめる（追加・グループ内の増減の表示用）
 function rowSummary_(headers, arr) {
+  const tz = Session.getScriptTimeZone();
   const g = function (h) {
     const i = headers.indexOf(h);
-    return i >= 0 ? String(arr[i] == null ? '' : arr[i]).trim() : '';
+    if (i < 0) return '';
+    const v = arr[i];
+    if (v == null) return '';
+    // ★日付はシートからだとDate型で来る。生の文字列にすると読めない
+    if (h === '作業日' && v instanceof Date) return fmtDate_(v, tz);
+    return String(v).trim();
   };
   return [g('作業日'), g('氏名'), g('元請名') + '/' + g('現場名'), g('作業区分')]
     .filter(function (x) { return x && x !== '/'; }).join(' ');
@@ -1801,10 +1814,19 @@ function rowSummary_(headers, arr) {
 //   会社・事業部・工番・車両・拠点・部隊が失われる。
 //   バックアップ後に登録された予定を消したら、二度と戻せない。
 function rowFullJson_(headers, arr) {
+  // ★2026-08-27 実機テストで判明: シートから読んだ値は 作業日・出勤・退勤・登録日時が
+  //   Date型で、素の String() だと "Sun Dec 31 2028 00:00:00 GMT+0900 (日本標準時)" に
+  //   なってしまう。人が読めないし、ここから予定を作り直すのも難しい。
+  //   画面と同じ表記（2028-12-31 / 08:00）に揃えてから残す。
+  const tz = Session.getScriptTimeZone();
   const o = {};
   headers.forEach(function (h, i) {
     const v = arr && arr[i];
-    o[h] = (v == null) ? '' : String(v);
+    if (v == null || v === '') { o[h] = ''; return; }
+    if (h === '作業日') { o[h] = (v instanceof Date) ? fmtDate_(v, tz) : String(v); return; }
+    if (h === '出勤' || h === '退勤') { o[h] = (v instanceof Date) ? fmtTime_(v, tz) : String(v); return; }
+    if (h === '登録日時') { o[h] = (v instanceof Date) ? fmtDateTime_(v, tz) : String(v); return; }
+    o[h] = String(v);
   });
   return JSON.stringify(o);
 }

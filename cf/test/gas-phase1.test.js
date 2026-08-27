@@ -20,7 +20,7 @@ const EXPORT_SNIPPET = `
   normalizeButai_, resolveButai_, normalizeMemberActive_,
   SITE_STATUSES, SITE_STATUS_DONE, normalizeSiteStatus_, isSiteStatusDone_, isCompletedCell_,
   HISTORY_SHEET, HISTORY_HEADERS, HISTORY_MAX_ROWS,
-  diffDailyRows_, rowSummary_, rowFullJson_, sortHistoryRows_,
+  diffDailyRows_, rowSummary_, rowFullJson_, sortHistoryRows_, fmtDateTime_,
   // ★vm の外で作った Date は中の Date と別物になり instanceof が効かない。
   //   本番（GAS）は同一環境なので起きないが、テストでは中で作る必要がある。
   makeDate_: function (y, m, d, h, mi) { return new Date(y, m, d, h || 0, mi || 0); },
@@ -547,5 +547,53 @@ describe('変更履歴 突き合わせ（Codexレビュー[P2]#4#5の追試）',
     const k = ctx.diffDailyRows_(H(), [o], [n]).find(x => x.field === '人工');
     expect(k.before).toBe('1');
     expect(k.after).toBe('0.5');
+  });
+});
+
+describe('変更履歴の読みやすさ（2026-08-27 実機テストで見つけた欠陥）', () => {
+  const H = () => ctx.HEADERS;
+
+  it('★削除の記録の日付が「2028-12-31」の形で残る（生のDate文字列にしない）', () => {
+    // 実機で "Sun Dec 31 2028 00:00:00 GMT+0900 (日本標準時)" になっていた。
+    // 人が読めないし、ここから予定を作り直すのも難しい。
+    const arr = H().map(h => {
+      if (h === '作業日') return ctx.makeDate_(2028, 11, 31);
+      if (h === '出勤') return ctx.makeDate_(1899, 11, 30, 8, 0);
+      if (h === '退勤') return ctx.makeDate_(1899, 11, 30, 17, 0);
+      if (h === '登録日時') return ctx.makeDate_(2026, 7, 27, 18, 45);
+      if (h === '氏名') return '元';
+      if (h === '部隊') return '3部隊';
+      return '';
+    });
+    const o = JSON.parse(ctx.rowFullJson_(H(), arr));
+    expect(o['作業日']).toBe('2028-12-31');
+    expect(o['出勤']).toBe('08:00');
+    expect(o['退勤']).toBe('17:00');
+    expect(o['登録日時']).not.toContain('GMT');
+    expect(o['氏名']).toBe('元');
+    expect(o['部隊']).toBe('3部隊');
+    expect(Object.keys(o).length).toBe(21);
+  });
+
+  it('文字列で入っている日付はそのまま通す（画面由来の行）', () => {
+    const arr = H().map(h => (h === '作業日' ? '2028-12-31' : h === '出勤' ? '08:00' : ''));
+    const o = JSON.parse(ctx.rowFullJson_(H(), arr));
+    expect(o['作業日']).toBe('2028-12-31');
+    expect(o['出勤']).toBe('08:00');
+  });
+
+  it('★追加の記録（要約）の日付も読める形にする', () => {
+    const arr = H().map(h => {
+      if (h === '作業日') return ctx.makeDate_(2028, 11, 31);
+      if (h === '氏名') return '元';
+      if (h === '元請名') return 'きんでん西';
+      if (h === '現場名') return 'A現場';
+      if (h === '作業区分') return '現場作業';
+      return '';
+    });
+    const sum = ctx.rowSummary_(H(), arr);
+    expect(sum).toContain('2028-12-31');
+    expect(sum).not.toContain('GMT');
+    expect(sum).toContain('元');
   });
 });
