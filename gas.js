@@ -2101,6 +2101,9 @@ function generateSummary_() {
         company: String(row[colIdx['会社']] || ''),
         genba: String(row[colIdx['元請名']] || ''),
         loc: String(row[colIdx['現場名']] || ''),
+        // ★2026-08-28 利用者指示「関東支店と本社の売上とか割を分けれるように」。
+        // これが無いと集計シートが拠点を一切見られない。
+        kyoten: String(row[colIdx['拠点']] || ''),
         yakin: String(row[colIdx['夜勤']] || '')
       };
     }).filter(r => r.date && r.name);
@@ -2174,10 +2177,23 @@ function applyGroupedSummaryFormats_(sheet, numRows, formats, accentType, accent
   fontSizes.forEach(fs => sheet.getRange(fs.row, 1).setFontSize(fs.size));
 }
 
+// ★2026-08-28 集計の見出し。拠点の軸を持つ会社（グローライズ／GRミツマ）だけ
+//   本社／関東支店 に分けて出す。他事業（和信カインド・ラーテル・GRHD）は
+//   拠点の軸が無いのでそのまま。
+//   ★これが無いと、GRミツマをグローライズへ寄せた瞬間に
+//     事務員が関東と本社の人工を分けられなくなる。
+function summaryGroupKey_(r) {
+  const co = String((r && r.company) || '').trim();
+  if (!co) return '';
+  if (!hasKyotenAxis_(co)) return co;
+  const k = String((r && r.kyoten) || '').trim() || defaultKyotenForCompany_(co);
+  return co + '（' + k + '）';
+}
+
 function generateCompanySummary_(ss, records) {
   let sheet = ss.getSheetByName(SUMMARY_COMPANY);
   if (sheet) { sheet.clear(); sheet.clearFormats(); } else { sheet = ss.insertSheet(SUMMARY_COMPANY); }
-  const companies = [...new Set(records.map(r => r.company))].filter(Boolean).sort();
+  const companies = [...new Set(records.map(summaryGroupKey_))].filter(Boolean).sort();
   const now = new Date();
   const thisMonth = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
   const allRows = [];
@@ -2186,7 +2202,7 @@ function generateCompanySummary_(ss, records) {
   formats.push({row: allRows.length, type: 'title'});
   allRows.push(['', '', '', '', '', '']);
   companies.forEach(company => {
-    const cr = records.filter(r => r.company === company);
+    const cr = records.filter(r => summaryGroupKey_(r) === company);
     const mr = cr.filter(r => r.month === thisMonth);
     allRows.push(['▶ ' + company, '', '', '', '', '']);
     formats.push({row: allRows.length, type: 'company'});
@@ -4264,3 +4280,252 @@ function mergeDuplicateMembers(apply) {
 function mergeDuplicateMembers_APPLY() {
   return mergeDuplicateMembers(true);
 }
+
+// ==============================================================
+// ★2026-08-28 GRミツマを「グローライズ 関東支店」へ寄せる（利用者指示）
+//
+//   「和信、ラーテル、GRHDは触らないで下さい。
+//     また、GRミツマは関東支店としてグローライズに統合されるので消して下さい」
+//
+//   ★なぜ会社欄を書き換えても情報が失われないか（2026-08-28 実測）:
+//     日報データの GRミツマ 85件は **全件 拠点=関東支店** が入っている。
+//     グローライズ 2,285件は全件 拠点=本社。つまり「どちらの拠点か」は
+//     既に拠点列が持っていて、会社列は法人名としての意味しか残っていない。
+//
+//   ★触らないもの:
+//     - 和信カインド / ラーテル / GRHD の行（利用者指示）
+//     - 元請名「GRミツマ自社」（これは元請の名前であって会社欄ではない）
+//     - メモ欄の自由文
+// ==============================================================
+const MITSUMA = 'GRミツマ';
+
+// ★元請名の寄せ先（2026-08-28 利用者判断「ミツマは関東支店になるんだよ」）。
+//   自社案件の「GRミツマ自社」は、法人が1つになるので「グローライズ自社」へ。
+//   どちらの拠点の仕事かは拠点列が持っているので情報は失われない。
+const GENBA_NAME_MERGE = { 'GRミツマ自社': 'グローライズ自社' };
+
+// ★読みが食い違うときの正解（人が決めたものだけを載せる。推測しない）。
+//   「きんでん東」は グローライズ側「きんでんとう」、GRミツマ側「きんでんひがし」で食い違っていた。
+//   利用者確認（2026-08-28）: 「きんでんひがし」
+const GENBA_YOMI_DECIDED = { 'きんでん東': 'きんでんひがし' };
+
+function mergedGenbaName_(name) {
+  const n = String(name == null ? '' : name).trim();
+  return GENBA_NAME_MERGE[n] || n;
+}
+
+// 日報データ／アーカイブ の計画を作る（まだ書かない）
+// 会社 GRミツマ → グローライズ。拠点が空の行だけ 関東支店 を入れる
+//   （空のままだと画面は「本社」として扱うため。matchKyoten の既定が本社）
+function planMitsumaRows_(sheet) {
+  const out = { ok: true, sheet: '', 行数: 0, 会社の変更: 0, 拠点を補った: 0,
+                元請名の変更: 0, 拠点の内訳: {}, _write: [] };
+  if (!sheet) { out.ok = false; out.理由 = 'シートが無い'; return out; }
+  out.sheet = sheet.getName();
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return out;
+  const headers = data[0];
+  const coIdx = headers.indexOf('会社');
+  const kyIdx = headers.indexOf('拠点');
+  const gbIdx = headers.indexOf('元請名');
+  if (coIdx < 0) {
+    out.ok = false;
+    out.理由 = '会社列が見つからない: ' + JSON.stringify(headers.slice(0, 21));
+    return out;
+  }
+  out.行数 = data.length - 1;
+
+  const coCol = [], kyCol = [], gbCol = [];
+  for (let i = 1; i < data.length; i++) {
+    const co = String(data[i][coIdx] == null ? '' : data[i][coIdx]).trim();
+    const ky = kyIdx >= 0 ? String(data[i][kyIdx] == null ? '' : data[i][kyIdx]).trim() : '';
+    // ★元請名の寄せは GRミツマの行だけ。他社の行は1文字も触らない
+    if (gbIdx >= 0) {
+      const gb = String(data[i][gbIdx] == null ? '' : data[i][gbIdx]);
+      const gb2 = (co === MITSUMA) ? mergedGenbaName_(gb) : gb;
+      if (gb2 !== gb) out.元請名の変更 = (out.元請名の変更 || 0) + 1;
+      gbCol.push([gb2]);
+    }
+    if (co === MITSUMA) {
+      out.会社の変更++;
+      const k = ky || '(空欄)';
+      out.拠点の内訳[k] = (out.拠点の内訳[k] || 0) + 1;
+      coCol.push([GROWISE]);
+      if (kyIdx >= 0 && !ky) { out.拠点を補った++; kyCol.push([KYOTEN_KANTO]); }
+      else kyCol.push([ky]);
+    } else {
+      coCol.push([data[i][coIdx]]);
+      kyCol.push([kyIdx >= 0 ? data[i][kyIdx] : '']);
+    }
+  }
+  if (out.会社の変更 > 0) out._write.push({ col: coIdx + 1, values: coCol });
+  if (out.拠点を補った > 0) out._write.push({ col: kyIdx + 1, values: kyCol });
+  if (out.元請名の変更 > 0) out._write.push({ col: gbIdx + 1, values: gbCol });
+  out._sheet = sheet;
+  return out;
+}
+
+/**
+ * Apps Scriptのエディタ、またはスプレッドシートのメニューから手で実行する。
+ *   mergeMitsumaIntoGrowise()       … dry-run。何も書かずに結果だけ返す
+ *   mergeMitsumaIntoGrowise_APPLY() … 実行
+ *
+ * ★全部読んで検査してから書く。1つでもおかしければ1文字も書かない。
+ * ★行数は1行も増減しない（職人マスタは重複がまとまるぶんだけ減る）。
+ */
+function mergeMitsumaIntoGrowise(apply) {
+  const lock = getDailyDataLock_();
+  if (!lock.tryLock(30000)) throw new Error('他の処理が動いています。少し待ってからもう一度実行してください。');
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const report = { dryRun: !apply, シート: [], 職人マスタ: {}, 元請マスタ: {},
+                     食い違い: [], 中止理由: '' };
+
+    // ── (1) 日報データ・アーカイブ の計画
+    const plans = [SHEET_NAME, ARCHIVE_SHEET].map(function (n) {
+      return planMitsumaRows_(ss.getSheetByName(n));
+    });
+    plans.forEach(function (p) {
+      report.シート.push({ sheet: p.sheet || '(無し)', 行数: p.行数,
+        会社の変更: p.会社の変更, 拠点を補った: p.拠点を補った,
+        拠点の内訳: p.拠点の内訳, ok: p.ok, 理由: p.理由 });
+    });
+    const bad = plans.filter(function (p) { return !p.ok; });
+    if (bad.length) {
+      report.中止理由 = '予定データのシートを読めない: '
+        + bad.map(function (p) { return p.sheet + '(' + p.理由 + ')'; }).join(' / ');
+      Logger.log('中止: ' + report.中止理由);
+      return report;
+    }
+
+    // ── (2) 職人マスタ の計画
+    const mSheet = ss.getSheetByName(MEMBER_SHEET);
+    if (!mSheet) { report.中止理由 = '職人マスタが見つかりません'; Logger.log('中止: ' + report.中止理由); return report; }
+    const mData = mSheet.getDataRange().getValues();
+    const mHeader = mData[0] || [];
+    const h0 = String(mHeader[0] || '').trim();
+    if ((h0 !== '' && h0 !== '氏名') || String(mHeader[1] || '').trim() !== '会社') {
+      report.中止理由 = '職人マスタの1列目が氏名（または空欄）、2列目が会社になっていません: '
+        + JSON.stringify(mHeader.slice(0, 6));
+      Logger.log('中止: ' + report.中止理由);
+      return report;
+    }
+    const mBody = mData.slice(1).map(function (r) { return r.slice(0, 6); });
+    const mRenamed = mBody.map(function (r) {
+      const row = r.slice();
+      if (String(r[1] == null ? '' : r[1]).trim() === MITSUMA) row[1] = GROWISE;
+      return row;
+    });
+    const m = mergeMemberRows_(mRenamed);
+    report.食い違い = m.conflicts;
+    const beforeCount = mBody.filter(function (r) { return String(r[0] || '').trim(); }).length;
+    report.職人マスタ = {
+      前: beforeCount, 後: m.merged.length, まとめた数: beforeCount - m.merged.length,
+      移した人: mBody.filter(function (r) { return String(r[1] || '').trim() === MITSUMA; })
+                    .map(function (r) { return String(r[0]); })
+    };
+    if (m.conflicts.length) {
+      report.中止理由 = '職人マスタに値の食い違いがあります（事業部・単価など）。人が決めてからもう一度';
+      Logger.log('中止: ' + report.中止理由 + '\n' + JSON.stringify(m.conflicts, null, 2));
+      return report;
+    }
+
+    // ── (3) 元請マスタ の計画（会社欄だけ。重複が生まれるなら中止して人に決めてもらう）
+    const gSheet = ss.getSheetByName(GENBA_MASTER_SHEET);
+    let gWrite = null;
+    if (gSheet) {
+      const gData = gSheet.getDataRange().getValues();
+      const gHead = gData[0] || [];
+      const gCo = gHead.indexOf('会社');
+      if (gCo < 0) {
+        report.元請マスタ = { 変更: 0, 備考: '会社列が無いので触らない' };
+      } else {
+        // ★寄せた結果同じ（元請名・会社）になった行は1行にまとめる。
+        //   読みは非空を優先し、両方に入っていて食い違うときは
+        //   人が決めた表（GENBA_YOMI_DECIDED）だけを使う。表に無ければ中止する。
+        const gYomi = gHead.indexOf('読み');
+        const keep = [], byKey = {};
+        let changed = 0, yomiNG = [];
+        for (let i = 1; i < gData.length; i++) {
+          const raw = gData[i].slice(0, Math.max(3, gHead.length));
+          let name = String(raw[0] == null ? '' : raw[0]).trim();
+          let co = String(raw[gCo] == null ? '' : raw[gCo]).trim();
+          if (co === MITSUMA) {
+            co = GROWISE; changed++;
+            const n2 = mergedGenbaName_(name);
+            if (n2 !== name) { name = n2; }
+          }
+          if (!name) continue;
+          raw[0] = name; raw[gCo] = co;
+          const key = name + '|' + co;
+          if (!byKey[key]) { byKey[key] = raw; keep.push(key); continue; }
+          const cur = byKey[key];
+          if (gYomi >= 0) {
+            const a = String(cur[gYomi] == null ? '' : cur[gYomi]).trim();
+            const b = String(raw[gYomi] == null ? '' : raw[gYomi]).trim();
+            if (!a && b) cur[gYomi] = b;
+            else if (a && b && a !== b) {
+              const decided = GENBA_YOMI_DECIDED[name];
+              if (decided) cur[gYomi] = decided;
+              else yomiNG.push(name + '（' + a + ' / ' + b + '）');
+            }
+          }
+        }
+        report.元請マスタ = { 変更: changed, 前: gData.length - 1, 後: keep.length,
+                             読みが決まらない: yomiNG };
+        if (yomiNG.length) {
+          report.中止理由 = '元請マスタの読みが食い違います（人が決めてからもう一度）: '
+                             + yomiNG.join(' / ');
+          Logger.log('中止: ' + report.中止理由);
+          return report;
+        }
+        if (changed > 0 || keep.length !== gData.length - 1) {
+          gWrite = { sheet: gSheet, rows: keep.map(function (k) { return byKey[k]; }),
+                     width: Math.max(3, gHead.length), oldRows: gData.length - 1 };
+        }
+      }
+    }
+
+    if (!apply) { Logger.log('【dry-run】書き込みはしていません\n' + JSON.stringify(report, null, 2)); return report; }
+
+    // ── (4) ここまで全部通ったので書く
+    plans.forEach(function (p) {
+      p._write.forEach(function (w) {
+        p._sheet.getRange(2, w.col, w.values.length, 1).setValues(w.values);
+      });
+    });
+    if (gWrite) {
+      if (gWrite.rows.length) {
+        gWrite.sheet.getRange(2, 1, gWrite.rows.length, gWrite.width)
+          .setValues(gWrite.rows.map(function (r) {
+            const a = r.slice(0, gWrite.width);
+            while (a.length < gWrite.width) a.push('');
+            return a;
+          }));
+      }
+      const extra = gWrite.oldRows - gWrite.rows.length;
+      if (extra > 0) gWrite.sheet.getRange(2 + gWrite.rows.length, 1, extra, gWrite.width).clearContent();
+    }
+    const keep = m.merged;
+    const oldLastRow = mSheet.getLastRow();
+    if (keep.length) mSheet.getRange(2, 1, keep.length, 6).setValues(keep);
+    const extraRows = oldLastRow - 1 - keep.length;
+    if (extraRows > 0) mSheet.getRange(2 + keep.length, 1, extraRows, 6).clearContent();
+    SpreadsheetApp.flush();
+
+    try {
+      logHistory_(ss, 'merge_mitsuma', [{
+        oldId: '', newId: '', field: '会社の統合',
+        before: MITSUMA, after: GROWISE + '（拠点=' + KYOTEN_KANTO + '）'
+      }], 'system');
+    } catch (e) {}
+    logOperation_(ss, 'merge_mitsuma_into_growise', '職人マスタ/日報データ/アーカイブ/元請マスタ',
+      JSON.stringify(report.職人マスタ), 'system');
+    Logger.log(JSON.stringify(report, null, 2));
+    return report;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function mergeMitsumaIntoGrowise_APPLY() { return mergeMitsumaIntoGrowise(true); }
