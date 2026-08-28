@@ -370,3 +370,65 @@ describe('空き人員の名前リスト（2026-08-27 フェーズ2 Task5・要�
     expect(m[0]).toContain('esc(n)');
   });
 });
+
+describe('管理画面にもフェーズ2のUIが入っていること（2026-08-28）', () => {
+  // ★2026-08-28 実機で発見: フェーズ2で作った3つが社員用にしか入っていなかった。
+  //   重複を直すのも人を配置するのも管理する人の仕事なので、むしろ管理画面に要る。
+  const src = read('admin.html');
+
+  it('★重複の知らせ（バナーと一覧）がある', () => {
+    expect(src).toContain('id="conflict-bar"');
+    expect(src).toContain('id="conflict-modal"');
+    expect(src).toContain('function renderConflictBanner(');
+    expect(src).toContain('function openConflictList(');
+    expect(src).toMatch(/findConflicts\(companyNippos\(\),\s*\{\s*from:\s*todayYmd\(\)\s*\}\)/);
+  });
+
+  it('★カレンダーの描画から呼ばれている', () => {
+    expect(src).toMatch(/try\{renderConflictBanner\(\);\}catch\(e\)\{\}[^\n]*\n\s*renderCalendar\(\);/);
+  });
+
+  it('★空き人員（日付を選ぶと名前が出る）がある', () => {
+    expect(src).toContain('id="avail-day"');
+    expect(src).toContain('id="avail-day-result"');
+    expect(src).toContain('function renderAvailDay(');
+    expect(src).toContain('function releasedByStatus(');
+    expect(src).toContain('try{renderAvailDay();}catch(e){}if(vehicleWeekStart)');
+  });
+
+  it('★詳しく探すがある（既存の完了管理を消していない）', () => {
+    expect(src).toContain("setGmMode('search')");
+    expect(src).toContain('id="gm-filter-search"');
+    expect(src).toContain('id="gm-search-result"');
+    expect(src).toContain("setGmMode('done')");      // 元からある完了管理
+    expect(src).toContain("['genba','person','pin','done','search'].forEach");
+  });
+
+  it('★検索結果に一括編集・一括削除を出さない', () => {
+    const m = src.match(/function renderSearchResults\(\)\s*\{[\s\S]*?\n\}/);
+    expect(m).toBeTruthy();
+    ['gm-delete-bar', 'gm-edit-btn', 'toggleGmSelect', 'openBulkEditModal', 'deleteGmChecked']
+      .forEach(bad => expect(m[0], bad).not.toContain(bad));
+  });
+
+  it('★判定の中身が社員用と1文字も違わない（片方だけ直すのを防ぐ）', () => {
+    // ★正規表現だと入れ子の { } で早く切れるので、括弧を数えて取る
+    const pick = (s, name) => {
+      const start = s.indexOf('function ' + name + '(');
+      if (start < 0) return null;
+      let depth = 0;
+      for (let i = s.indexOf('{', start); i < s.length; i++) {
+        if (s[i] === '{') depth++;
+        else if (s[i] === '}') { depth--; if (depth === 0) return s.slice(start, i + 1); }
+      }
+      return null;
+    };
+    ['renderConflictBanner', 'currentConflicts', 'renderAvailDay', 'releasedByStatus', 'searchNippos']
+      .forEach(fn => {
+        const a = pick(read('index.html'), fn), b = pick(src, fn);
+        expect(a, 'index.html に ' + fn + ' が無い').toBeTruthy();
+        expect(b, 'admin.html に ' + fn + ' が無い').toBeTruthy();
+        expect(b, fn + ' が2画面で食い違っている').toBe(a);
+      });
+  });
+});

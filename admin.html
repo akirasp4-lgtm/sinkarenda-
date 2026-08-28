@@ -145,6 +145,12 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 @keyframes loadAnim{0%{width:0;margin-left:0}50%{width:60%}100%{width:0;margin-left:100%}}
 .notice-bar{background:#FFF3CD;color:#856404;padding:8px 16px;font-size:13px;text-align:center;display:none}
 .notice-bar.active{display:block}
+/* ★2026-08-27 フェーズ2: 人員の重複の知らせ。0件のときは要素ごと消す（常に出ていると読まれなくなる） */
+.conflict-bar{display:none;background:#FCEBEB;color:#A32D2D;border:1px solid #E8384F;border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:14px;font-weight:600;cursor:pointer;min-height:44px;box-sizing:border-box;text-align:left;line-height:1.5}
+.conflict-row{border-bottom:1px solid #eee;padding:10px 2px;font-size:14px}
+.conflict-row:last-child{border-bottom:none}
+.conflict-row b{color:#A32D2D}
+.conflict-job{font-size:13px;color:#555;padding-left:14px}
 .week-table{width:100%;border-collapse:collapse;font-size:13px}
 .week-table th{padding:6px 4px;text-align:center;font-weight:600;border-bottom:2px solid #ddd;font-size:12px;color:#666}
 .week-table td{padding:4px 2px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:12px}
@@ -438,6 +444,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="page-title">カレンダー</div>
   <button class="help-btn-inline" onclick="openHelp()">❓ 使い方</button>
 </div>
+<div class="conflict-bar" id="conflict-bar" onclick="openConflictList()"></div>
 <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:12px">
   <button class="btn btn-secondary btn-sm" onclick="changeListMonth(-1)">◀</button>
   <span id="list-month-label" style="font-size:15px;font-weight:600;min-width:100px;text-align:center"></span>
@@ -449,6 +456,13 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 </div>
 
 <!-- カレンダー日付モーダル -->
+<div id="conflict-modal" class="modal-bg" onclick="if(event.target===this)this.classList.remove('active')">
+<div class="modal">
+  <div class="modal-title">同じ日に別の現場に入っている人</div>
+  <div id="conflict-content"></div>
+  <button class="btn btn-secondary" style="margin-top:12px" onclick="document.getElementById('conflict-modal').classList.remove('active')">閉じる</button>
+</div>
+</div>
 <div id="cal-day-modal" class="modal-bg" onclick="if(event.target===this)this.classList.remove('active')">
 <div class="modal">
   <div class="modal-title" id="cal-day-title"></div>
@@ -478,6 +492,12 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <!-- 空き確認 -->
 <div id="screen-avail" class="screen">
 <div class="page-title">空き確認</div>
+<!-- ★日付を指定して「その日に動ける人」を名前で出す（2026-08-27 フェーズ2・要件4） -->
+<div class="card" style="padding:12px 16px">
+  <label>この日に動ける人を見る</label>
+  <input type="date" id="avail-day" onchange="renderAvailDay()" style="margin-bottom:0">
+  <div id="avail-day-result"></div>
+</div>
 <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:12px">
   <button class="btn btn-secondary btn-sm" onclick="changeAvailWeek(-1)">◀</button>
   <span id="avail-week-label" style="font-size:15px;font-weight:600;min-width:180px;text-align:center"></span>
@@ -521,6 +541,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <button id="gm-mode-person" class="btn btn-secondary" onclick="setGmMode('person')">👤 人で探す</button>
   <button id="gm-mode-pin" class="btn btn-secondary" onclick="setGmMode('pin')">📌 予定だけ</button>
   <button id="gm-mode-done" class="btn btn-secondary" onclick="setGmMode('done')">🏁 完了管理</button>
+  <button id="gm-mode-search" class="btn btn-secondary" onclick="setGmMode('search')">🔎 詳しく探す</button>
 </div>
 <!-- 現場フィルタ（既存） -->
 <div id="gm-filter-genba" class="card">
@@ -553,6 +574,36 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <input id="gm-done-search" type="text" placeholder="現場名の一部を入力" oninput="renderDoneManager()" style="margin-bottom:8px">
   <div id="gm-done-list"></div>
 </div>
+<!-- 詳しく探す（2026-08-27 フェーズ2） -->
+<!-- ★拠点はここに置かない。見出しの下の切替が既に拠点の絞り込みなので、
+     同じ用途の操作を2つ置くとどちらが効いているか分からなくなる -->
+<div id="gm-filter-search" class="card" style="display:none">
+  <div style="font-size:12px;color:#666;margin-bottom:8px">空欄の項目は絞り込みません。拠点は上の切替を使ってください。</div>
+  <div style="display:flex;gap:8px">
+    <div style="flex:1"><label>社員名</label>
+      <select id="gm-sc-name" onchange="renderSearchResults()" style="margin-bottom:8px"><option value="">すべて</option></select></div>
+    <div style="flex:1"><label>部隊</label>
+      <select id="gm-sc-butai" onchange="renderSearchResults()" style="margin-bottom:8px"><option value="">すべて</option></select></div>
+  </div>
+  <div style="display:flex;gap:8px">
+    <div style="flex:1"><label>元請</label>
+      <select id="gm-sc-genba" onchange="renderSearchResults()" style="margin-bottom:8px"><option value="">すべて</option></select></div>
+    <div style="flex:1"><label>作業区分</label>
+      <select id="gm-sc-worktype" onchange="renderSearchResults()" style="margin-bottom:8px"><option value="">すべて</option></select></div>
+  </div>
+  <label>現場名（一部でもよい）</label>
+  <input type="search" id="gm-sc-loc" placeholder="🔍 現場名の一部" oninput="renderSearchResults()" style="margin-bottom:8px">
+  <label>日付</label>
+  <div style="display:flex;gap:8px;align-items:center">
+    <input type="date" id="gm-sc-from" onchange="renderSearchResults()" style="flex:1;margin-bottom:0">
+    <span style="font-size:13px;color:#666">～</span>
+    <input type="date" id="gm-sc-to" onchange="renderSearchResults()" style="flex:1;margin-bottom:0">
+  </div>
+  <button class="btn btn-secondary btn-sm" style="margin-top:10px" onclick="clearSearchFilters()">条件をすべてクリア</button>
+</div>
+<!-- ★結果は gm-list-wrap とは別の枠。あちらには一括編集・一括削除が付いていて、
+     複数の現場・複数の日にまたがる検索結果でそれを押せると事故になる -->
+<div id="gm-search-result" style="display:none"></div>
 <div id="gm-list-wrap" style="display:none">
   <div class="card" style="padding:12px 16px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -1378,7 +1429,13 @@ window.fetch=async function(url,opts){
   return res;
 };
 
-const COMPANIES=['グローライズ','和信カインド','ラーテル','GRHD','GRミツマ'];
+// ★2026-08-28 利用者指示「GRミツマは関東支店としてグローライズに統合されるので消して」
+//   会社の切替から GRミツマ を外した。関東の予定は
+//   「グローライズ → 関東支店」で見る。
+//   ★KYOTEN_COMPANIES には GRミツマ を残すこと。既存行の会社欄には
+//     まだ GRミツマ が入っており、これを外すとその85件が
+//     グローライズのカレンダーから丸ごと消える。
+const COMPANIES=['グローライズ','和信カインド','ラーテル','GRHD'];
 
 // ============================================================
 // 拠点（本社／関東支店）— 2026-08-26（index.html と同じ定義）
@@ -1829,7 +1886,7 @@ function switchTab(t){
   if(t==='list')renderList();
   if(t==='input')initColorPicker('s',selectedColor.s);
   if(t==='vehicle'){if(!vehicleWeekStart)initVehicleWeek();renderVehicleWeek();renderVehicleList();}
-  if(t==='avail')renderAvailList();
+  if(t==='avail'){renderAvailList();try{renderAvailDay();}catch(e){}}
   if(t==='billing')initBillingTab();
   if(t==='history')loadHistory();
   hapticTap();
@@ -3433,9 +3490,49 @@ function groupNippos(nippos){
 }
 function formatDate(d){if(!d)return'';const p=d.split('-');const dt=new Date(p[0],p[1]-1,p[2]);const days=['日','月','火','水','木','金','土'];return`${dt.getMonth()+1}/${dt.getDate()}(${days[dt.getDay()]})`;}
 
+// ★2026-08-27 フェーズ2: 人員の重複の知らせ
+function todayYmd(){
+  const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+
+// 今日以降だけを出す。過ぎた日の重複は直しようがないので出しても意味がない
+// （実データでは典47件のうち今日以降が12件）。0件のときはバナーごと消す。
+function currentConflicts(){
+  return findConflicts(companyNippos(),{from:todayYmd()});
+}
+
+function renderConflictBanner(){
+  const el=document.getElementById('conflict-bar');
+  if(!el)return;
+  const list=currentConflicts();
+  if(!list.length){el.style.display='none';return;}
+  el.style.display='block';
+  el.textContent='⚠️ 同じ日に別の現場に入っている人が '+list.length+' 件あります（タップで一覧）';
+}
+
+// 読むだけ。ここから編集や削除はさせない
+//   （複数の現場・複数の日にまたがる一覧なので、一括操作を置くと事故になる）
+function openConflictList(){
+  const list=currentConflicts();
+  const box=document.getElementById('conflict-content');
+  if(!box)return;
+  if(!list.length){box.innerHTML='<div style="padding:12px;color:#666">重なっている人はいません。</div>';}
+  else{
+    box.innerHTML=list.map(c=>
+      '<div class="conflict-row"><b>'+esc(formatDate(c.date))+'</b>　'+esc(c.name)
+      +(c.bucket==='night'?'（夜勤）':'')
+      +c.jobs.map(j=>'<div class="conflict-job">・'+esc(j.genba)+'／'+esc(j.loc)+'</div>').join('')
+      +'</div>'
+    ).join('');
+  }
+  document.getElementById('conflict-modal').classList.add('active');
+}
+
 function renderList(){
   if(!listMonth){const now=new Date();listMonth=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');}
   const lp=listMonth.split('-');document.getElementById('list-month-label').textContent=lp[0]+'年'+Number(lp[1])+'月';
+  try{renderConflictBanner();}catch(e){}   // 知らせでカレンダー本体を止めない
   renderCalendar();
 }
 function changeListMonth(delta){
@@ -3991,11 +4088,90 @@ function refreshGmTab() {
   else if (gmMode === 'person') renderPersonFilter();
   else if (gmMode === 'pin') renderPinFilter();
   else if (gmMode === 'done') renderDoneManager();
+  else if (gmMode === 'search') { updateSearchSelects(); renderSearchResults(); }
+}
+
+// ============================================================
+// ★ 詳しく探す（2026-08-27 フェーズ2・要件2）
+//   社員名／部隊／元請／現場名／作業区分／日付の範囲 で絞る。
+//   拠点は見出しの下の既存の切替をそのまま使う（filteredNippos 経由）。
+//   ★読むだけ。ここから編集・削除はさせない。
+// ============================================================
+function searchFilterValue(id) {
+  const el = document.getElementById(id);
+  return el ? String(el.value || '').trim() : '';
+}
+
+function updateSearchSelects() {
+  const src = filteredNippos().filter(n => !n.isGhost);
+  const fill = (id, values, keep) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const cur = keep === undefined ? el.value : keep;
+    el.innerHTML = '<option value="">すべて</option>'
+      + values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+    if (values.indexOf(cur) >= 0) el.value = cur;
+  };
+  fill('gm-sc-name', [...new Set(src.map(n => n.name).filter(Boolean))].sort());
+  fill('gm-sc-butai', BUTAI_VALUES.slice());
+  fill('gm-sc-genba', [...new Set(src.map(n => n.genba).filter(Boolean))].sort());
+  fill('gm-sc-worktype', [...new Set(src.map(n => n.workType).filter(Boolean))].sort());
+}
+
+function searchNippos() {
+  const name = searchFilterValue('gm-sc-name');
+  const butai = searchFilterValue('gm-sc-butai');
+  const genba = searchFilterValue('gm-sc-genba');
+  const loc = searchFilterValue('gm-sc-loc').toLowerCase();
+  const wt = searchFilterValue('gm-sc-worktype');
+  const from = searchFilterValue('gm-sc-from');
+  const to = searchFilterValue('gm-sc-to');
+  return filteredNippos().filter(n => {
+    if (n.isGhost) return false;
+    if (name && n.name !== name) return false;
+    if (butai && String(n.butai || '') !== butai) return false;
+    if (genba && n.genba !== genba) return false;
+    if (loc && String(n.loc || '').toLowerCase().indexOf(loc) < 0) return false;
+    if (wt && String(n.workType || '') !== wt) return false;
+    if (from && String(n.date || '') < from) return false;
+    if (to && String(n.date || '') > to) return false;
+    return true;
+  });
+}
+
+function clearSearchFilters() {
+  ['gm-sc-name','gm-sc-butai','gm-sc-genba','gm-sc-worktype','gm-sc-loc','gm-sc-from','gm-sc-to']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  renderSearchResults();
+}
+
+function renderSearchResults() {
+  const box = document.getElementById('gm-search-result');
+  if (!box) return;
+  const groups = groupNippos(searchNippos());
+  const people = groups.reduce((a, g) => a + g.members.length, 0);
+  let html = '<div class="card" style="padding:12px 16px">'
+    + '<div style="font-size:13px;color:#666;font-weight:500;margin-bottom:8px">'
+    + '見つかった予定 ' + groups.length + ' 件（延べ ' + people + ' 人）</div>';
+  if (!groups.length) {
+    html += '<div style="color:#666;font-size:14px;padding:8px 0">条件に合う予定はありません。</div>';
+  } else {
+    html += groups.map(g =>
+      '<div class="conflict-row">'
+      + '<b>' + esc(formatDate(g.date)) + '</b>　' + esc(g.genba) + '／' + esc(g.loc || '')
+      + (g.workType && g.workType !== '現場作業' ? ' <span class="worktype-chip">' + esc(g.workType) + '</span>' : '')
+      + (g.butai ? ' <span class="kyoten-tag">' + esc(g.butai) + '</span>' : '')
+      + '<div class="conflict-job">' + g.members.map(m => esc(m.name)).join('、') + '</div>'
+      + '</div>'
+    ).join('');
+  }
+  html += '</div>';
+  box.innerHTML = html;
 }
 
 function setGmMode(mode) {
   gmMode = mode;
-  ['genba','person','pin','done'].forEach(m => {
+  ['genba','person','pin','done','search'].forEach(m => {
     const btn = document.getElementById('gm-mode-' + m);
     if (btn) btn.classList.toggle('active', m === mode);
   });
@@ -4004,11 +4180,15 @@ function setGmMode(mode) {
     person: document.getElementById('gm-filter-person'),
     pin: document.getElementById('gm-filter-pin'),
     done: document.getElementById('gm-filter-done'),
+    search: document.getElementById('gm-filter-search'),
   };
   Object.entries(cards).forEach(([k, el]) => {
     if (el) el.style.display = k === mode ? '' : 'none';
   });
+  // ★検索の結果と、一括編集付きの一覧は同時に出さない
   document.getElementById('gm-list-wrap').style.display = 'none';
+  const sr = document.getElementById('gm-search-result');
+  if (sr) sr.style.display = (mode === 'search') ? '' : 'none';
   refreshGmTab();
 }
 
@@ -4403,6 +4583,71 @@ let availWeekStart=null;
 function getMonday(d){const dt=new Date(d);const day=dt.getDay();return new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()-day+(day===0?-6:1));}
 function initAvailWeek(){availWeekStart=getMonday(new Date());renderAvailWeek();renderAvailList();}
 function changeAvailWeek(delta){availWeekStart=new Date(availWeekStart.getFullYear(),availWeekStart.getMonth(),availWeekStart.getDate()+delta*7);renderAvailWeek();renderAvailList();hapticTap();}
+// ============================================================
+// ★ 空き人員（2026-08-27 フェーズ2・要件4）
+//   週の表は色しか分からないので、日付を指定して名前で出す。
+// ★母集団は companyNippos()（拠点で絞らない）。
+//   本社ビューで見ていても、関東の現場に入っている人は「空き」ではない。
+// ★名簿は getActiveShokunin()（職人マスタの 有効=× を外した一覧）。
+// ============================================================
+function renderAvailDay() {
+  const d = searchFilterValue('avail-day');
+  const box = document.getElementById('avail-day-result');
+  if (!box) return;
+  if (!d) { box.innerHTML = ''; return; }
+  const cn = companyNippos().filter(n => !n.isGhost && n.date === d);
+  const state = {};   // 氏名 → busy / yasumi / souko
+  cn.forEach(n => {
+    const cur = state[n.name];
+    // 現場に出ているが优先。同じ日に休みと出勤が両方あるときは「出勤」と見なす
+    if (cur === 'busy') return;
+    state[n.name] = n.yasumi ? 'yasumi' : (n.souko ? 'souko' : 'busy');
+  });
+  const roster = getActiveShokunin();
+  const free = roster.filter(name => !state[name]);
+  const yasumi = roster.filter(name => state[name] === 'yasumi');
+  const souko = roster.filter(name => state[name] === 'souko');
+  const busy = roster.filter(name => state[name] === 'busy');
+  const chip = (names) => names.length
+    ? names.map(n => '<span class="member-chip" style="pointer-events:none">' + esc(n) + '</span>').join('')
+    : '<span style="color:#999;font-size:13px">いません</span>';
+  let html = '<div style="margin-top:12px">'
+    + '<div style="font-size:14px;font-weight:600;color:#1D9E75;margin-bottom:6px">空いている ' + free.length + ' 人</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">' + chip(free) + '</div>'
+    + '<div style="font-size:13px;color:#666;margin-bottom:4px">休み ' + yasumi.length + ' 人　倉庫 ' + souko.length + ' 人　出勤 ' + busy.length + ' 人</div>';
+  const released = releasedByStatus(d);
+  if (released.length) {
+    html += '<div style="font-size:14px;font-weight:600;color:#A32D2D;margin:12px 0 6px">'
+      + '現場が延期・中止になった人 ' + released.length + ' 人（動かせる候補）</div>'
+      + '<div style="display:flex;flex-wrap:wrap;gap:6px">'
+      + released.map(r => '<span class="member-chip" style="pointer-events:none">' + esc(r.name)
+        + '<span style="font-size:11px;color:#666">（' + esc(r.status) + '：' + esc(r.loc) + '）</span></span>').join('')
+      + '</div>';
+  }
+  html += '</div>';
+  box.innerHTML = html;
+}
+
+// ★要件8の後半。延期・中止にした現場の人は、予定表の上では埋まって見えるが
+//   実際には動かせる。現場マスタのステータスを見て拾う。
+function releasedByStatus(date) {
+  const stopped = {};
+  (allJobsites || []).forEach(j => {
+    const st = String(j.status || '').trim();
+    if (st === '延期' || st === '中止') stopped[String(j.genba || '') + '|' + String(j.loc || '')] = st;
+  });
+  if (!Object.keys(stopped).length) return [];
+  const out = [], seen = {};
+  companyNippos().forEach(n => {
+    if (n.isGhost || n.date !== date) return;
+    const st = stopped[String(n.genba || '') + '|' + String(n.loc || '')];
+    if (!st || seen[n.name]) return;
+    seen[n.name] = true;
+    out.push({ name: n.name, status: st, genba: n.genba, loc: n.loc });
+  });
+  return out;
+}
+
 function renderAvailWeek(){
   const days=[];for(let i=0;i<7;i++){const d=new Date(availWeekStart.getFullYear(),availWeekStart.getMonth(),availWeekStart.getDate()+i);days.push({date:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),label:(d.getMonth()+1)+'/'+d.getDate(),dow:d.getDay()});}
   const dayNames=['日','月','火','水','木','金','土'];
@@ -4422,7 +4667,7 @@ function renderAvailWeek(){
   });
   html+='</tbody></table>';document.getElementById('avail-weekly').innerHTML=html;
 }
-function updateAvailability(){renderAvailWeek();renderAvailList();if(vehicleWeekStart)renderVehicleWeek();renderVehicleList();}
+function updateAvailability(){renderAvailWeek();renderAvailList();try{renderAvailDay();}catch(e){}if(vehicleWeekStart)renderVehicleWeek();renderVehicleList();}
 
 function renderAvailList(){
   if(!availWeekStart)return;
