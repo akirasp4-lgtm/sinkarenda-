@@ -1,6 +1,7 @@
 const SHEET_NAME = '日報データ';
 const ARCHIVE_SHEET = 'アーカイブ';
 const MEMBER_SHEET = '職人マスタ';
+const QUAL_SHEET = '資格マスタ';   // ★2026-08-28 資格（フェーズ3の土台）
 const GENBA_MASTER_SHEET = '元請マスタ';
 const JOBSITE_SHEET = '現場マスタ';
 const SUMMARY_COMPANY = '会社別集計';
@@ -1642,8 +1643,14 @@ function doGet(e) {
       status: normalizeSiteStatus_(r[11], r[8])
     })).filter(j => j.genba && (!filterByCompany || allowedGenba.has(j.genba))) : [];
 
-    if (wantCompact) return ok({compact: 1, headers: outHeaders, rows, members, genbaMaster, jobsites});
-    return ok({rows, members, genbaMaster, jobsites});
+    // ★2026-08-28 資格（フェーズ3の土台）。決めた項目だけに削ってある（readQualifications_ 参照）
+    //   読み取りに失敗したときは項目ごと省く＝受け取る側が前回の値を保つ。
+    const qualifications = readQualifications_(ss, filterByCompany, requestedCompany);
+    const base = {rows, members, genbaMaster, jobsites};
+    if (qualifications !== null) base.qualifications = qualifications;
+
+    if (wantCompact) return ok(Object.assign({compact: 1, headers: outHeaders}, base));
+    return ok(base);
   } catch(err) {
     return error(err.toString());
   }
@@ -1679,6 +1686,119 @@ function getOrCreateVehicleResSheet_(ss) {
     });
   }
   return sheet;
+}
+
+// ==============================================================
+// 資格マスタ（2026-08-28 追加）
+//
+// ★個人情報の扱い — ここが一番大事。
+//   資格マスタには 免許番号・正式氏名・取得日・出典 が入っている。
+//   現場画面(index.html)はPINが無く全社員が使い、受け取った内容は
+//   CloudflareのD1と端末のlocalStorageにも残る。
+//   そのため **GASを出る時点で 氏名/資格名/区分/有効期限 の4つに削る**。
+//   単価(rate)をWorkerで落としているのと同じ考え方だが、資格は
+//   「そもそもGASから出さない」＝もっと手前で止める。
+//   免許番号が要る場面（提出書類など）はスプレッドシートを直接見る。
+//
+// ★見出しは名前で探す。列を足されたり並べ替えられても壊れないようにする
+//   （職人マスタは位置決め打ちだが、こちらは9列あって触られやすい）。
+// ==============================================================
+
+/** 資格の有効期限が読めなかった印。空欄（期限なし）と区別する。 */
+const QUAL_UNKNOWN = '?';
+
+/**
+ * 資格の有効期限を 'YYYY-MM-DD' に揃える。
+ *   ''  … 空欄 or '-' ＝ 期限のない資格（技能講習の多くがこれ）
+ *   '?' … 何か書いてあるが日付として読めない
+ *   日付 … 実在する日だけ
+ *
+ * ★Codexレビュー[P1]（2026-08-28）:
+ *   以前は読めない値も空文字にしていた。空文字は画面側で「期限なし＝切れない」
+ *   になるため、**読めない資格が一生有効な資格に化けていた**。
+ *   さらに '2026-02-31' のような存在しない日は JavaScript が黙って 3/3 へ
+ *   繰り上げるので、実在する日かどうかまで確かめる。
+ */
+function normalizeQualDate_(v) {
+  if (v == null) return '';
+  if (Object.prototype.toString.call(v) === '[object Date]') {
+    if (isNaN(v.getTime())) return QUAL_UNKNOWN;
+    const p = n => (n < 10 ? '0' : '') + n;
+    return v.getFullYear() + '-' + p(v.getMonth() + 1) + '-' + p(v.getDate());
+  }
+  let t = String(v).trim();
+  if (!t || t === '-' || t === '―' || t === '—') return '';
+  // ★実データ対応（2026-08-28）: 資格者証一覧には
+  //   '2029/3/31(合格した年から5年後の3/31)' のように、日付のうしろに
+  //   説明のカッコ書きが付いた欄が6件ある。日付そのものは書いてあるので読む。
+  //   ★カッコで始まる注記だけを落とす。'2029/3/31〜2030/3/31' のような
+  //     期間表記は「どちらの日か決められない」ので読めない扱いのままにする。
+  const note = t.match(/^(.+?)\s*[(（].*$/);
+  if (note) t = note[1].trim();
+  const m = t.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
+  if (!m) return QUAL_UNKNOWN;
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+  // ★実在する日かどうか。Dateに任せると 2/31 が 3/3 になって通ってしまう。
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return QUAL_UNKNOWN;
+  const p = n => (n.length < 2 ? '0' + n : n);
+  return m[1] + '-' + p(m[2]) + '-' + p(m[3]);
+}
+
+/**
+ * 資格マスタの2次元配列を、画面へ出す4項目だけの配列にする。
+ * @param {Array<Array>} data 見出し行を含むシートの中身
+ * @param {boolean} filterByCompany 会社で絞るか
+ * @param {string} requestedCompany 絞る会社名
+ */
+function projectQualifications_(data, filterByCompany, requestedCompany) {
+  if (!data || data.length < 2) return [];
+  const head = data[0].map(h => String(h == null ? '' : h).trim());
+  const idx = name => head.indexOf(name);
+  const iName = idx('氏名'), iQual = idx('資格名');
+  // 氏名と資格名が無ければ、この機能は成立しない。doGet全体を巻き込まず空で返す。
+  if (iName < 0 || iQual < 0) return [];
+  const iCo = idx('会社'), iKind = idx('区分'), iExp = idx('有効期限');
+  const out = [];
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    const name = String(r[iName] == null ? '' : r[iName]).trim();
+    const qual = String(r[iQual] == null ? '' : r[iQual]).trim();
+    if (!name || !qual) continue;
+    if (filterByCompany) {
+      const co = iCo >= 0 ? String(r[iCo] == null ? '' : r[iCo]).trim() : '';
+      if (co !== requestedCompany) continue;
+    }
+    out.push({
+      name: name,
+      // ★会社は残す。D1には全社まとめて1本のスナップショットで入り、
+      //   会社ごとの絞り込みは読み取り時（cf/src/read.js）に行うため、
+      //   ここで捨てると和信カインドの画面にグローライズの資格が混ざる。
+      company: iCo >= 0 ? String(r[iCo] == null ? '' : r[iCo]).trim() : '',
+      qual: qual,
+      kind: iKind >= 0 ? String(r[iKind] == null ? '' : r[iKind]).trim() : '',
+      expires: iExp >= 0 ? normalizeQualDate_(r[iExp]) : ''
+    });
+  }
+  return out;
+}
+
+/**
+ * 資格マスタを読む。シートが無くても落とさない（まだ作っていない環境がある）。
+ * ★Codexレビュー[P2]（2026-08-28）: 読み取りに失敗したときに [] を返すと、
+ *   Worker が D1 の303件を空で上書きしてしまう（空欄なのか失敗なのか区別が
+ *   つかないため）。失敗したときは null を返し、doGet は項目ごと省く。
+ *   受け取る側（cf/src/sync.js）は「項目が無い＝前回のまま」にする。
+ */
+function readQualifications_(ss, filterByCompany, requestedCompany) {
+  try {
+    const sh = ss.getSheetByName(QUAL_SHEET);
+    if (!sh) return [];   // シートが無い＝正しく0件
+    return projectQualifications_(sh.getDataRange().getValues(), filterByCompany, requestedCompany);
+  } catch (e) {
+    Logger.log('資格マスタの読み取りに失敗: ' + e);
+    return null;   // ★資格が読めなくても予定表は開けること。ただし空とは区別する
+  }
 }
 
 function getOrCreateMemberSheet_(ss) {

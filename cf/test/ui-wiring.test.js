@@ -341,8 +341,14 @@ describe('空き人員の名前リスト（2026-08-27 フェーズ2 Task5・要�
   });
 
   it('★名簿は有効な人だけ（職人マスタで無効にした人を空きに数えない）', () => {
+    // ★2026-08-28: 資格を会社込みで引くため、renderAvailDay は
+    //   activeRosterMembers() 経由になった。無効の人を外す責任はその中の
+    //   getActiveShokunin() が持つので、2段とも確かめる。
     const m = src.match(/function renderAvailDay\(\)\s*\{[\s\S]*?\n\}/);
-    expect(m[0]).toContain('getActiveShokunin()');
+    expect(m[0]).toContain('activeRosterMembers()');
+    const r = src.match(/function activeRosterMembers\(\)\s*\{[\s\S]*?\n\}/);
+    expect(r, 'activeRosterMembers が無い').toBeTruthy();
+    expect(r[0]).toContain('getActiveShokunin()');
   });
 
   it('★同じ日に休みと出勤が両方あるときは「出勤」とみなす（空きに数えない）', () => {
@@ -423,12 +429,88 @@ describe('管理画面にもフェーズ2のUIが入っていること（2026-08
       }
       return null;
     };
-    ['renderConflictBanner', 'currentConflicts', 'renderAvailDay', 'releasedByStatus', 'searchNippos']
+    // ★2026-08-28 フェーズ3: updateQualSelect（資格プルダウン）も同一を強制する
+    ['renderConflictBanner', 'currentConflicts', 'renderAvailDay', 'releasedByStatus', 'searchNippos',
+     'updateQualSelect', 'activeRosterMembers', 'todayYmd']
       .forEach(fn => {
         const a = pick(read('index.html'), fn), b = pick(src, fn);
         expect(a, 'index.html に ' + fn + ' が無い').toBeTruthy();
         expect(b, 'admin.html に ' + fn + ' が無い').toBeTruthy();
         expect(b, fn + ' が2画面で食い違っている').toBe(a);
       });
+  });
+});
+
+// ============================================================
+// 資格（2026-08-28 フェーズ3の土台）
+// ★配線の見張り。判定そのものは phase3-qual.test.js が vm で実際に動かす。
+// ============================================================
+describe('資格の配線', () => {
+  FILES.forEach(f => {
+    const s = read(f);
+    it(f + ': 受け取り・端末キャッシュ・復元の3か所すべてに資格が書いてある', () => {
+      // ★1か所でも書き忘れると「初回だけ出る」「2回目から消える」という
+      //   再現しにくい不具合になる（既定部隊で実際にやらかした）
+      // ★どの入口も qualSafe を通すこと（免許番号が端末へ焼き付くのを防ぐ3枚目の歯止め）
+      expect(s, '受け取り').toContain('allQuals=qualSafe(Array.isArray(json.qualifications)');
+      expect(s, 'localStorageへ保存').toContain('qualifications:qualSafe(json.qualifications||[])');
+      expect(s, 'localStorageから復元').toContain('allQuals=qualSafe(s.qualifications||[])');
+    });
+    it(f + ': 資格の絞り込みプルダウンが画面にある', () => {
+      expect(s).toContain('id="avail-qual"');
+      expect(s).toContain('onchange="renderAvailDay()"');
+    });
+    it(f + ': ★免許番号・正式氏名を画面に出そうとしていない（個人情報）', () => {
+      // ★コメント行は除いて見る。説明として名前を書くのは構わないが、
+      //   コードとして参照していたら個人情報が画面に出る。
+      const code = s.split('\n').filter(L => !/^\s*(\/\/|\*|\/\*)/.test(L)).join('\n');
+      ['免許番号', '正式氏名', 'licenseNo', '.license'].forEach(bad => {
+        expect(code, bad + ' を参照している').not.toContain(bad);
+      });
+      // 資格のオブジェクトから読んでよいのは4つだけ
+      expect(s).not.toMatch(/q\.(licence|license|number|seishiki)/);
+    });
+    it(f + ': 資格の判定ブロックがある', () => {
+      expect(s).toContain('// ===== PHASE3-QUAL-RULE:BEGIN =====');
+      expect(s).toContain('// ===== PHASE3-QUAL-RULE:END =====');
+    });
+  });
+});
+
+// ============================================================
+// 「今日」は日本時間（2026-08-28・Codexレビューの指摘で追加）
+// ★端末の時計が日本以外だと「今日」が1日ずれ、重複バナーと資格の期限が
+//   両方おかしくなる。実際に動かして、日本時間の日付になることを確かめる。
+// ============================================================
+describe('todayYmd は日本時間', () => {
+  FILES.forEach(f => {
+    const src = read(f);
+    const body = (() => {
+      const start = src.indexOf('function todayYmd(');
+      let depth = 0;
+      for (let i = src.indexOf('{', start); i < src.length; i++) {
+        if (src[i] === '{') depth++;
+        else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(start, i + 1); }
+      }
+      return null;
+    })();
+
+    it(f + ': ★日本時間で日付を出す（UTCの夕方＝日本の翌日でずれない）', async () => {
+      const vm = await import('node:vm');
+      const sandbox = vm.createContext({ Intl, Date, String, console });
+      sandbox.globalThis = sandbox;
+      vm.runInContext(body, sandbox, { filename: f });
+      // 2026-08-28 20:00 UTC ＝ 日本時間では 2026-08-29 05:00
+      const RealDate = Date;
+      sandbox.Date = class extends RealDate {
+        constructor(...a) { return a.length ? new RealDate(...a) : new RealDate('2026-08-28T20:00:00Z'); }
+      };
+      expect(sandbox.todayYmd(), 'UTCのまま数えている').toBe('2026-08-29');
+    });
+
+    it(f + ': 形は YYYY-MM-DD', () => {
+      expect(body).toContain("timeZone:'Asia/Tokyo'");
+      expect(body).toContain('en-CA');   // en-CA が YYYY-MM-DD を返す
+    });
   });
 });

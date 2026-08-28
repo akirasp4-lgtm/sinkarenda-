@@ -174,7 +174,7 @@ export function validateGasPayload(json) {
  * rows/genbaMaster/jobsitesはGASが返した内容・順序をそのまま保つ
  * （「忠実な写し」の方針。2026-08-24の設計変更。重複行や氏名が空の行も捨てない）。
  */
-export function sanitizeForStorage(json) {
+export function sanitizeForStorage(json, prevQualifications) {
   return {
     compact: 1,
     headers: json.headers,
@@ -187,7 +187,20 @@ export function sanitizeForStorage(json) {
       butai: String(m.butai || ''), active: m.active !== false
     })),
     genbaMaster: json.genbaMaster,
-    jobsites: json.jobsites
+    jobsites: json.jobsites,
+    // ★2026-08-28 資格。ここに書かないと黙って消える（rate を落としているのと同じ仕組み）。
+    //   GAS側で決めた項目に削ってあるので、そのまま持つ。
+    // ★Codexレビュー[P2]（2026-08-28）: 資格マスタの読み取りに失敗したとき、GASは
+    //   この項目ごと省いてくる。そのときに [] を書くと、D1の303件を空で
+    //   上書きしてしまう。項目が無い＝「今回は分からない」なので前回のまま残す。
+    //   （古いGASデプロイも項目が無い＝前回のまま。どちらでも安全側に倒れる）
+    qualifications: Array.isArray(json.qualifications)
+      ? json.qualifications.map(q => ({
+          name: String(q.name || ''), company: String(q.company || ''),
+          qual: String(q.qual || ''),
+          kind: String(q.kind || ''), expires: String(q.expires || '')
+        }))
+      : (Array.isArray(prevQualifications) ? prevQualifications : [])
   };
 }
 
@@ -423,7 +436,25 @@ export async function syncAll(env, opts = {}) {
       return { ok: false, rows: 0, message: check.message };
     }
 
-    const sanitized = sanitizeForStorage(raw);
+    // ★資格の項目がGAS応答に無いときだけ、前回のD1の値を読んで引き継ぐ。
+    //   普段（項目がある）は読まない＝D1の読み取り枠を余計に使わない。
+    let prevQuals = null;
+    if (!Array.isArray(raw.qualifications)) {
+      try {
+        const r = await env.DB.prepare('SELECT payload FROM snapshot WHERE id = 1').all();
+        const prev = r.results && r.results[0] ? JSON.parse(r.results[0].payload) : null;
+        if (prev && Array.isArray(prev.qualifications)) prevQuals = prev.qualifications;
+      } catch (e) {
+        // ★Codexレビュー（2026-08-28）: ここで握り潰して先へ進むと、前回の資格を
+        //   引き継げないまま [] を書き、D1の資格が消える。「正しく作れないものは
+        //   書かない」。5分後の次の同期でやり直せばよい（読み取り側は今の
+        //   スナップショットを返し続けるので、利用者には何も起きない）。
+        const message = '前回の資格を読めなかったため、今回の取り込みは見送りました: ' + String(e && e.message || e);
+        await safeWriteSyncLog(env, { rows: 0, ok: 0, message });
+        return { ok: false, rows: 0, message };
+      }
+    }
+    const sanitized = sanitizeForStorage(raw, prevQuals);
     const payloadText = JSON.stringify(sanitized);
     const bytes = new TextEncoder().encode(payloadText).length;
     const rowCount = sanitized.rows.length;

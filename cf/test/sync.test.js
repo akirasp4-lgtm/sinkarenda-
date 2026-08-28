@@ -1309,3 +1309,109 @@ describe('21列目 部隊（フェーズ1）', () => {
     expect(out.jobsites[0].status).toBe('施工中');
   });
 });
+
+// ============================================================
+// 資格（2026-08-28 追加）
+// ★sanitizeForStorage に書き忘れると D1 へ黙って消える設計なので、
+//   「消えていないこと」を必ずここで押さえる。
+// ============================================================
+describe('資格をD1へ持ち込む', () => {
+  it('★qualifications が消えずに残る（書き忘れ検出）', () => {
+    const out = sanitizeForStorage(makeCompactPayload({
+      qualifications: [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習', expires: '2030-03-31' }]
+    }));
+    expect(out.qualifications).toEqual(
+      [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習', expires: '2030-03-31' }]);
+  });
+
+  it('★免許番号など余計な列が混ざっていても捨てる（二重の歯止め）', () => {
+    const out = sanitizeForStorage(makeCompactPayload({
+      qualifications: [{ name: '河原', company: 'グローライズ', qual: '第一種電気工事士', kind: '国家資格', expires: '', 免許番号: '03569', 正式氏名: '河原　将司' }]
+    }));
+    expect(JSON.stringify(out.qualifications)).not.toContain('03569');
+    expect(JSON.stringify(out.qualifications)).not.toContain('河原　将司');
+    expect(Object.keys(out.qualifications[0]).sort()).toEqual(['company', 'expires', 'kind', 'name', 'qual']);
+  });
+
+  it('★古いGAS応答（qualifications が無い）でも取り込みを止めない', () => {
+    const p = makeCompactPayload({});
+    delete p.qualifications;
+    expect(validateGasPayload(p).ok).toBe(true);
+    expect(sanitizeForStorage(p).qualifications).toEqual([]);
+  });
+});
+
+// ============================================================
+// 資格をD1で失わない（2026-08-28・Codexレビューの指摘で追加）
+// ★これまでは sanitizeForStorage を直接呼ぶだけで、syncAll を通した
+//   「本当に前回の値を引き継ぐか」を1度も確かめていなかった＝素通りだった。
+// ============================================================
+describe('syncAll：資格の引き継ぎ', () => {
+  const QUALS = [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習', expires: '' }];
+
+  it('★GAS応答に資格が無いとき、D1の前回の資格をそのまま残す（空で上書きしない）', async () => {
+    const clock = stubIncreasingClock();
+    try {
+      // 1回目: 資格つきで取り込む
+      mockFetchOk(makeCompactPayload({ rows: makeRows(10), qualifications: QUALS }));
+      const { db, state } = makeMockDB();
+      const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+      await syncAll(env);
+      expect(JSON.parse(state.snapshot.payload).qualifications).toEqual(QUALS);
+
+      // 2回目: 資格マスタが読めず、GASが項目ごと省いてきた
+      const p2 = makeCompactPayload({ rows: makeRows(11) });
+      delete p2.qualifications;
+      mockFetchOk(p2);
+      const out = await syncAll(env);
+
+      expect(out.ok, out.message).toBe(true);
+      expect(JSON.parse(state.snapshot.payload).qualifications,
+        '資格がD1から消えている').toEqual(QUALS);
+      expect(JSON.parse(state.snapshot.payload).rows).toHaveLength(11);
+    } finally { clock.stop(); }
+  });
+
+  it('★前回の資格を読めなかったら、書かずに見送る（間違った内容でD1を上書きしない）', async () => {
+    const clock = stubIncreasingClock();
+    try {
+      mockFetchOk(makeCompactPayload({ rows: makeRows(10), qualifications: QUALS }));
+      const { db, state } = makeMockDB();
+      const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+      await syncAll(env);
+      const before = state.snapshot.payload;
+
+      // payload の読み取りだけを壊す
+      const broken = {
+        prepare: (sql) => {
+          const st = db.prepare(sql);
+          if (/SELECT payload FROM snapshot/.test(sql)) {
+            return { bind: () => st, all: async () => { throw new Error('mock payload read failure'); }, run: st.run };
+          }
+          return st;
+        }
+      };
+      const p2 = makeCompactPayload({ rows: makeRows(11) });
+      delete p2.qualifications;
+      mockFetchOk(p2);
+      const out = await syncAll({ DB: broken, GAS_URL: 'https://example.test/exec' });
+
+      expect(out.ok).toBe(false);
+      expect(out.message).toContain('見送りました');
+      expect(state.snapshot.payload, 'D1が書き換わってしまっている').toBe(before);
+    } finally { clock.stop(); }
+  });
+
+  it('初回（前回のスナップショットが無い）で資格が無ければ空でよい', async () => {
+    const clock = stubIncreasingClock();
+    try {
+      const p = makeCompactPayload({ rows: makeRows(10) });
+      delete p.qualifications;
+      mockFetchOk(p);
+      const { db, state } = makeMockDB();
+      const out = await syncAll({ DB: db, GAS_URL: 'https://example.test/exec' });
+      expect(out.ok, out.message).toBe(true);
+      expect(JSON.parse(state.snapshot.payload).qualifications).toEqual([]);
+    } finally { clock.stop(); }
+  });
+});

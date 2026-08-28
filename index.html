@@ -493,6 +493,12 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <div class="card" style="padding:12px 16px">
   <label>この日に動ける人を見る</label>
   <input type="date" id="avail-day" onchange="renderAvailDay()" style="margin-bottom:0">
+  <!-- ★2026-08-28 フェーズ3: 資格で絞る。資格マスタ（NASの資格者証一覧から取り込み）を使う。
+       期限切れの資格は「持っていない」扱いにする＝現場に出せない人を空きに出さない -->
+  <label style="margin-top:10px">資格で絞る</label>
+  <select id="avail-qual" onchange="renderAvailDay()" style="margin-bottom:0">
+    <option value="">資格で絞らない</option>
+  </select>
   <div id="avail-day-result"></div>
 </div>
 <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:12px">
@@ -1389,6 +1395,9 @@ let allNippos=[];
 let allMembers=[];
 let allGenbaMaster=[];
 let allJobsites=[]; // 現場マスタ（完了フラグ等）。{genba, loc, jobNo, completed}
+// ★2026-08-28 資格マスタ。{name, company, qual, kind, expires}。
+//   免許番号・正式氏名はGASの時点で落としてある（gas.js readQualifications_）。
+let allQuals=[];
 let selectedMembers=[];
 let editSelectedMembers=[];
 let editIds=[];
@@ -2645,7 +2654,10 @@ function saveSnapshot(company,json){
       //   キャッシュから描く2回目以降の起動だけ既定部隊が空になる（再現しにくい不具合）。
       //   単価(rate)は引き続き残さない（給料情報のため意図的に捨てている）。
       members:(json.members||[]).map(m=>({name:m.name,company:m.company,division:m.division,butai:m.butai||'',active:m.active!==false})),
-      genbaMaster:json.genbaMaster||[],jobsites:json.jobsites||[]
+      genbaMaster:json.genbaMaster||[],jobsites:json.jobsites||[],
+      // ★資格も端末に残す。書かないとキャッシュから描く2回目以降だけ資格が空になる
+      //   （既定部隊で同じ失敗をしたので同じ轍を踏まない）。免許番号は元から入っていない。
+      qualifications:qualSafe(json.qualifications||[])
     }));
   }catch(e){/* 容量超過等は無視。キャッシュは無くても動く */}
 }
@@ -2659,6 +2671,7 @@ function hydrateFromSnapshot(company){
     allNippos=base.concat(generateGhosts(base));
     applyPendingRows();
     allMembers=s.members||[];allGenbaMaster=s.genbaMaster||[];allJobsites=s.jobsites||[];
+    allQuals=qualSafe(s.qualifications||[]);
     rerenderAll();
     return true;
   }catch(e){console.error(e);return false;}
@@ -2736,6 +2749,172 @@ function expandCompactRows(headers,rows){
   if(!headers||!headers.length)return rows||[];
   return (rows||[]).map(r=>{const o={};for(let i=0;i<headers.length;i++)o[headers[i]]=r[i];return o;});
 }
+// ===== PHASE3-QUAL-RULE:BEGIN =====
+// 資格の判定（2026-08-28 フェーズ3の土台）。
+//
+// ★利用者指示: 「資格書は…それで割り振ってくれる？」
+//   資格マスタ303件をスプレッドシートに入れたので、それを使って人を選べるようにする。
+//
+// ★DOMに一切触らない純関数だけを置くこと。
+//   cf/test/phase3-qual.test.js がこの区間だけを取り出して vm で実際に動かす。
+//   ★index.html と admin.html でこのブロックは1文字も違ってはいけない。
+//
+// ★有効期限の考え方（ここを間違えると現場が困る）
+//   ''      … 期限のない資格（技能講習の多くがこれ）。切れない＝警告しない
+//   '?'     … 有効期限の欄が読めなかった。**「持っている」と数えない**（安全側）
+//   期限日  … その日を過ぎたら expired。当日はまだ有効（切れるのは翌日から）
+//
+// ★Codexレビュー[P1]（2026-08-28）で直した3点。同じ穴を空けないこと:
+//   1. 読めない日付を「期限なし」に潰していた → 一生有効な資格に化けていた。
+//      '2026-02-31' のような存在しない日も JS が勝手に 3/3 へ繰り上げて通していた。
+//   2. 氏名だけで索引していた → **奥田さんはグローライズとGRHDの両方に実在する**。
+//      他社の同名の人の資格で「有資格」と判定されていた。会社込みの鍵にする。
+//   3. 選んでいた資格が一覧から消えると、黙って「絞り込みなし」に戻っていた。
+var QUAL_SOON_DAYS = 60;        // 期限が近いと見なす日数
+var QUAL_SEP = String.fromCharCode(1);   // 氏名に絶対入らない区切り
+var QUAL_UNKNOWN = '?';         // 有効期限が読めなかった印
+// グローライズとGRミツマは1つの名簿（§3.9／§3.12）。資格も同じ束で見る。
+// ★資格マスタには会社が GRミツマ のままの行が残っている（統合前に取り込んだため）。
+//   ここで束ねておかないと、その人の資格がグローライズの画面から消える。
+var QUAL_SAME_ROSTER = ['グローライズ', 'GRミツマ'];
+
+function qualCompanyKey(company) {
+  var c = String(company == null ? '' : company).trim();
+  return QUAL_SAME_ROSTER.indexOf(c) >= 0 ? 'GR' : c;
+}
+function qualKey(company, name) {
+  return qualCompanyKey(company) + QUAL_SEP + String(name == null ? '' : name).trim();
+}
+
+// 'YYYY-MM-DD' として本当に存在する日か。'2026-02-31' を弾くために使う。
+function qualValidYmd(s) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
+  if (!m) return false;
+  var y = +m[1], mo = +m[2], d = +m[3];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return false;
+  var dt = new Date(Date.UTC(y, mo - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+}
+
+// 会社＋氏名 → 資格の配列。同じ資格が2件あれば「期限が一番先の物」を残す
+// （更新して取り直したときに古い方で切れ判定にならないように）。
+function qualIndexBy(quals) {
+  var idx = {};
+  (quals || []).forEach(function (q) {
+    var name = String((q && q.name) || '').trim();
+    var qual = String((q && q.qual) || '').trim();
+    if (!name || !qual) return;
+    var k = qualKey(q && q.company, name);
+    if (!idx[k]) idx[k] = [];
+    var list = idx[k];
+    var found = -1;
+    for (var i = 0; i < list.length; i++) { if (list[i].qual === qual) { found = i; break; } }
+    var raw = String((q && q.expires) || '');
+    var expires = (raw === '' || raw === QUAL_UNKNOWN || qualValidYmd(raw)) ? raw : QUAL_UNKNOWN;
+    var item = { qual: qual, kind: String((q && q.kind) || ''), expires: expires };
+    if (found < 0) { list.push(item); return; }
+    var old = list[found];
+    if (old.expires === '') return;                       // 期限なしが一番強い
+    if (item.expires === '') { list[found] = item; return; }
+    if (old.expires === QUAL_UNKNOWN) { list[found] = item; return; }   // 読めない物より読める物
+    if (item.expires === QUAL_UNKNOWN) return;
+    if (item.expires > old.expires) list[found] = item;
+  });
+  return idx;
+}
+
+// 'YYYY-MM-DD' どうしの差を日数で返す
+function qualDaysUntil(expires, todayYmd) {
+  if (!qualValidYmd(expires) || !qualValidYmd(todayYmd)) return null;
+  var a = Date.parse(expires + 'T00:00:00Z'), b = Date.parse(todayYmd + 'T00:00:00Z');
+  if (isNaN(a) || isNaN(b)) return null;
+  return Math.round((a - b) / 86400000);
+}
+
+// 'none'（期限なし）/ 'unknown'（読めない）/ 'ok' / 'soon' / 'expired'
+function qualStatus(expires, todayYmd) {
+  var e = String(expires == null ? '' : expires);
+  if (e === '') return 'none';
+  // ★読めない値を「期限なし」に落とさない。落とすと一生有効な資格に化ける。
+  if (!qualValidYmd(e)) return 'unknown';
+  var d = qualDaysUntil(e, todayYmd);
+  if (d === null) return 'unknown';
+  if (d < 0) return 'expired';
+  return d <= QUAL_SOON_DAYS ? 'soon' : 'ok';
+}
+
+// その人がその資格を「その日に使える状態で」持っているか。
+// ★expired と unknown は false。分からない物を有資格として現場に出さない。
+function qualHeldBy(idx, company, name, qualName, todayYmd) {
+  var list = (idx || {})[qualKey(company, name)] || [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].qual !== qualName) continue;
+    var st = qualStatus(list[i].expires, todayYmd);
+    if (st === 'none' || st === 'ok' || st === 'soon') return true;
+  }
+  return false;
+}
+
+// プルダウン用。roster は [{name, company}]。
+// ★その日に使える人が1人もいない資格は出さない（選んでも0人になるだけ）。
+function qualChoices(idx, roster, todayYmd) {
+  var count = {};
+  (roster || []).forEach(function (m) {
+    var list = (idx || {})[qualKey(m && m.company, m && m.name)] || [];
+    var seen = {};
+    list.forEach(function (q) {
+      var st = qualStatus(q.expires, todayYmd);
+      if (st !== 'none' && st !== 'ok' && st !== 'soon') return;
+      if (seen[q.qual]) return;
+      seen[q.qual] = 1;
+      count[q.qual] = (count[q.qual] || 0) + 1;
+    });
+  });
+  return Object.keys(count).sort(function (a, b) {
+    if (count[b] !== count[a]) return count[b] - count[a];
+    return a < b ? -1 : (a > b ? 1 : 0);
+  });
+}
+
+// 期限切れ・まもなく切れる・読めない資格を集める。roster は [{name, company}]。
+// 切れている順 → 読めない物、の順に並べる。
+function qualAlerts(idx, roster, todayYmd) {
+  var out = [];
+  (roster || []).forEach(function (m) {
+    var name = String((m && m.name) || '').trim();
+    ((idx || {})[qualKey(m && m.company, name)] || []).forEach(function (q) {
+      var st = qualStatus(q.expires, todayYmd);
+      if (st !== 'expired' && st !== 'soon' && st !== 'unknown') return;
+      out.push({
+        name: name, qual: q.qual, expires: q.expires, status: st,
+        days: st === 'unknown' ? null : qualDaysUntil(q.expires, todayYmd)
+      });
+    });
+  });
+  out.sort(function (a, b) {
+    if (a.days === null && b.days !== null) return 1;    // 読めない物は最後
+    if (b.days === null && a.days !== null) return -1;
+    if (a.days !== b.days) return a.days - b.days;
+    if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+    return a.qual < b.qual ? -1 : (a.qual > b.qual ? 1 : 0);
+  });
+  return out;
+}
+
+// ★画面側でも許す項目だけに削り直す（3枚目の歯止め）。
+//   GASとWorkerの2枚で既に落としているが、上流が壊れたときに
+//   免許番号が端末のlocalStorageへ焼き付くのを防ぐ。
+function qualSafe(list) {
+  return (list || []).map(function (q) {
+    return {
+      name: String((q && q.name) || ''), company: String((q && q.company) || ''),
+      qual: String((q && q.qual) || ''), kind: String((q && q.kind) || ''),
+      expires: String((q && q.expires) || '')
+    };
+  });
+}
+// ===== PHASE3-QUAL-RULE:END =====
+
 // ===== PHASE2-CONFLICT-RULE:BEGIN =====
 // 人員の重複判定（設計書 §1.1・2026-08-27 に実データ2,664行を数えて確定したルール）
 //
@@ -3204,6 +3383,8 @@ async function loadData(forceGas){
       else allGenbaMaster=json.genbaMaster.map(g=>({name:g,company:'共通'}));
     }
     if(json.jobsites)allJobsites=json.jobsites;
+    // ★資格。古いGAS応答／古いD1スナップショットには入っていないので、その時は空のまま
+    allQuals=qualSafe(Array.isArray(json.qualifications)?json.qualifications:[]);
     initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();
     updateLocationSuggestions();
     refreshVehicleSelect('s');
@@ -3278,8 +3459,15 @@ let calSelectedDate='';
 
 // ★2026-08-27 フェーズ2: 人員の重複の知らせ
 function todayYmd(){
-  const d=new Date();
-  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  // ★Codexレビュー[P2]（2026-08-28）: 端末の時計が日本以外に
+  //   なっていると「今日」が1日ずれる。資格の期限も重複バナーも
+  //   これを使うので、日本時間に固定する。
+  try{
+    return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  }catch(e){
+    const d=new Date();
+    return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  }
 }
 
 // 今日以降だけを出す。過ぎた日の重複は直しようがないので出しても意味がない
@@ -4358,6 +4546,7 @@ function renderAvailDay() {
   const d = searchFilterValue('avail-day');
   const box = document.getElementById('avail-day-result');
   if (!box) return;
+  updateQualSelect();
   if (!d) { box.innerHTML = ''; return; }
   const cn = companyNippos().filter(n => !n.isGhost && n.date === d);
   const state = {};   // 氏名 → busy / yasumi / souko
@@ -4367,7 +4556,17 @@ function renderAvailDay() {
     if (cur === 'busy') return;
     state[n.name] = n.yasumi ? 'yasumi' : (n.souko ? 'souko' : 'busy');
   });
-  const roster = getActiveShokunin();
+  // ★2026-08-28 フェーズ3: 資格で絞る。期限切れは「持っていない」扱い（qualHeldBy）。
+  //   絞るのは名簿の側。空き・休み・出勤の数え方そのものは変えない。
+  const wantQual = searchFilterValue('avail-qual');
+  const qidx = qualIndexBy(allQuals);
+  // ★Codexレビュー[P1]: 氏名だけでは足りない。奥田さんはグローライズとGRHDの
+  //   両方に実在するので、会社込みで引く。rosterMembers() が {name, company} を返す。
+  const rosterMembers = activeRosterMembers();
+  const rosterAll = rosterMembers.map(m => m.name);
+  const roster = wantQual
+    ? rosterMembers.filter(m => qualHeldBy(qidx, m.company, m.name, wantQual, d)).map(m => m.name)
+    : rosterAll;
   const free = roster.filter(name => !state[name]);
   const yasumi = roster.filter(name => state[name] === 'yasumi');
   const souko = roster.filter(name => state[name] === 'souko');
@@ -4375,8 +4574,13 @@ function renderAvailDay() {
   const chip = (names) => names.length
     ? names.map(n => '<span class="member-chip" style="pointer-events:none">' + esc(n) + '</span>').join('')
     : '<span style="color:#999;font-size:13px">いません</span>';
-  let html = '<div style="margin-top:12px">'
-    + '<div style="font-size:14px;font-weight:600;color:#1D9E75;margin-bottom:6px">空いている ' + free.length + ' 人</div>'
+  let html = '<div style="margin-top:12px">';
+  if (wantQual) {
+    html += '<div style="font-size:13px;color:#0C447C;background:#EAF2FB;border-radius:6px;padding:6px 10px;margin-bottom:8px">'
+      + '「' + esc(wantQual) + '」を持っている ' + roster.length + ' 人 の中で見ています'
+      + '<span style="color:#666">（有効期限が切れている人は外しています）</span></div>';
+  }
+  html += '<div style="font-size:14px;font-weight:600;color:#1D9E75;margin-bottom:6px">空いている ' + free.length + ' 人</div>'
     + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">' + chip(free) + '</div>'
     + '<div style="font-size:13px;color:#666;margin-bottom:4px">休み ' + yasumi.length + ' 人　倉庫 ' + souko.length + ' 人　出勤 ' + busy.length + ' 人</div>';
   const released = releasedByStatus(d);
@@ -4388,8 +4592,76 @@ function renderAvailDay() {
         + '<span style="font-size:11px;color:#666">（' + esc(r.status) + '：' + esc(r.loc) + '）</span></span>').join('')
       + '</div>';
   }
+  // ★資格の期限のお知らせ。切れている物ともうすぐ切れる物だけ出す
+  //   （毎日200件出る警告は誰も読まない＝フェーズ2で学んだこと）。
+  const alerts = qualAlerts(qidx, rosterMembers, todayYmd());
+  if (alerts.length) {
+    html += '<div style="font-size:14px;font-weight:600;color:#A32D2D;margin:12px 0 6px">'
+      + '資格の期限 ' + alerts.length + ' 件（切れた・まもなく切れる・読めない）</div>'
+      + '<div style="display:flex;flex-direction:column;gap:4px">'
+      + alerts.map(a => '<div style="font-size:12px;background:' + (a.status === 'expired' ? '#FBEAEA' : (a.status === 'unknown' ? '#EEE' : '#FFF6E5'))
+        + ';border-radius:6px;padding:5px 8px">'
+        + '<b>' + esc(a.name) + '</b>　' + esc(a.qual)
+        + '<span style="color:#666">　'
+        + (a.status === 'unknown'
+            ? '有効期限の欄が読めません（資格マスタを直してください）'
+            : esc(a.expires) + '　' + (a.status === 'expired'
+                ? ('切れています（' + Math.abs(a.days) + '日前）')
+                : ('あと' + a.days + '日')))
+        + '</span></div>').join('')
+      + '</div>';
+  }
   html += '</div>';
   box.innerHTML = html;
+}
+
+// 資格のプルダウンを、今の名簿に合わせて作り直す。
+// ★選んでいた資格が名簿から消えても、選択を勝手に変えない（画面が黙って別条件になるのを防ぐ）。
+function updateQualSelect() {
+  const sel = document.getElementById('avail-qual');
+  if (!sel) return;
+  const d = searchFilterValue('avail-day') || todayYmd();
+  const idx = qualIndexBy(allQuals);
+  const list = qualChoices(idx, activeRosterMembers(), d);
+  const cur = sel.value;
+  // ★Codexレビュー[P1]: 選んでいた資格が一覧から消えたとき、黙って
+  //   「絞り込みなし」へ戻してはいけない（全員表示に化けて、資格で選んだつもりの
+  //   人選が崩れる）。選択は残したまま「今は該当者なし」と見せる。
+  const opts = list.slice();
+  const missing = cur && opts.indexOf(cur) < 0;
+  const sig = opts.join(String.fromCharCode(1)) + String.fromCharCode(2) + (missing ? cur : '');
+  if (sel.dataset.sig === sig) return;   // 中身が同じなら作り直さない
+  sel.dataset.sig = sig;
+  sel.innerHTML = '<option value="">資格で絞らない</option>'
+    + (missing ? '<option value="' + esc(cur) + '">' + esc(cur) + '（この日に使える人はいません）</option>' : '')
+    + opts.map(q => '<option value="' + esc(q) + '">' + esc(q) + '</option>').join('');
+  if (cur) sel.value = cur;
+}
+
+// 空き確認で使う名簿を {name, company} で返す。
+// ★資格は会社込みで引く必要があるため（同姓同名が他社に実在する）。
+//   出す人の集合そのものは getActiveShokunin() と完全に同じにすること。
+function activeRosterMembers() {
+  const names = getActiveShokunin();
+  // ★Codexレビュー（2026-08-28）: 先に見つかった1件で会社を決めてはいけない。
+  //   奥田さんはグローライズとGRHDの両方に、川端さんはグローライズとラーテルに
+  //   実在する。職人マスタの並び順しだいで、グローライズの画面なのに GRHD の
+  //   奥田さんとして資格を引いてしまい、持っている資格が出なくなる。
+  //   **今見ている画面に属する会社を優先して選ぶ。**
+  const fitsScreen = (co) => {
+    if (currentCompany === '全社') return true;
+    return hasKyotenAxis(currentCompany) ? hasKyotenAxis(co) : co === currentCompany;
+  };
+  const byName = {};
+  (allMembers || []).forEach(m => {
+    const n = String((m && m.name) || '').trim();
+    if (!n) return;
+    const co = String((m && m.company) || '');
+    const cur = byName[n];
+    if (cur === undefined) { byName[n] = { company: co, fits: fitsScreen(co) }; return; }
+    if (!cur.fits && fitsScreen(co)) byName[n] = { company: co, fits: true };
+  });
+  return names.map(n => ({ name: n, company: (byName[String(n || '').trim()] || {}).company || '' }));
 }
 
 // ★要件8の後半。延期・中止にした現場の人は、予定表の上では埋まって見えるが

@@ -107,6 +107,21 @@ export function filterSnapshot(payload, company, kyoten) {
   const jobsites = payload.jobsites.filter(j =>
     j.genba && (!filter || allowedGenba.has(j.genba)));
 
+  // ★2026-08-28 資格。members と同じ考え方で会社ごとに絞る
+  //   （和信カインドの画面にグローライズの資格を出さない）。
+  //   古い取り込み（qualifications が無いスナップショット）でも落とさない。
+  // ★グローライズとGRミツマは1つの名簿なので、片方を指定されたら両方返す。
+  //   資格マスタには会社が GRミツマ のままの行が26件残っている（統合前に
+  //   取り込んだため）。単純な一致で絞ると、その人の資格が画面から消える。
+  //   日報(rows)側が「会社は一致・拠点は別軸」で絞っているのと揃えている。
+  const sameRoster = KYOTEN_COMPANIES.indexOf(company) >= 0;
+  const qualMatch = (c) => sameRoster
+    ? KYOTEN_COMPANIES.indexOf(String(c ?? '').trim()) >= 0
+    : String(c ?? '').trim() === company;
+  const qualifications = Array.isArray(payload.qualifications)
+    ? (filter ? payload.qualifications.filter(q => qualMatch(q.company)) : payload.qualifications)
+    : [];
+
   return {
     status: 'ok',
     compact: 1,
@@ -114,7 +129,8 @@ export function filterSnapshot(payload, company, kyoten) {
     rows,
     members,
     genbaMaster,
-    jobsites
+    jobsites,
+    qualifications
   };
 }
 

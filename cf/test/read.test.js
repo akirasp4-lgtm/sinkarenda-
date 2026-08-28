@@ -408,3 +408,49 @@ describe('filterSnapshot（Codexレビュー指摘）', () => {
     expect(filterSnapshot(old19, '', '関東支店').rows).toHaveLength(0);
   });
 });
+
+// ============================================================
+// 資格（2026-08-28 追加）
+// ============================================================
+describe('資格の会社ごとの絞り込み', () => {
+  const quals = [
+    { name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習', expires: '' },
+    { name: '誰か', company: '和信カインド', qual: 'フォークリフト', kind: '技能講習', expires: '' }
+  ];
+  it('会社を指定すると他社の資格は1件も混ざらない', () => {
+    const out = filterSnapshot({ headers: ['日付', '会社'], rows: [], members: [], genbaMaster: [], jobsites: [], qualifications: quals }, '和信カインド', '');
+    expect(out.qualifications).toEqual([quals[1]]);
+  });
+  it('全社なら全部返す', () => {
+    const out = filterSnapshot({ headers: ['日付', '会社'], rows: [], members: [], genbaMaster: [], jobsites: [], qualifications: quals }, '全社', '');
+    expect(out.qualifications).toEqual(quals);
+  });
+  it('★古いスナップショット（qualifications が無い）でも落ちない', () => {
+    const out = filterSnapshot({ headers: ['日付', '会社'], rows: [], members: [], genbaMaster: [], jobsites: [] }, 'グローライズ', '');
+    expect(out.qualifications).toEqual([]);
+  });
+});
+
+describe('資格：グローライズとGRミツマは1つの名簿', () => {
+  // ★資格マスタには統合前に取り込んだ 会社=GRミツマ の行が26件残っている。
+  //   単純一致で絞ると、江頭さん・繁田さんの資格がグローライズの画面から消える。
+  const quals = [
+    { name: '江頭', company: 'GRミツマ', qual: '玉掛け', kind: '技能講習', expires: '' },
+    { name: '真柄', company: 'グローライズ', qual: '高所作業車', kind: '技能講習', expires: '' },
+    { name: '誰か', company: '和信カインド', qual: 'フォークリフト', kind: '技能講習', expires: '' }
+  ];
+  const pay = { headers: ['日付', '会社'], rows: [], members: [], genbaMaster: [], jobsites: [], qualifications: quals };
+
+  it('★グローライズを指定してもGRミツマの人の資格が消えない', () => {
+    const out = filterSnapshot(pay, 'グローライズ', '');
+    expect(out.qualifications.map(q => q.name).sort()).toEqual(['江頭', '真柄']);
+  });
+  it('★GRミツマを指定してもグローライズの人の資格が出る（同じ名簿なので）', () => {
+    const out = filterSnapshot(pay, 'GRミツマ', '');
+    expect(out.qualifications.map(q => q.name).sort()).toEqual(['江頭', '真柄']);
+  });
+  it('★和信カインドにはグローライズ系が1件も混ざらない', () => {
+    const out = filterSnapshot(pay, '和信カインド', '');
+    expect(out.qualifications.map(q => q.name)).toEqual(['誰か']);
+  });
+});
