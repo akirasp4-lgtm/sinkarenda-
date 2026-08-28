@@ -29,9 +29,17 @@ function makeSheet(data) {
     getName() { return this._name; },
     getDataRange() { const d = this._data; return { getValues: () => d.map(r => r.slice()) }; },
     getLastRow() { return this._data.length; },
+    // ★行削除（職人マスタの二重登録を消すのに使う）。1始まり
+    deleteRow(row) { this._data.splice(row - 1, 1); },
     getRange(row, col, numRows, numCols) {
       const self = this;
       return {
+        // ★セル1つだけ書く（変える行だけ触るために使う）
+        setValue(v) {
+          const r = row - 1;
+          while (self._data.length <= r) self._data.push([]);
+          self._data[r][col - 1] = v;
+        },
         setValues(vals) {
           for (let i = 0; i < vals.length; i++) {
             const r = row - 1 + i;
@@ -340,5 +348,164 @@ describe('元請マスタの重複を1行にまとめる', () => {
     const rep = c.g.mergeMitsumaIntoGrowise(true);
     expect(rep.中止理由).toBe('');
     expect(c.sheets['元請マスタ']._data.slice(1).filter(r => r[0]).length).toBe(2);
+  });
+});
+
+// ============================================================
+// ★Codexレビュー（2026-08-28）で出た指摘の追試
+// ============================================================
+describe('Codexレビュー[P1]#3 必須列が欠けていたら1文字も書かずに中止する', () => {
+  const H_NO_KYOTEN = H21.filter(h => h !== '拠点');
+  const H_NO_GENBA = H21.filter(h => h !== '元請名');
+
+  it('★拠点列が無ければ中止する（会社だけ書き換えると関東支店が消える）', () => {
+    const c = build({ '日報データ': Object.assign(makeSheet([H_NO_KYOTEN,
+      H_NO_KYOTEN.map(h => h === '会社' ? 'GRミツマ' : h === '氏名' ? '高田（関東）' : '')
+    ]), { _name: '日報データ' }) });
+    const before = JSON.stringify(c.sheets['日報データ']._data);
+    const rep = c.g.mergeMitsumaIntoGrowise(true);
+    expect(rep.中止理由).toContain('拠点');
+    expect(JSON.stringify(c.sheets['日報データ']._data)).toBe(before);
+  });
+
+  it('★元請名列が無ければ中止する', () => {
+    const c = build({ '日報データ': Object.assign(makeSheet([H_NO_GENBA,
+      H_NO_GENBA.map(h => h === '会社' ? 'GRミツマ' : h === '氏名' ? '高田（関東）' : '')
+    ]), { _name: '日報データ' }) });
+    const before = JSON.stringify(c.sheets['日報データ']._data);
+    const rep = c.g.mergeMitsumaIntoGrowise(true);
+    expect(rep.中止理由).toContain('元請名');
+    expect(JSON.stringify(c.sheets['日報データ']._data)).toBe(before);
+  });
+});
+
+describe('Codexレビュー[P2]#8 表に無い元請名は1文字も変えない', () => {
+  it('★前後の空白すら削らない（勝手に整形しない）', () => {
+    const c = build({ '日報データ': Object.assign(makeSheet([H21,
+      (function () { const r = row('高田（関東）', 'GRミツマ', '関東支店'); r[H21.indexOf('元請名')] = ' きんでん東 '; return r; })()
+    ]), { _name: '日報データ' }) });
+    c.g.mergeMitsumaIntoGrowise(true);
+    expect(col(c.sheets['日報データ'], '元請名')[0]).toBe(' きんでん東 ');
+  });
+});
+
+describe('Codexレビュー[P2]#4 dry-runに元請名の変更件数が出る', () => {
+  it('★数えているのに報告していなかった', () => {
+    const c = build({ '日報データ': Object.assign(makeSheet([H21,
+      (function () { const r = row('高田（関東）', 'GRミツマ', '関東支店'); r[H21.indexOf('元請名')] = 'GRミツマ自社'; return r; })()
+    ]), { _name: '日報データ' }) });
+    const rep = c.g.mergeMitsumaIntoGrowise(false);
+    expect(rep.シート.find(s => s.sheet === '日報データ').元請名の変更).toBe(1);
+  });
+});
+
+describe('Codexレビュー[P1]#1 会社列は最後に書く（途中で落ちてもやり直せる）', () => {
+  it('★書き込みの順番が 元請名→拠点→会社 になっている', () => {
+    // 会社列を先に書くと、途中で落ちたとき再実行しても
+    // もう GRミツマ ではないので拠点・元請名が直らない。
+    // 会社を最後にすれば「GRミツマのまま＝まだ終わっていない」が目印になる。
+    const c = build();
+    const plan = c.g.planMitsumaRows_(c.sheets['日報データ']);
+    const cols = plan._write.map(w => w.col);
+    const H = H21;
+    const iGenba = H.indexOf('元請名') + 1, iKyoten = H.indexOf('拠点') + 1, iCo = H.indexOf('会社') + 1;
+    expect(cols[cols.length - 1], '会社列が最後に書かれていない').toBe(iCo);
+    cols.forEach(c2 => expect([iGenba, iKyoten, iCo]).toContain(c2));
+  });
+});
+
+describe('Codexレビュー[P2]#6 変更0件なら1回も書かない', () => {
+  it('★2回目は書き込みが発生しない', () => {
+    const c = build();
+    c.g.mergeMitsumaIntoGrowise(true);
+    let writes = 0;
+    ['日報データ', 'アーカイブ', '職人マスタ', '元請マスタ'].forEach(n => {
+      const sh = c.sheets[n], orig = sh.getRange.bind(sh);
+      sh.getRange = function () {
+        const r = orig.apply(sh, arguments);
+        const sv = r.setValues, cc = r.clearContent;
+        r.setValues = function (v) { writes++; return sv.call(r, v); };
+        r.clearContent = function () { writes++; return cc.call(r); };
+        return r;
+      };
+    });
+    c.g.mergeMitsumaIntoGrowise(true);
+    expect(writes, '2回目なのに書き込みが走っている').toBe(0);
+  });
+});
+
+describe('Codexレビュー[P1]#2 他社の行は1セルも書かない', () => {
+  // 利用者指示「和信、ラーテル、GRHDは触らないで下さい」。
+  // 値が同じでも、getValues()→setValues() で書き戻すと
+  //   ・数式があれば固定値に変わる
+  //   ・書式や行の並びが動く
+  // ので「値が同じ」だけでは不十分。★書いたセルの範囲そのものを見張る。
+  function recording(c) {
+    const touched = {};   // シート名 → [ {row, col, numRows, numCols, kind} ]
+    Object.keys(c.sheets).forEach(n => {
+      const sh = c.sheets[n], orig = sh.getRange.bind(sh);
+      sh.getRange = function (row, col, numRows, numCols) {
+        const r = orig(row, col, numRows, numCols);
+        const sv = r.setValues, cc = r.clearContent;
+        r.setValues = function (v) {
+          (touched[n] = touched[n] || []).push({ row, col, numRows: v.length, numCols: (v[0] || []).length, kind: 'set' });
+          return sv.call(r, v);
+        };
+        r.clearContent = function () {
+          (touched[n] = touched[n] || []).push({ row, col, numRows, numCols, kind: 'clear' });
+          return cc.call(r);
+        };
+        return r;
+      };
+    });
+    return touched;
+  }
+  // 書かれた行番号（1始まり）の集合
+  const writtenRows = (list) => {
+    const set = new Set();
+    (list || []).forEach(w => { for (let i = 0; i < w.numRows; i++) set.add(w.row + i); });
+    return set;
+  };
+
+  it('★日報データで書くのは GRミツマ の行だけ', () => {
+    const c = build();
+    const t = recording(c);
+    c.g.mergeMitsumaIntoGrowise(true);
+    // 偽データの日報: 2行目=中島(グローライズ) 3,4行目=GRミツマ 5=和信 6=ラーテル 7=GRHD
+    const rows = writtenRows(t['日報データ']);
+    expect([...rows].sort((a, b) => a - b), '他社の行まで書いている').toEqual([3, 4]);
+  });
+
+  it('★アーカイブでも GRミツマ の行だけ', () => {
+    const c = build();
+    const t = recording(c);
+    c.g.mergeMitsumaIntoGrowise(true);
+    // 偽アーカイブ: 2行目=内村（関東）(GRミツマ) 3行目=東(グローライズ)
+    expect([...writtenRows(t['アーカイブ'])].sort((a, b) => a - b)).toEqual([2]);
+  });
+
+  it('★職人マスタで和信カインド・GRHD の行を書かない', () => {
+    const c = build();
+    const before = c.sheets['職人マスタ']._data.map(r => r.slice());
+    const t = recording(c);
+    c.g.mergeMitsumaIntoGrowise(true);
+    const rows = writtenRows(t['職人マスタ']);
+    // 偽マスタ: 2=中島(グ) 3=江頭(グ) 4=江頭(ミ) 5=繁田(グ) 6=繁田(ミ)
+    //           7=高田（関東）(ミ) 8=元(和信) 9=奥田(GRHD)
+    expect(rows.has(8), '和信カインドの行を書いている').toBe(false);
+    expect(rows.has(9), 'GRHDの行を書いている').toBe(false);
+    // 値としても元のまま
+    const after = c.sheets['職人マスタ']._data;
+    expect(after.find(r => r[0] === '元')).toEqual(before.find(r => r[0] === '元'));
+    expect(after.find(r => r[0] === '奥田')).toEqual(before.find(r => r[0] === '奥田'));
+  });
+
+  it('★元請マスタで他社の行を書かない', () => {
+    const c = build();
+    const t = recording(c);
+    c.g.mergeMitsumaIntoGrowise(true);
+    const rows = writtenRows(t['元請マスタ']);
+    // 偽元請マスタ: 2=きんでん西(グ) 3=きんでん東(ミ) 4=ラーテル(ラーテル)
+    expect(rows.has(4), 'ラーテルの行を書いている').toBe(false);
   });
 });
