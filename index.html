@@ -15,6 +15,11 @@
   var c = new URLSearchParams(location.search).get('c');
   // URLパラメータが無ければlocalStorageから復元（ホーム画面追加時にc=が消えるケース対策）
   if (!c) { try { c = localStorage.getItem('genba-c-param') || ''; } catch(e) {} }
+  // ★2026-08-28 GRミツマはグローライズ関東支店へ統合済み。
+  //   現場の人がブックマークした ?c=GRミツマ を開いても、タイトルだけ
+  //   古い会社名が残らないようにここで読み替える（中身は本文側で
+  //   グローライズ／関東支店として開く）。
+  if (c === 'GRミツマ') c = 'グローライズ';
   if (c && c.indexOf(',') < 0) {
     var t = c + '予定表';
     document.title = t;
