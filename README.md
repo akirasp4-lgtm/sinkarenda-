@@ -94,7 +94,7 @@ git push origin main
 | 和信カインド | `https://akirasp4-lgtm.github.io/sinkarenda-/index.html?c=和信カインド` |
 | ラーテル | `https://akirasp4-lgtm.github.io/sinkarenda-/index.html?c=ラーテル` |
 | GRHD | `https://akirasp4-lgtm.github.io/sinkarenda-/index.html?c=GRHD` |
-| GRミツマ | `https://akirasp4-lgtm.github.io/sinkarenda-/index.html?c=GRミツマ` |
+| ~~GRミツマ~~ | 2026-08-28 に**グローライズ関東支店へ統合済み**。上のグローライズのURLを開き、画面上の「関東支店」を押す |
 | 管理画面 | `https://akirasp4-lgtm.github.io/sinkarenda-/admin.html`（PIN: 8800） |
 | 社長画面 | `https://akirasp4-lgtm.github.io/sinkarenda-/president.html`（PIN: 1203） |
 | リンク集 | `https://akirasp4-lgtm.github.io/sinkarenda-/links.html` |
@@ -113,3 +113,12 @@ git push origin main
 - **このリポジトリは Public** です。本物の機密情報（API キーなど）は git に含めないこと
 - 確認用の PIN（8800 / 1203）は HTML 内にハードコードされており、すでに事実上公開状態。**機密性が必要な場合は別途認証の仕組みを足す**こと
 - スプレッドシートと GAS は Google アカウント認可で保護されている。これが事実上のセキュリティ境界
+
+---
+
+## 関連プロジェクト
+- **社内連携（中核）** → [[ラインボット/引継ぎメモ]]（社長予定の併記・warehouse_today API連携）
+- **同じ業務PWA一族** → [[自社用/経費生産/README]]、現場教育アプリ（GitHub Pages＋GAS＋localStorage構成）
+- **将来連携** → [[自社用/評価制度/README]]（日報データを無断欠勤判定に活用予定）
+- **6/19デモの2本目候補** → [[GRHUB/19日デモ_台本と計画]]（日報＝社長構想のMVP②）
+- 全体地図 → [[00_index]]

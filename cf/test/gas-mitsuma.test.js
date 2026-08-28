@@ -509,3 +509,66 @@ describe('Codexレビュー[P1]#2 他社の行は1セルも書かない', () => 
     expect(rows.has(4), 'ラーテルの行を書いている').toBe(false);
   });
 });
+
+describe('名前が変わる行の「読み」は持ち込まない（2026-08-28 実機で発見）', () => {
+  it('★GRミツマ自社→グローライズ自社 のとき、読みは寄せ先のものを残す', () => {
+    // 「ぐらんみつまじしゃ」は "GRミツマ自社" という古い名前の読み。
+    // 名前が変わるのだから、その読みを新しい名前へ持ち込んではいけない。
+    const c = build({
+      '元請マスタ': Object.assign(makeSheet([
+        ['元請名', '会社', '読み'],
+        ['グローライズ自社', 'グローライズ', 'ぐろーらいずじしゃ'],
+        ['GRミツマ自社', 'GRミツマ', 'ぐらんみつまじしゃ']
+      ]), { _name: '元請マスタ' })
+    });
+    const rep = c.g.mergeMitsumaIntoGrowise(true);
+    expect(rep.中止理由).toBe('');
+    const rows = c.sheets['元請マスタ']._data.slice(1).filter(r => r[0]);
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toEqual(['グローライズ自社', 'グローライズ', 'ぐろーらいずじしゃ']);
+  });
+
+  it('★寄せ先の読みが空なら、名前が変わっていても入れない（古い名前の読みだから）', () => {
+    const c = build({
+      '元請マスタ': Object.assign(makeSheet([
+        ['元請名', '会社', '読み'],
+        ['グローライズ自社', 'グローライズ', ''],
+        ['GRミツマ自社', 'GRミツマ', 'ぐらんみつまじしゃ']
+      ]), { _name: '元請マスタ' })
+    });
+    c.g.mergeMitsumaIntoGrowise(true);
+    const rows = c.sheets['元請マスタ']._data.slice(1).filter(r => r[0]);
+    expect(rows.length).toBe(1);
+    expect(rows[0][2]).toBe('');
+  });
+
+  it('名前が変わらない行の読みは今までどおり寄せる', () => {
+    const c = build({
+      '元請マスタ': Object.assign(makeSheet([
+        ['元請名', '会社', '読み'],
+        ['児玉通信', 'グローライズ', ''],
+        ['児玉通信', 'GRミツマ', 'こだまつうしん']
+      ]), { _name: '元請マスタ' })
+    });
+    c.g.mergeMitsumaIntoGrowise(true);
+    const rows = c.sheets['元請マスタ']._data.slice(1).filter(r => r[0]);
+    expect(rows[0][2]).toBe('こだまつうしん');
+  });
+});
+
+describe('利用者が決めた読み（2026-08-28）', () => {
+  it('★児玉通信は「こだまつうしん」', () => {
+    const c = build({
+      '元請マスタ': Object.assign(makeSheet([
+        ['元請名', '会社', '読み'],
+        ['児玉通信', 'グローライズ', 'こたまつうしん'],
+        ['児玉通信', 'GRミツマ', 'こだまつうしん']
+      ]), { _name: '元請マスタ' })
+    });
+    const rep = c.g.mergeMitsumaIntoGrowise(true);
+    expect(rep.中止理由).toBe('');
+    const rows = c.sheets['元請マスタ']._data.slice(1).filter(r => r[0]);
+    expect(rows.length).toBe(1);
+    expect(rows[0][2]).toBe('こだまつうしん');
+  });
+});

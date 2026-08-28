@@ -4307,7 +4307,10 @@ const GENBA_NAME_MERGE = { 'GRミツマ自社': 'グローライズ自社' };
 // ★読みが食い違うときの正解（人が決めたものだけを載せる。推測しない）。
 //   「きんでん東」は グローライズ側「きんでんとう」、GRミツマ側「きんでんひがし」で食い違っていた。
 //   利用者確認（2026-08-28）: 「きんでんひがし」
-const GENBA_YOMI_DECIDED = { 'きんでん東': 'きんでんひがし' };
+const GENBA_YOMI_DECIDED = {
+  'きんでん東': 'きんでんひがし',   // 利用者確認 2026-08-28
+  '児玉通信': 'こだまつうしん'    // 利用者確認 2026-08-28
+};
 
 // ★Codexレビュー[P2]#8: 表に無い名前は1文字も変えない。
 //   以前は trim() した値を返していたので、前後の空白を勝手に削っていた。
@@ -4519,7 +4522,10 @@ function mergeMitsumaIntoGrowise(apply) {
             continue;
           }
           // グローライズ側に同じ元請がある → 読みを寄せて、GRミツマの行を消す
-          if (gYomi >= 0) {
+          // ★2026-08-28 実機で発見: 名前が変わる行（GRミツマ自社→グローライズ自社）の
+          //   読みは「古い名前の読み」（ぐらんみつまじしゃ）なので、新しい名前へ持ち込まない。
+          const renamed = mergedGenbaName_(rawName) !== rawName;
+          if (gYomi >= 0 && !renamed) {
             const a = String(gData[target][gYomi] == null ? '' : gData[target][gYomi]).trim();
             const b = String(gData[i][gYomi] == null ? '' : gData[i][gYomi]).trim();
             if (!a && b) { gCellWrites.push({ row: target + 1, col: gYomi + 1, value: b }); gData[target][gYomi] = b; }
@@ -4593,3 +4599,10 @@ function mergeMitsumaIntoGrowise(apply) {
 }
 
 function mergeMitsumaIntoGrowise_APPLY() { return mergeMitsumaIntoGrowise(true); }
+
+// ==============================================================
+// ★GRミツマ → グローライズ関東支店 の統合は 2026-08-28 に実行済み。
+//   実行用の一時メニュー（GR保守）は片付けた。上の mergeMitsumaIntoGrowise は
+//   何もすることが無ければ1文字も書かずに終わる（何もしていない: true）ので、
+//   記録として残してある。二度目を実行しても被害は出ない。
+// ==============================================================
