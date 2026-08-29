@@ -460,3 +460,160 @@ describe('人員不足 — いつもより人が少ない現場', () => {
     expect(u[k]).toEqual({ usual: 4, days: 5 });
   });
 });
+
+
+// ============================================================
+// 人員不足 — Codexレビューが「見張れていない」と指摘した穴（2026-08-29）
+// 指摘された9項目をここで固定する。
+// ============================================================
+
+// 会社・夜勤・作業区分を変えられる履歴ヘルパー
+function hist(genba, loc, days, o = {}) {
+  const out = [];
+  days.forEach(([ymd, n]) => {
+    for (let k = 0; k < n; k++) {
+      out.push(row(Object.assign({
+        作業日: ymd, 元請名: genba, 現場名: loc,
+        氏名: (o.氏名接頭 || '人') + k, 役割: k === 0 ? '代表' : ''
+      }, o.row || {})));
+    }
+  });
+  return out;
+}
+const P5 = [['2026-08-01', 4], ['2026-08-02', 4], ['2026-08-03', 4],
+            ['2026-08-04', 4], ['2026-08-05', 4]];
+
+describe('人員不足 — レビュー指摘の穴を塞ぐ', () => {
+
+  it('★判定日より後の予定を「いつも」に入れない（毎朝は翌日を見るので未来が必ず存在する）', () => {
+    const rows = hist('きんでん西', '新規現場',
+      [['2026-08-01', 4], ['2026-08-02', 4], ['2026-08-03', 4], ['2026-08-04', 4],
+       [D, 1], ['2026-09-05', 4]]);
+    expect(buildAlerts(payload(rows), opt).shortStaff).toEqual([]);
+  });
+
+  it('★未来に大人数の予定があっても「いつも」を押し上げない', () => {
+    const rows = hist('きんでん西', 'C現場', P5.concat([[D, 3], ['2026-09-10', 20]]));
+    expect(buildAlerts(payload(rows), opt).shortStaff).toEqual([]);
+  });
+
+  it('★全社で見るとき、別会社の同じ元請・現場名を合算しない', () => {
+    const rows = hist('きんでん西', '同名現場', P5.map(([y]) => [y, 10]),
+                      { row: { 会社: '和信カインド' }, 氏名接頭: '和' })
+      .concat(hist('きんでん西', '同名現場',
+        [['2026-08-01', 2], ['2026-08-02', 2], ['2026-08-03', 2],
+         ['2026-08-04', 2], ['2026-08-05', 2], [D, 2]], { 氏名接頭: 'グ' }));
+    const a = buildAlerts(payload(rows), { ...opt, company: '全社' });
+    expect(a.shortStaff).toEqual([]);
+  });
+
+  it('★グローライズとGRミツマは1つの現場として合算する（統合済みのため）', () => {
+    const rows = hist('きんでん東', '関東現場',
+      [['2026-08-01', 2], ['2026-08-02', 2], ['2026-08-03', 2], ['2026-08-04', 2]],
+      { row: { 会社: 'GRミツマ' }, 氏名接頭: 'ミ' })
+      .concat(hist('きんでん東', '関東現場', [['2026-08-05', 2]], { 氏名接頭: 'グ' }));
+    const recs = toRecords(payload(rows)).filter(r => r.date < D);
+    const u = usualHeadcount(recs);
+    expect(Object.keys(u)).toHaveLength(1);
+    expect(u[Object.keys(u)[0]]).toEqual({ usual: 2, days: 5 });
+  });
+
+  it('★昼勤と夜勤を別々に数える（重複判定が昔から別枠なのに合算すると誤報）', () => {
+    const rows = hist('きんでん西', '夜あり現場', P5)
+      .concat(hist('きんでん西', '夜あり現場', P5, { row: { 夜勤: '夜勤' }, 氏名接頭: '夜' }))
+      .concat(hist('きんでん西', '夜あり現場', [[D, 4]]));
+    expect(buildAlerts(payload(rows), opt).shortStaff).toEqual([]);
+  });
+
+  it('夜勤側だけ人が減っていれば夜勤として知らせる', () => {
+    const rows = hist('きんでん西', '夜あり現場', P5)
+      .concat(hist('きんでん西', '夜あり現場', P5, { row: { 夜勤: '夜勤' }, 氏名接頭: '夜' }))
+      .concat(hist('きんでん西', '夜あり現場', [[D, 4]]))
+      .concat(hist('きんでん西', '夜あり現場', [[D, 1]], { row: { 夜勤: '夜勤' }, 氏名接頭: '夜' }));
+    const a = buildAlerts(payload(rows), opt);
+    expect(a.shortStaff).toHaveLength(1);
+    expect(a.shortStaff[0]).toMatchObject({ yakin: true, usual: 4, count: 1 });
+    expect(formatAlertsText(a)).toContain('（夜勤）');
+  });
+
+  it('★過去側でも 予定・休み・倉庫 を数えない', () => {
+    const rows = hist('きんでん西', 'D現場', P5)
+      .concat(hist('きんでん西', 'D現場', P5, { row: { 夜勤: '予定' }, 氏名接頭: 'よ' }))
+      .concat(hist('きんでん西', 'D現場', P5, { row: { 夜勤: '休み' }, 氏名接頭: 'や' }))
+      .concat(hist('きんでん西', 'D現場', P5, { row: { 夜勤: '倉庫' }, 氏名接頭: 'そ' }));
+    const recs = toRecords(payload(rows)).filter(r => r.date < D);
+    const u = usualHeadcount(recs);
+    expect(u[Object.keys(u)[0]]).toEqual({ usual: 4, days: 5 });
+  });
+
+  it('★作業区分が「休み」でモード列が空の行も数えない（旧データにある）', () => {
+    // ★わざと壊して確認したら、前のテストは「休み」を数えても数えなくても
+    //   結果が同じで、この除外を全く見張れていなかった（2026-08-29）。
+    //   出るのは1人だけ・残り3人は作業区分「休み」。
+    //   休みを数えてしまうと4人＝平常に見えて、鳴るべき日が鳴らなくなる。
+    const rows = hist('きんでん西', 'E現場', P5)
+      .concat(hist('きんでん西', 'E現場', [[D, 1]]))
+      .concat(hist('きんでん西', 'E現場', [[D, 3]],
+                   { row: { 作業区分: '休み' }, 氏名接頭: 'や' }));
+    const a = buildAlerts(payload(rows), opt);
+    expect(a.shortStaff).toHaveLength(1);
+    expect(a.shortStaff[0]).toMatchObject({ usual: 4, count: 1 });
+  });
+
+  it('作業区分が「休み」の人しか居ない日は、現場そのものが立たない', () => {
+    const rows = hist('きんでん西', 'E2現場', P5)
+      .concat(hist('きんでん西', 'E2現場', [[D, 4]], { row: { 作業区分: '休み' } }));
+    expect(buildAlerts(payload(rows), opt).shortStaff).toEqual([]);
+  });
+
+  it('★現場名が「事務所」の行は人員不足の対象外（実データで464行が作業区分その他）', () => {
+    const rows = hist('グローライズ自社', '事務所',
+      P5.map(([y]) => [y, 9]).concat([[D, 3]]), { row: { 作業区分: 'その他' } });
+    expect(buildAlerts(payload(rows), opt).shortStaff).toEqual([]);
+  });
+
+  it('「倉庫材料準備」のような本物の作業は外さない（部分一致で消さない）', () => {
+    const rows = hist('グローライズ自社', '倉庫材料準備',
+      P5.concat([[D, 1]]), { row: { 作業区分: 'その他' } });
+    expect(buildAlerts(payload(rows), opt).shortStaff).toHaveLength(1);
+  });
+
+  it('★ちょうど60%は鳴らない（境界）', () => {
+    const five = [['2026-08-01', 5], ['2026-08-02', 5], ['2026-08-03', 5],
+                  ['2026-08-04', 5], ['2026-08-05', 5]];
+    expect(buildAlerts(payload(hist('きんでん西', 'F現場', five.concat([[D, 3]]))), opt)
+      .shortStaff).toEqual([]);
+    expect(buildAlerts(payload(hist('きんでん西', 'F現場', five.concat([[D, 2]]))), opt)
+      .shortStaff).toHaveLength(1);
+  });
+
+  it('実績が偶数日のときの中央値（真ん中2つの平均）', () => {
+    const six = [['2026-08-01', 2], ['2026-08-02', 2], ['2026-08-03', 4],
+                 ['2026-08-04', 4], ['2026-08-05', 6], ['2026-08-06', 6]];
+    const recs = toRecords(payload(hist('きんでん西', 'G現場', six))).filter(r => r.date < D);
+    const u = usualHeadcount(recs);
+    expect(u[Object.keys(u)[0]]).toEqual({ usual: 4, days: 6 });
+  });
+
+  it('★11件以上でも見出しの件数と本文が食い違わない（ほかN件を出す）', () => {
+    let rows = [];
+    for (let i = 0; i < 12; i++) {
+      rows = rows.concat(hist('きんでん西', '現場' + i, P5.concat([[D, 1]]),
+                              { 氏名接頭: 'p' + i + '_' }));
+    }
+    const a = buildAlerts(payload(rows), opt);
+    expect(a.shortStaff).toHaveLength(12);
+    const t = formatAlertsText(a);
+    expect(t).toContain('いつもより人が少ない現場 12件');
+    expect(t).toContain('・ほか 2件');
+  });
+
+  it('足りない人数が多い順に並ぶ（10件で切るとき何が落ちるかを決める）', () => {
+    const rows = hist('きんでん西', '軽い現場', P5.concat([[D, 2]]))
+      .concat(hist('きんでん西', '重い現場',
+        [['2026-08-01', 8], ['2026-08-02', 8], ['2026-08-03', 8],
+         ['2026-08-04', 8], ['2026-08-05', 8], [D, 1]], { 氏名接頭: 'h' }));
+    const a = buildAlerts(payload(rows), opt);
+    expect(a.shortStaff.map(s => s.loc)).toEqual(['重い現場', '軽い現場']);
+  });
+});

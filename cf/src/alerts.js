@@ -98,6 +98,10 @@ const MOVE_KYOTEN = ['本社', '関東支店'];
 const SHORT_MIN_DAYS = 5;    // これ未満の実績しかない現場は判定しない
 const SHORT_RATIO = 0.6;     // いつもの何割を下回ったら
 const SHORT_MIN_GAP = 2;     // かつ何人以上少なかったら
+// ★Codexレビュー[P2]（2026-08-29）: 全期間の中央値だと現場の工程変化に追従しない
+//   （着工期10人・終盤3人の現場で、終盤の3人が正常でも古い10人に引かれて鳴り続ける）。
+//   判定日より前の直近この日数だけを見る。値は未来日を除いたバックテストで決めた。
+const SHORT_WINDOW_DAYS = 90;
 export function qualValidYmd(s) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
   if (!m) return false;
@@ -180,28 +184,54 @@ export function activeRoster(members, company) {
 
 // ---- 本体 --------------------------------------------------------------
 // date … 見る日（ふつうは「明日」）。today … 実行日（資格の期限の基準）。
+// 現場として数えない作業区分。★「休み」を入れているのは、
+//   夜勤列が空のまま 作業区分='休み' の行が実在するため（画面の作業区分一覧に「休み」がある）。
+//   Codexレビュー[P2]（2026-08-29）の指摘。
+const NOT_SITE_WORKTYPE = ['事務所', '倉庫作業', '移動', '休み'];
+
 // その行を「現場の稼働」として数えるか。★当日の集計と過去の集計で必ず同じ条件を使う。
 //   ここがズレると「いつも」と「その日」を違う物差しで比べることになり、誤報が出る。
+// 現場名そのものが事務所のときも外す。★実データで発見（2026-08-29）:
+//   現場名「事務所」の行は464行が 作業区分「その他」で入っており、
+//   作業区分だけで判定すると現場として数えてしまう。
+//   バックテストで通知15件中5件が「事務所 いつも9人→4人」の誤報だった。
+//   事務所に何人居るかは人員不足ではない。**完全一致でだけ外す**
+//   （「倉庫材料準備」のような本物の作業を巻き込まないため部分一致にしない）。
+const NOT_SITE_LOC = ['事務所'];
+
 function isSiteWork(r) {
   if (!r || !r.loc || !r.name) return false;
   if (r.yotei || r.yasumi) return false;
   if (r.souko) return false;
-  return ['事務所', '倉庫作業', '移動'].indexOf(r.workType) < 0;
+  if (NOT_SITE_LOC.indexOf(r.loc) >= 0) return false;
+  return NOT_SITE_WORKTYPE.indexOf(r.workType) < 0;
+}
+
+// 人員不足で使う現場の鍵。★Codexレビュー[P1]（2026-08-29）:
+//   元請名+現場名 だけだと、company=全社 のとき別会社の同名現場が合算される
+//   （他社の人数で「いつも」が水増しされ、平常なのに不足と誤報する）。
+//   **会社（名簿の単位）を鍵に入れる。** グローライズとGRミツマだけは
+//   rosterKey が同じ 'GR' になるので、意図どおり1つに統合される。
+//   ★昼勤と夜勤も分ける。重複判定は昔から別枠にしているのに、
+//   ここだけ合算すると「昼4+夜4=いつも8人」→「昼だけの日は4人＝不足」と誤報する。
+function shortKey(r) {
+  return rosterKey(r.company) + SEP + r.genba + SEP + r.loc + SEP + (r.yakin ? '夜' : '昼');
 }
 
 // 現場ごとの「いつもの人数」＝日ごとの実人数の中央値。
 //   平均でなく中央値にするのは、1日だけ大人数を入れた日に引っ張られないため。
-export function usualHeadcount(recs, { minDays = SHORT_MIN_DAYS } = {}) {
-  const byDay = {};                       // 現場+SEP+日 -> Set(氏名)
+export function usualHeadcount(recs, { minDays = SHORT_MIN_DAYS, since = '' } = {}) {
+  const byDay = {};                       // 現場鍵+SEP+日 -> Set(氏名)
   recs.forEach(r => {
     if (!isSiteWork(r)) return;
-    const k = r.genba + SEP + r.loc + SEP + r.date;
+    const k = shortKey(r) + SEP + r.date;
     (byDay[k] || (byDay[k] = new Set())).add(r.name);
   });
   const counts = {};                      // 現場 -> [人数,...]
   Object.keys(byDay).forEach(k => {
     const idx = k.lastIndexOf(SEP);
-    const site = k.slice(0, idx);
+    const site = k.slice(0, idx), ymd = k.slice(idx + SEP.length);
+    if (since && ymd < since) return;     // 窓の外は見ない
     (counts[site] || (counts[site] = [])).push(byDay[k].size);
   });
   const out = {};
@@ -247,16 +277,30 @@ export function buildAlerts(payload, { date, today, company } = {}) {
   // ★テストが見つけた不具合（2026-08-29）: 判定する日自身を「いつも」の計算に入れていた。
   //   ①その日が少ないと基準まで一緒に下がって、鳴るべき日が鳴らない
   //   ②実績4日しかない現場が、その日を足して5日になり判定対象になってしまう
-  //   → その日を除いた過去だけで「いつも」を出す。
-  const usual = usualHeadcount(recs.filter(r => r.date !== date));
-  const shortStaff = siteList.map(s => {
-    const u = usual[s.genba + SEP + s.loc];
+  // ★Codexレビュー[P1]（2026-08-29）: さらに **未来の予定まで「いつも」に入っていた**。
+  //   毎朝は翌日を判定するので、翌々日以降の予定が基準に混ざる。
+  //   実績4日の現場が未来1日で5日になり判定対象にもなる。**判定日より前だけを使う。**
+  //   （しきい値もこの修正後に測り直した）
+  const past = recs.filter(r => r.date && r.date < date);
+  const usual = usualHeadcount(past, { minDays: SHORT_MIN_DAYS, since: addDays(date, -SHORT_WINDOW_DAYS) });
+  // 当日側も過去側と**同じ関数**で数える（条件を二度書かない）
+  const todayCount = {};
+  day.filter(isSiteWork).forEach(r => {
+    const k = shortKey(r);
+    (todayCount[k] || (todayCount[k] = { genba: r.genba, loc: r.loc, yakin: !!r.yakin, names: new Set() }))
+      .names.add(r.name);
+  });
+  const shortStaff = Object.keys(todayCount).map(k => {
+    const u = usual[k];
     if (!u) return null;                        // 実績が浅い現場は判定しない
-    const n = new Set(s.people).size;
+    const t = todayCount[k];
+    const n = t.names.size;
     if (n >= u.usual * SHORT_RATIO) return null;
     if (u.usual - n < SHORT_MIN_GAP) return null;
-    return { genba: s.genba, loc: s.loc, usual: u.usual, count: n, days: u.days };
-  }).filter(Boolean);
+    return { genba: t.genba, loc: t.loc, yakin: t.yakin, usual: u.usual, count: n, days: u.days };
+  }).filter(Boolean)
+    // 足りない人数が多い順。★件数を切るとき、どれが落ちるかを決まった順にする
+    .sort((a, b) => (b.usual - b.count) - (a.usual - a.count) || (a.loc < b.loc ? -1 : 1));
 
   // ③ 空き人員
   const busy = new Set(working.filter(r => !r.souko).map(r => r.name));
@@ -393,7 +437,9 @@ export function formatAlertsText(a) {
     L.push('');
     L.push('■ いつもより人が少ない現場 ' + a.shortStaff.length + '件');
     a.shortStaff.slice(0, 10).forEach(s => L.push('・' + (s.genba ? s.genba + ' ' : '') + s.loc
-      + ' … いつも' + s.usual + '人 → ' + s.count + '人'));
+      + (s.yakin ? '（夜勤）' : '') + ' … いつも' + s.usual + '人 → ' + s.count + '人'));
+    // ★Codexレビュー[P2]: 11件以上のとき、見出しの件数と本文の行数が合わなくなる
+    if (a.shortStaff.length > 10) L.push('・ほか ' + (a.shortStaff.length - 10) + '件');
   }
   if (a.noLead.length) {
     L.push('');
