@@ -4807,15 +4807,37 @@ function aiRowVisible(show) {
 }
 
 // 空き確認を描くたびに呼ぶ。元請を選んでいるときだけボタンを出す。
+// ★利用者指摘（2026-08-29）: 現場に出ない人・出向中の人がAIの推薦に出てきた。
+//   「加藤　秀男は出向行ってるからおらん」「内藤は現場にでない」「田中も出ない」
+//   出向は予定として入っているが、予定が入っていない日は「空き」になってしまう。
+//   事業部では切り分けられない（GRBでも高橋26日・森24日・舟田23日と現場に出ている）。
+//   ⚠️ この一覧は人の異動で変わる。変わったら**ここだけ**直せばよい。
+const AI_NOT_ONSITE = ['内藤', '田中（智）', '加藤　秀男'];
+
 function prepareAiSuggest(freeNames, wantGenba, qidx, rosterMembers) {
   _aiCand = [];
   const r = document.getElementById('avail-ai-result');
   if (r) r.innerHTML = '';
   if (!wantGenba || !freeNames.length) { aiRowVisible(false); return; }
-  const ranked = rankCandidates(freeNames, companyNippos(), wantGenba);
+  // 現場に出ない人・出向中の人は候補にしない
+  const usable = freeNames.filter(n => AI_NOT_ONSITE.indexOf(n) < 0);
+  if (!usable.length) { aiRowVisible(false); return; }
+  const ranked = rankCandidates(usable, companyNippos(), wantGenba);
+  const today = todayYmd();
   _aiCand = ranked.slice(0, 40).map((c, i) => {
     const m = (rosterMembers || []).find(x => x && x.name === c.name);
+    // ★利用者指摘: 「ほんとに資格もってるのかわからない人も資格があるから
+    //   おすすめ人選に上がってることがあった」。
+    //   期限を一切見ずに全部AIへ渡していた（私の作りのバグ）。
+    //   実データで 切れている7件・期限が読めない10件 が混ざっていた。
+    //   **今つかえる資格だけ**渡す（ok と soon。expired と unknown は渡さない）。
     const held = (qidx && m) ? ((qidx[qualKey(m.company, m.name)] || [])
+      .filter(q => {
+        // ★既存の qualHeldBy と同じ条件にする（'none'＝期限のない資格を落とさない）。
+        //   ここを揃えないと、画面では有資格なのにAIには無資格として渡る。
+        const st = qualStatus(q && q.expires, today);
+        return st === 'none' || st === 'ok' || st === 'soon';
+      })
       .map(q => q.qual).filter(Boolean)) : [];
     return { id: 'c' + (i + 1), name: c.name, days: c.days, quals: held.slice(0, 8) };
   });
