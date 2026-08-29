@@ -76,6 +76,10 @@ export function findConflicts(nippos, opts) {
 
 // ---- 資格の期限（画面と同じ考え方）------------------------------------
 const QUAL_SOON_DAYS = 60;
+// 資格の期限を知らせる「節目の日」。これ以外の日は出さない（毎朝出るのを防ぐ）。
+const QUAL_NOTIFY_DAYS = [60, 30, 14, 7, 3, 1, 0];
+// 移動として見る拠点。「両方」は移動ではないので入れない。
+const MOVE_KYOTEN = ['本社', '関東支店'];
 export function qualValidYmd(s) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
   if (!m) return false;
@@ -109,7 +113,11 @@ export function toRecords(payload) {
   H.forEach((h, i) => { ix[String(h).trim()] = i; });
   const get = (r, k) => (ix[k] === undefined ? '' : (r[ix[k]] == null ? '' : r[ix[k]]));
   return ((payload && payload.rows) || []).map(r => {
-    const mode = String(get(r, '夜勤') || '').trim();
+    // ★Codexレビュー[P2]（2026-08-29）: ここで .trim() してはいけない。
+    //   画面(index.html の parseRows)は trim せず完全一致で見ている。
+    //   trim すると「休み␣」がWorkerでは休み・画面では通常勤務になり、
+    //   同じデータで画面と通知の件数が食い違う。**画面に合わせる。**
+    const mode = String(get(r, '夜勤') || '');
     return {
       id: String(get(r, 'ID') || ''),
       date: String(get(r, '作業日') || '').slice(0, 10),
@@ -169,6 +177,9 @@ export function buildAlerts(payload, { date, today, company } = {}) {
   const sites = {};
   working.forEach(r => {
     if (!r.loc) return;
+    // ★Codexレビュー[P1]（2026-08-29）: 倉庫の行を落とし忘れていた。
+    //   「倉庫・同行」の1行で 現場1件・責任者なし1件 の誤通知が出た（再現済み）。
+    if (r.souko) return;
     if (['事務所', '倉庫作業', '移動'].indexOf(r.workType) >= 0) return;
     const k = r.genba + SEP + r.loc;
     if (!sites[k]) sites[k] = { genba: r.genba, loc: r.loc, people: [], lead: false };
@@ -196,6 +207,18 @@ export function buildAlerts(payload, { date, today, company } = {}) {
     .map(s => ({ ...s, status: stopped[s.genba + SEP + s.loc] }))
     .filter(s => s.status);
 
+  // ★Codexレビュー[P1]（2026-08-29）: 依頼の8項目のうち「未確定案件」「延期案件」が
+  //   通知の条件から落ちていた。ただし「見積中◯件」を毎朝出すと、案件が増えるほど
+  //   毎日同じ数字が出て読まれなくなる。
+  //   → **その日に人が入っているのに見積中のまま**＝明日動くのに受注が決まっていない、
+  //     という本当に困る形だけを問題として出す。総数は下のまとめ行に出す。
+  const unconfirmedKeys = {};
+  unconfirmed.forEach(j => {
+    unconfirmedKeys[String(j.genba || '').trim() + SEP + String(j.loc || '').trim()] = 1;
+  });
+  const unconfirmedWithPeople = siteList.filter(s => unconfirmedKeys[s.genba + SEP + s.loc]);
+  const stoppedAll = Object.keys(stopped).length;
+
   // ⑦ 資格不足 → その日出る人の「**もうすぐ切れる**」資格だけ
   // ★ここを間違えると通知が死ぬ。実データで確かめた話（2026-08-29）:
   //   切れている資格・期限欄が読めない資格を毎朝出すと、真柄さんの
@@ -210,6 +233,12 @@ export function buildAlerts(payload, { date, today, company } = {}) {
   const quals = ((payload && payload.qualifications) || [])
     .filter(q => outNames.has(String((q && q.name) || '').trim()))
     .map(q => ({ name: q.name, qual: q.qual, expires: q.expires, status: qualStatus(q.expires, today || date) }))
+    // ★Codexレビュー[P2]（2026-08-29）: 「60日以内」だけだと、その人が出る日は
+    //   最大60日ぶん毎朝同じ警告が出る。コメントの「新しく起きた事だけ」と食い違う。
+    //   節目の日（60/30/14/7/3/1/0日前）にだけ出す。状態を持たずに回数を1/8にできる。
+    .filter(q => QUAL_NOTIFY_DAYS.indexOf(
+      Math.round((Date.parse(q.expires + 'T00:00:00Z')
+                  - Date.parse((today || date) + 'T00:00:00Z')) / 86400000)) >= 0)
     .filter(q => q.status === 'soon')
     .filter(q => {                       // 同じ人の同じ資格が2行あることがある
       const k = q.name + SEP + q.qual;
@@ -226,23 +255,28 @@ export function buildAlerts(payload, { date, today, company } = {}) {
     (byPerson[r.name] = byPerson[r.name] || {});
     (byPerson[r.name][r.date] = byPerson[r.name][r.date] || new Set()).add(k);
   });
+  // ★Codexレビュー[P2]（2026-08-29）: 前後どちらも見ると、同じ移動が
+  //   「明日の分」と「今日の分」で2朝続けて出る。**その日→翌日だけ**にする。
+  //   毎朝 date=明日 で動くので、どの移動もちょうど1回・2日前に知らせることになる。
+  //   ★本社↔関東支店に限る（「両方」は移動ではない）。
   const moves = [];
   const seenMove = {};
-  const prev = addDays(date, -1), next = addDays(date, 1);
+  const next = addDays(date, 1);
   Object.keys(byPerson).forEach(name => {
     if (!rosterSet.has(name)) return;
     const d = byPerson[name];
     const at = (x) => (d[x] && d[x].size === 1 ? [...d[x]][0] : null);
     const t = at(date);
     if (!t) return;
-    const p = at(prev), n2 = at(next);
-    const add = (o) => {
-      const k = o.name + SEP + o.from + SEP + o.to;
-      if (seenMove[k]) return;
-      seenMove[k] = 1; moves.push(o);
-    };
-    if (p && p !== t) add({ name, from: prev, fromKyoten: p, to: date, toKyoten: t });
-    if (n2 && n2 !== t) add({ name, from: date, fromKyoten: t, to: next, toKyoten: n2 });
+    const n2 = at(next);
+    const real = (a, b) => MOVE_KYOTEN.indexOf(a) >= 0 && MOVE_KYOTEN.indexOf(b) >= 0 && a !== b;
+    if (n2 && real(t, n2)) {
+      const k = name + SEP + date + SEP + next;
+      if (!seenMove[k]) {
+        seenMove[k] = 1;
+        moves.push({ name, from: date, fromKyoten: t, to: next, toKyoten: n2 });
+      }
+    }
   });
 
   return {
@@ -252,14 +286,14 @@ export function buildAlerts(payload, { date, today, company } = {}) {
     free, freeCount: free.length, rosterCount: roster.length,
     sites: siteList, siteCount: siteList.length,
     workingCount: new Set(working.map(r => r.name)).size,
-    unconfirmed, stoppedWithPeople, quals, moves
+    unconfirmed, unconfirmedWithPeople, stoppedWithPeople, stoppedAll, quals, moves
   };
 }
 
 // 通知に「問題」として出すものがあるか。翌日の現場・空き人員は"お知らせ"であって問題ではない。
 export function hasProblem(a) {
   return !!(a && (a.conflicts.length || a.noLead.length || a.stoppedWithPeople.length
-    || a.quals.length || a.moves.length));
+    || a.unconfirmedWithPeople.length || a.quals.length || a.moves.length));
 }
 
 const WD = ['日', '月', '火', '水', '木', '金', '土'];
@@ -302,6 +336,12 @@ export function formatAlertsText(a) {
     a.moves.slice(0, 10).forEach(m => L.push('・' + m.name + ' … '
       + ymdLabel(m.from) + m.fromKyoten + ' → ' + ymdLabel(m.to) + m.toKyoten));
   }
+  if (a.unconfirmedWithPeople.length) {
+    L.push('');
+    L.push('■ 受注が決まっていないのに人が入っています ' + a.unconfirmedWithPeople.length + '件');
+    a.unconfirmedWithPeople.slice(0, 10).forEach(s => L.push('・' + (s.genba ? s.genba + ' ' : '')
+      + s.loc + '（見積中・' + s.people.length + '人）'));
+  }
   if (a.stoppedWithPeople.length) {
     L.push('');
     L.push('■ 延期・中止なのに人が入っています ' + a.stoppedWithPeople.length + '件');
@@ -314,5 +354,6 @@ export function formatAlertsText(a) {
   L.push('現場 ' + a.siteCount + '件 / 出る人 ' + a.workingCount + '人 / 空き ' + a.freeCount + '人');
   if (a.freeCount && a.free.length <= 15) L.push('空き: ' + a.free.join('、'));
   if (a.unconfirmed.length) L.push('見積中の案件 ' + a.unconfirmed.length + '件');
+  if (a.stoppedAll) L.push('延期・中止の案件 ' + a.stoppedAll + '件');
   return L.join('\n');
 }

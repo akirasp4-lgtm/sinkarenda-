@@ -131,14 +131,26 @@ describe('資格（依頼の「資格不足」の代わり）', () => {
     // ★切れている物を毎朝出すと、同じ警告が未来永劫出続けて誰も読まなくなる。
     //   利用者判断（2026-08-29）「その期限切れの資格は一旦ほっといていい」
     const a = buildAlerts(payload([row({ 氏名: 'A' })], {
-      qualifications: [q('A', '切れてる', '2024-05-31'), q('A', 'もうすぐ', '2026-09-10'),
+      qualifications: [q('A', '切れてる', '2024-05-31'), q('A', 'もうすぐ', '2026-09-13'),
         q('A', '読めない', '?'), q('A', '期限なし', ''), q('A', 'まだ先', '2030-01-01')]
-    }), opt);
+    }), opt);   // today=2026-08-30 から 2026-09-13 は14日前＝節目
     expect(a.quals.map(x => x.qual)).toEqual(['もうすぐ']);
+  });
+  it('★[P2] 節目の日だけ出す（60日間ずっと毎朝出さない）', () => {
+    // ★Codexレビュー[P2]（2026-08-29）: 「60日以内」だけだと、その人が出る日は
+    //   最大60日ぶん毎朝同じ警告が出る。節目（60/30/14/7/3/1/0日前）に絞る。
+    const at = (days) => {
+      const d = new Date(Date.parse('2026-08-30T00:00:00Z') + days * 86400000)
+        .toISOString().slice(0, 10);
+      return buildAlerts(payload([row({ 氏名: 'A' })], {
+        qualifications: [q('A', '玉掛け', d)] }), opt).quals.length;
+    };
+    [60, 30, 14, 7, 3, 1, 0].forEach(d => expect(at(d), d + '日前は出すべき').toBe(1));
+    [59, 45, 29, 20, 13, 8, 5, 2].forEach(d => expect(at(d), d + '日前は出さない').toBe(0));
   });
   it('★同じ人の同じ資格が2行あっても1回だけ', () => {
     const a = buildAlerts(payload([row({ 氏名: 'A' })], {
-      qualifications: [q('A', '玉掛け', '2026-09-10'), q('A', '玉掛け', '2026-09-10')]
+      qualifications: [q('A', '玉掛け', '2026-09-13'), q('A', '玉掛け', '2026-09-13')]
     }), opt);
     expect(a.quals).toHaveLength(1);
   });
@@ -151,36 +163,45 @@ describe('資格（依頼の「資格不足」の代わり）', () => {
 });
 
 describe('拠点をまたぐ移動（依頼の「移動時間」の代わり）', () => {
-  it('前の日と拠点が違えば出す', () => {
-    const a = buildAlerts(payload([
-      row({ 氏名: 'A', 作業日: '2026-08-30', 拠点: '関東支店' }),
-      row({ 氏名: 'A', 作業日: D, 拠点: '本社' })]), opt);
-    expect(a.moves).toHaveLength(1);
-    expect(a.moves[0]).toMatchObject({ name: 'A', fromKyoten: '関東支店', toKyoten: '本社' });
-    expect(formatAlertsText(a)).toContain('拠点をまたぐ移動');
-  });
-  it('翌日と拠点が違っても出す', () => {
+  it('★[P2] 見るのは「その日→翌日」だけ（同じ移動を2朝続けて出さない）', () => {
+    // ★Codexレビュー[P2]（2026-08-29）: 前後どちらも見ると、同じ移動が
+    //   「明日の分」と「今日の分」で2回通知される。
+    //   毎朝 date=明日 で動くので、この向きだけで全部の移動が1回ずつ出る。
     const a = buildAlerts(payload([
       row({ 氏名: 'A', 作業日: D, 拠点: '本社' }),
       row({ 氏名: 'A', 作業日: '2026-09-01', 拠点: '関東支店' })]), opt);
     expect(a.moves).toHaveLength(1);
+    expect(a.moves[0]).toMatchObject({ name: 'A', fromKyoten: '本社', toKyoten: '関東支店' });
+    expect(formatAlertsText(a)).toContain('拠点をまたぐ移動');
+  });
+  it('★前の日から来る分は出さない（前日の朝にもう知らせてある）', () => {
+    const a = buildAlerts(payload([
+      row({ 氏名: 'A', 作業日: '2026-08-30', 拠点: '関東支店' }),
+      row({ 氏名: 'A', 作業日: D, 拠点: '本社' })]), opt);
+    expect(a.moves).toHaveLength(0);
+  });
+  it('★「両方」は移動として数えない', () => {
+    const a = buildAlerts(payload([
+      row({ 氏名: 'A', 作業日: D, 拠点: '両方' }),
+      row({ 氏名: 'A', 作業日: '2026-09-01', 拠点: '本社' })]), opt);
+    expect(a.moves).toHaveLength(0);
   });
   it('同じ拠点なら出さない', () => {
     const a = buildAlerts(payload([
-      row({ 氏名: 'A', 作業日: '2026-08-30', 拠点: '本社' }),
-      row({ 氏名: 'A', 作業日: D, 拠点: '本社' })]), opt);
+      row({ 氏名: 'A', 作業日: D, 拠点: '本社' }),
+      row({ 氏名: 'A', 作業日: '2026-09-01', 拠点: '本社' })]), opt);
     expect(a.moves).toHaveLength(0);
   });
   it('★2日以上あいていれば出さない（移動する時間があるため）', () => {
     const a = buildAlerts(payload([
-      row({ 氏名: 'A', 作業日: '2026-08-28', 拠点: '関東支店' }),
-      row({ 氏名: 'A', 作業日: D, 拠点: '本社' })]), opt);
+      row({ 氏名: 'A', 作業日: D, 拠点: '本社' }),
+      row({ 氏名: 'A', 作業日: '2026-09-02', 拠点: '関東支店' })]), opt);
     expect(a.moves).toHaveLength(0);
   });
   it('名簿に載っていない人は出さない', () => {
     const a = buildAlerts(payload([
-      row({ 氏名: '知らない人', 作業日: '2026-08-30', 拠点: '関東支店' }),
-      row({ 氏名: '知らない人', 作業日: D, 拠点: '本社' })]), opt);
+      row({ 氏名: '知らない人', 作業日: D, 拠点: '本社' }),
+      row({ 氏名: '知らない人', 作業日: '2026-09-01', 拠点: '関東支店' })]), opt);
     expect(a.moves).toHaveLength(0);
   });
 });
@@ -249,5 +270,72 @@ describe('こまごました物', () => {
     const a = buildAlerts({ headers: H, rows: [], members: [] }, opt);
     expect(hasProblem(a)).toBe(false);
     expect(formatAlertsText(a)).toBe('');
+  });
+});
+
+
+describe('★Codexレビュー[P1]の再発防止（2026-08-29）', () => {
+  it('★倉庫の人を「現場」「責任者なし」に数えない', () => {
+    // Codexが実際に動かして発見: 「倉庫・同行」1行で
+    // 現場1件・責任者なし1件 の誤通知が出ていた
+    const a = buildAlerts(payload([
+      row({ 氏名: 'A', 役割: '同行', 現場名: '倉庫', 夜勤: '倉庫' })]), opt);
+    expect(a.siteCount, '倉庫を現場に数えている').toBe(0);
+    expect(a.noLead, '倉庫で責任者なしを出している').toHaveLength(0);
+    expect(hasProblem(a)).toBe(false);
+  });
+
+  it('★受注が決まっていないのに人が入っている案件を出す（依頼の「未確定案件」）', () => {
+    const a = buildAlerts(payload([row({ 氏名: 'A', 現場名: 'X' })], {
+      jobsites: [{ genba: 'きんでん東', loc: 'X', status: '見積中' }]
+    }), opt);
+    expect(a.unconfirmedWithPeople).toHaveLength(1);
+    expect(hasProblem(a)).toBe(true);
+    expect(formatAlertsText(a)).toContain('受注が決まっていないのに人が入っています');
+  });
+
+  it('★見積中でも人が入っていなければ問題にしない（毎朝同じ数字を出さない）', () => {
+    const a = buildAlerts(payload([row({ 氏名: 'A', 現場名: 'X' })], {
+      jobsites: [{ genba: 'きんでん東', loc: 'ほかの現場', status: '見積中' }]
+    }), opt);
+    expect(a.unconfirmedWithPeople).toHaveLength(0);
+    expect(hasProblem(a)).toBe(false);
+    expect(a.unconfirmed).toHaveLength(1);   // 総数はまとめ行に出る
+  });
+
+  it('★延期・中止の総数もまとめ行に出す（依頼の「延期案件」）', () => {
+    const a = buildAlerts(payload([
+      row({ 氏名: 'A', 現場名: 'X' }), row({ 氏名: 'A', 現場名: 'Y' })], {
+      jobsites: [{ genba: 'きんでん東', loc: 'Z', status: '延期' }]
+    }), opt);
+    expect(a.stoppedAll).toBe(1);
+    expect(formatAlertsText(a)).toContain('延期・中止の案件 1件');
+  });
+});
+
+describe('★画面の parseRows と同じ読み方をしている（2026-08-29 Codexレビュー[P2]）', () => {
+  it('★「夜勤」列は trim せず完全一致で見る', () => {
+    // ★Codexが発見: Workerだけ trim していたため「休み␣」が
+    //   Workerでは休み・画面では通常勤務になり、件数が食い違った。
+    const recs = toRecords(payload([
+      row({ 氏名: 'A', 夜勤: '休み' }), row({ 氏名: 'B', 夜勤: '休み ' }),
+      row({ 氏名: 'C', 夜勤: '夜勤' }), row({ 氏名: 'D', 夜勤: '予定' }),
+      row({ 氏名: 'E', 夜勤: '倉庫' }), row({ 氏名: 'F', 夜勤: '' })]));
+    const by = {};
+    recs.forEach(r => { by[r.name] = r; });
+    expect(by['A'].yasumi).toBe(true);
+    expect(by['B'].yasumi, '空白付きを休みにしてしまっている（画面は通常勤務）').toBe(false);
+    expect(by['C'].yakin).toBe(true);
+    expect(by['D'].yotei).toBe(true);
+    expect(by['E'].souko).toBe(true);
+    expect(by['F'].yakin || by['F'].yotei || by['F'].yasumi || by['F'].souko).toBe(false);
+  });
+
+  it('★画面(index.html)の判定式と同じ書き方であること', () => {
+    // 画面: yakin:String(r['夜勤']||'')==='夜勤' … trimしていない
+    const src = read('index.html');
+    expect(src).toContain("yasumi:String(r['夜勤']||'')==='休み'");
+    const mine = readFileSync(join(here, '..', 'src', 'alerts.js'), 'utf8');
+    expect(mine, 'Worker側が trim している').not.toContain("get(r, '夜勤') || '').trim()");
   });
 });
