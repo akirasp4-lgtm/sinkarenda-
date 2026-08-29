@@ -5615,7 +5615,11 @@ function renderAvailList(){
     });
     const dowCls=d.dow===0?' sun':d.dow===6?' sat':'';
     const totalBusy=buckets.busy.length+buckets.yasumi.length+buckets.souko.length;
-    html+=`<div class="day-block"><div class="day-block-header"><div class="day-block-date${dowCls}">${d.m}/${d.dd}（${dayNames[d.dow]}）</div><div class="day-block-count">${totalBusy} / ${shokunin.length} 人</div></div>`;
+    // ★2026-08-29 利用者指示（スマホで使用中）:「空き確認から飛ばない」
+    //   スマホはPCと画面が別（週の表ではなく日ごとのリスト）。
+    //   PC側だけ押せるようにしていたので、スマホでは飛べなかった。
+    //   ★見出しの行ごと押せるようにする（指で狙いやすいように広く取る）。
+    html+=`<div class="day-block"><div class="day-block-header" data-goday="${d.date}" style="cursor:pointer" title="この日のカレンダーを開く"><div class="day-block-date${dowCls}" style="text-decoration:underline;text-decoration-style:dotted">${d.m}/${d.dd}（${dayNames[d.dow]}）</div><div class="day-block-count">${totalBusy} / ${shokunin.length} 人</div></div>`;
     const rows=[];
     if(buckets.busy.length>0)rows.push({label:'出勤',cls:'status-busy',names:buckets.busy});
     if(buckets.yasumi.length>0)rows.push({label:'休み',cls:'status-yasumi',names:buckets.yasumi});
