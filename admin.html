@@ -509,6 +509,13 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <select id="avail-genba" onchange="renderAvailDay()" style="margin-bottom:0">
     <option value="">並べ替えない</option>
   </select>
+  <div id="avail-ai-row" style="margin-top:10px;display:none">
+    <button class="btn btn-secondary btn-sm" onclick="askAiSuggest()" id="avail-ai-btn"
+      style="width:100%">🤖 AIに「なぜこの人か」を聞く</button>
+    <div style="font-size:11px;color:#888;margin-top:4px">
+      氏名は送りません（c1・c2…に置き換えて聞きます）。予定は作りません。</div>
+  </div>
+  <div id="avail-ai-result"></div>
   <div id="avail-day-result"></div>
 </div>
 <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:12px">
@@ -5212,6 +5219,7 @@ function renderAvailDay() {
     html = html.replace('空いている ' + free.length + ' 人',
       '空いている ' + free.length + ' 人（「' + esc(wantGenba) + '」の経験が多い順）');
   }
+  prepareAiSuggest(free, wantGenba, qidx, rosterMembers);
   const alerts = qualAlerts(qidx, rosterMembers, todayYmd());
   if (alerts.length) {
     html += '<div style="font-size:14px;font-weight:600;color:#A32D2D;margin:12px 0 6px">'
@@ -5255,6 +5263,86 @@ function updateQualSelect() {
     + (missing ? '<option value="' + esc(cur) + '">' + esc(cur) + '（この日に使える人はいません）</option>' : '')
     + opts.map(q => '<option value="' + esc(q) + '">' + esc(q) + '</option>').join('');
   if (cur) sel.value = cur;
+}
+
+
+// ===== 要件5: AIに順位付けと理由を聞く（2026-08-29）=====================
+// ★氏名を送らない。候補を c1,c2… に置き換えて聞き、返ってきた番号を名前に戻す。
+// ★予定は作らない（依頼文「最終決定は管理者が行う」）。表示するだけ。
+// ★鍵が未設定なら窓口が enabled:false を返す。そのときはボタンごと隠す＝0円のまま。
+let _aiCand = [];      // [{id, name}] 返事を名前に戻すための対応表
+let _aiBusy = false;
+
+function aiRowVisible(show) {
+  const row = document.getElementById('avail-ai-row');
+  if (row) row.style.display = show ? 'block' : 'none';
+  if (!show) { const r = document.getElementById('avail-ai-result'); if (r) r.innerHTML = ''; }
+}
+
+// 空き確認を描くたびに呼ぶ。元請を選んでいるときだけボタンを出す。
+function prepareAiSuggest(freeNames, wantGenba, qidx, rosterMembers) {
+  _aiCand = [];
+  const r = document.getElementById('avail-ai-result');
+  if (r) r.innerHTML = '';
+  if (!wantGenba || !freeNames.length) { aiRowVisible(false); return; }
+  const ranked = rankCandidates(freeNames, companyNippos(), wantGenba);
+  _aiCand = ranked.slice(0, 40).map((c, i) => {
+    const m = (rosterMembers || []).find(x => x && x.name === c.name);
+    const held = (qidx && m) ? ((qidx[qualKey(m.company, m.name)] || [])
+      .map(q => q.qual).filter(Boolean)) : [];
+    return { id: 'c' + (i + 1), name: c.name, days: c.days, quals: held.slice(0, 8) };
+  });
+  aiRowVisible(true);
+}
+
+async function askAiSuggest() {
+  if (_aiBusy || !_aiCand.length) return;
+  const btn = document.getElementById('avail-ai-btn');
+  const out = document.getElementById('avail-ai-result');
+  const genba = searchFilterValue('avail-genba');
+  _aiBusy = true;
+  if (btn) { btn.disabled = true; btn.textContent = '聞いています…'; }
+  try {
+    const cfg = await fetch('backend.json?t=' + Date.now()).then(r => r.ok ? r.json() : null);
+    if (!cfg || !cfg.workerUrl) throw new Error('窓口の設定がありません');
+    const res = await fetch(cfg.workerUrl + '/api/suggest', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        genba: genba, need: 3,
+        candidates: _aiCand.map(c => ({ id: c.id, days: c.days, quals: c.quals }))
+      })
+    }).then(r => r.json());
+    if (res.status !== 'ok') throw new Error(res.message || '失敗しました');
+    if (!res.enabled) {
+      aiRowVisible(false);   // 鍵が無い／上限。黙って隠す
+      return;
+    }
+    const byId = {};
+    _aiCand.forEach(c => { byId[c.id] = c; });
+    const rows = (res.picks || []).map((p, i) => {
+      const c = byId[p.id];
+      if (!c) return '';
+      return '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #eee">'
+        + '<span style="color:#0C447C;font-weight:600;min-width:20px">' + (i + 1) + '.</span>'
+        + '<span><b>' + esc(c.name) + '</b>'
+        + '<span style="font-size:11px;color:#666;margin-left:6px">（' + c.days + '日）</span>'
+        + '<div style="font-size:12px;color:#555">' + esc(p.reason) + '</div></span></div>';
+    }).join('');
+    if (out) {
+      out.innerHTML = rows
+        ? '<div style="margin-top:8px;background:#F7FAFF;border:1px solid #DCE7F5;border-radius:8px;padding:8px 10px">'
+          + '<div style="font-size:12px;color:#0C447C;font-weight:600;margin-bottom:4px">AIの見立て（決めるのは人です）</div>'
+          + rows + '</div>'
+        : '<div style="font-size:12px;color:#888;margin-top:8px">AIから候補が返りませんでした。</div>';
+    }
+  } catch (e) {
+    if (out) out.innerHTML = '<div style="font-size:12px;color:#A32D2D;margin-top:8px">'
+      + 'AIに聞けませんでした（' + esc(String(e.message || e)) + '）。'
+      + '上の一覧はそのまま使えます。</div>';
+  } finally {
+    _aiBusy = false;
+    if (btn) { btn.disabled = false; btn.textContent = '🤖 AIに「なぜこの人か」を聞く'; }
+  }
 }
 
 // 元請のプルダウンを作り直す（経験で並べ替えるため）。

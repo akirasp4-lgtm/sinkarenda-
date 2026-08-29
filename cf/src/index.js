@@ -3,6 +3,7 @@ import { syncAll, cleanupSyncLog } from './sync.js';
 import { readPresident } from './pres-read.js';
 import { syncPresident, cleanupPresSyncLog } from './pres-sync.js';
 import { buildAlerts, formatAlertsText, hasProblem, addDays } from './alerts.js';
+import { sanitizeCandidates, buildPrompt, parsePicks, overDailyLimit, logCall, callOpenAI } from './suggest.js';
 
 // ★日本時間の「今日」。Workerは世界標準時で動くので、そのまま new Date() を使うと
 //   朝6時の通知が前日ぶんになる日が出る（画面側の todayYmd と同じ考え方）。
@@ -157,6 +158,34 @@ export default {
         });
       } catch (e) {
         return json({ status: 'error', message: String(e.message || e) }, 500);
+      }
+    }
+
+
+    // 候補者の順位付けと理由付け（要件5）。★予定は作らない。文章を返すだけ。
+    //   鍵が未設定なら enabled:false を返し、画面はAI欄を出さない（0円のまま動く）。
+    if (url.pathname === '/api/suggest' && request.method === 'POST') {
+      if (!isAllowedOrigin(request)) {
+        return json({ status: 'error', message: '許可されていないOriginからのリクエストです' }, 403);
+      }
+      if (!env.OPENAI_API_KEY) return json({ status: 'ok', enabled: false, reason: 'no key' });
+      if (await overDailyLimit(env)) {
+        return json({ status: 'ok', enabled: false, reason: 'daily limit' });
+      }
+      let body = {};
+      try { body = await request.json(); } catch (_e) { body = {}; }
+      const candidates = sanitizeCandidates(body && body.candidates);
+      if (!candidates.length) return json({ status: 'ok', enabled: true, picks: [] });
+      try {
+        const text = await callOpenAI(env, buildPrompt({
+          genba: body.genba, need: body.need, candidates
+        }));
+        const picks = parsePicks(text, candidates);
+        await logCall(env, true);
+        return json({ status: 'ok', enabled: true, picks });
+      } catch (e) {
+        await logCall(env, false);
+        return json({ status: 'error', message: String(e.message || e) }, 502);
       }
     }
 

@@ -119,3 +119,13 @@ DROP TABLE IF EXISTS nippo;
 DROP TABLE IF EXISTS members;
 DROP TABLE IF EXISTS genba;
 DROP TABLE IF EXISTS jobsites;
+
+-- AI（要件5の候補者の順位付け）の呼び出し記録。
+-- ★目的は「1日に何回呼んだか」を数えて課金の上限を守ること。
+--   数えられないときは呼ばない側に倒す（cf/src/suggest.js の overDailyLimit）。
+CREATE TABLE IF NOT EXISTS ai_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,     -- ISO8601
+  ok INTEGER NOT NULL   -- 1=成功 0=失敗
+);
+CREATE INDEX IF NOT EXISTS idx_ai_log_at ON ai_log(at);
