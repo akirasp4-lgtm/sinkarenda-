@@ -4374,7 +4374,8 @@ function renderSearchResults() {
   } else {
     html += groups.map(g =>
       '<div class="conflict-row">'
-      + '<b>' + esc(formatDate(g.date)) + '</b>　' + esc(g.genba) + '／' + esc(g.loc || '')
+      + '<b data-goday="' + esc(g.date) + '" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" title="この日のカレンダーを開く">'
+      + esc(formatDate(g.date)) + '</b>　' + esc(g.genba) + '／' + esc(g.loc || '')
       + (g.workType && g.workType !== '現場作業' ? ' <span class="worktype-chip">' + esc(g.workType) + '</span>' : '')
       + (g.butai ? ' <span class="kyoten-tag">' + esc(g.butai) + '</span>' : '')
       + '<div class="conflict-job">' + g.members.map(m => esc(m.name)).join('、') + '</div>'
@@ -4479,7 +4480,7 @@ function renderGmList(){
     return`<div class="gm-day-row"${_overdueStyle}>
       <input type="checkbox" class="gm-day-check" data-idx="${idx}" onchange="updateGmDeleteBar()">
       <div class="gm-day-info">
-        <div class="gm-day-date">${formatDate(g.date)}</div>
+        <div class="gm-day-date" data-goday="${g.date}" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" title="この日のカレンダーを開く">${formatDate(g.date)}</div>
         <div class="gm-day-members">${esc(memberNames)}${updaterHtml}</div>
         ${badges.length?`<div style="margin-top:4px">${badges.join('')}</div>`:''}
       </div>
@@ -4946,9 +4947,15 @@ function availClearPick(){availPicked=[];renderAvailDay();}
 // チップのクリックは委譲で拾う（氏名をJSのコードに埋めないため）。
 // ★1回だけ登録する。renderAvailDay は何度も呼ばれるので、ここで登録してはいけない。
 document.addEventListener('click', function (ev) {
-  const el = ev.target && ev.target.closest ? ev.target.closest('[data-pick]') : null;
-  if (!el) return;
-  availTogglePick(el.getAttribute('data-pick') || '');
+  const t = ev.target && ev.target.closest ? ev.target : null;
+  if (!t) return;
+  const pick = t.closest('[data-pick]');
+  if (pick) { availTogglePick(pick.getAttribute('data-pick') || ''); return; }
+  // ★日付からカレンダーへ飛ぶ（利用者指示 2026-08-29）。
+  //   空き確認の週の表・現場管理の一覧・詳しく探すの結果、どこからでも同じ動き。
+  //   日付もJSのコードに埋めず data属性から読む。
+  const day = t.closest('[data-goday]');
+  if (day) { goToCalendarDate(day.getAttribute('data-goday') || ''); }
 });
 
 
@@ -5075,7 +5082,8 @@ function renderAvailWeek(){
   let html='<table class="week-table"><thead><tr><th></th>';
   // ★2026-08-29 利用者指示: 日付を押したらカレンダーのその日へ飛ぶ。
   //   「その日の予定が入ってるカレンダーに飛んだりすることってできへんのかな」
-  days.forEach(d=>{const cls=d.dow===0?' class="week-sun"':d.dow===6?' class="week-sat"':'';html+=`<th${cls}><span onclick="goToCalendarDate('${d.date}')" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" title="この日のカレンダーを開く">${d.label}<br>${dayNames[d.dow]}</span></th>`;});
+  //   ★スマホで見出しは押しにくいので、下のセルも押せるようにしてある。
+  days.forEach(d=>{const cls=d.dow===0?' class="week-sun"':d.dow===6?' class="week-sat"':'';html+=`<th${cls}><span data-goday="${d.date}" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" title="この日のカレンダーを開く">${d.label}<br>${dayNames[d.dow]}</span></th>`;});
   html+='</tr></thead><tbody>';
   shokunin.forEach(name=>{
     html+='<tr><td class="name-col">'+esc(name)+'</td>';
@@ -5084,7 +5092,8 @@ function renderAvailWeek(){
       let cls='free',label='○';
       if(entry){if(entry.yasumi){cls='yasumi';label='休';}else if(entry.souko){cls='souko';label='倉';}else{cls='busy';label='出';}}
       const dowCls=d.dow===0?' week-sun':d.dow===6?' week-sat':'';
-      html+=`<td class="${dowCls}"><div class="week-cell ${cls}">${label}</div></td>`;
+      // ★スマホ用: セルを押してもその日のカレンダーへ飛ぶ（見出しは指で狙いにくい）
+      html+=`<td class="${dowCls}"><div class="week-cell ${cls}" data-goday="${d.date}" style="cursor:pointer">${label}</div></td>`;
     });
     html+='</tr>';
   });
