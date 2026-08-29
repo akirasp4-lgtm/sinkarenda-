@@ -3,7 +3,7 @@ import { syncAll, cleanupSyncLog } from './sync.js';
 import { readPresident } from './pres-read.js';
 import { syncPresident, cleanupPresSyncLog } from './pres-sync.js';
 import { buildAlerts, formatAlertsText, hasProblem, addDays } from './alerts.js';
-import { sanitizeCandidates, buildPrompt, parsePicks, overDailyLimit, logCall, callOpenAI } from './suggest.js';
+import { sanitizeCandidates, buildPrompt, parsePicks, reserveCall, logCall, callOpenAI } from './suggest.js';
 
 // ★日本時間の「今日」。Workerは世界標準時で動くので、そのまま new Date() を使うと
 //   朝6時の通知が前日ぶんになる日が出る（画面側の todayYmd と同じ考え方）。
@@ -169,22 +169,23 @@ export default {
         return json({ status: 'error', message: '許可されていないOriginからのリクエストです' }, 403);
       }
       if (!env.OPENAI_API_KEY) return json({ status: 'ok', enabled: false, reason: 'no key' });
-      if (await overDailyLimit(env)) {
-        return json({ status: 'ok', enabled: false, reason: 'daily limit' });
-      }
       let body = {};
       try { body = await request.json(); } catch (_e) { body = {}; }
       const candidates = sanitizeCandidates(body && body.candidates);
       if (!candidates.length) return json({ status: 'ok', enabled: true, picks: [] });
+      // ★Codexレビュー[P1]: 先に席を取ってから呼ぶ（数える→呼ぶ の間の
+      //   すり抜けを塞ぐ）。席が取れなければOpenAIを呼ばない＝課金しない。
+      if (!(await reserveCall(env))) {
+        return json({ status: 'ok', enabled: false, reason: 'daily limit' });
+      }
       try {
         const text = await callOpenAI(env, buildPrompt({
           genba: body.genba, need: body.need, candidates
         }));
-        const picks = parsePicks(text, candidates);
+        const picks = parsePicks(text, candidates, body.need);
         await logCall(env, true);
         return json({ status: 'ok', enabled: true, picks });
       } catch (e) {
-        await logCall(env, false);
         return json({ status: 'error', message: String(e.message || e) }, 502);
       }
     }

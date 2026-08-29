@@ -5235,6 +5235,7 @@ function renderAvailDay() {
     html = html.replace('空いている ' + free.length + ' 人',
       '空いている ' + free.length + ' 人（「' + esc(wantGenba) + '」の経験が多い順）');
   }
+  availSyncPicked(free);   // ★条件が変わったら選択を捨てる（P1対応）
   // 選んだ人で予定を作るバー
   if (availPicked.length) {
     html += '<div style="position:sticky;bottom:0;background:#fff;border-top:1px solid #ddd;'
@@ -5393,6 +5394,24 @@ function goToCalendarDate(ymd){
 //   （日付と人が先に埋まっている状態で開く）。
 // ★勝手に登録はしない。入力画面を開くところまで（依頼文「最終決定は管理者が行う」）。
 let availPicked=[];      // 選ばれた氏名
+let availPickedKey='';   // どの「日付＋会社＋拠点」で選んだか
+
+// ★Codexレビュー[P1]（2026-08-29）: 選択が別の日・別の会社へ持ち越されていた。
+//   8/29でAさんを選ぶ→日付を8/30に変える→Aさんが8/30の空きに居なくても
+//   選択が残り、そのまま8/30の予定に入ってしまう。
+//   「どの条件で選んだか」を鍵にして、条件が変わったら必ず捨てる。
+function availPickKey(){
+  return String(currentCompany||'') + '|' + String(currentKyoten||'') + '|'
+    + String((document.getElementById('avail-day')||{}).value||'');
+}
+// 描くたびに呼ぶ。条件が変わっていたら選択を捨て、
+// いま空いていない人が混ざっていたら取り除く。
+function availSyncPicked(freeNames){
+  const key=availPickKey();
+  if(key!==availPickedKey){availPicked=[];availPickedKey=key;}
+  const ok=new Set(freeNames||[]);
+  availPicked=availPicked.filter(n=>ok.has(n));
+}
 
 function availTogglePick(name){
   const n=String(name||'');
@@ -5415,21 +5434,38 @@ function availToInput(){
   if(!availPicked.length)return;
   const d=(document.getElementById('avail-day')||{}).value||'';
   const picked=availPicked.slice();
+  const shokunin=getShokunin();   // ★グローバルではない。既存のコピー機能と同じ取り方
+
+  // ★Codexレビュー[P1]（2026-08-29）: 氏名で引いているので、同姓同名が居ると
+  //   黙って先頭の人が入る＝別人を予定に入れてしまう。
+  //   **ちょうど1件でなければ進めない。**黙って先頭を採らない。
+  const ambiguous=picked.filter(n=>shokunin.filter(x=>x===n).length!==1);
+  if(ambiguous.length){
+    alert('同じ名前の人が名簿に複数います（'+ambiguous.join('、')
+      +'）。どちらか分からないので、この画面からは作れません。'
+      +'日報入力から手で選んでください。');
+    return;
+  }
+
+  // ★Codexレビュー[P1]（2026-08-29）: 前に入力しかけた元請・現場名・車両・作業区分が
+  //   残ったまま登録されるおそれがあった。**登録後と同じ正規のリセット**を通す。
+  //   （編集は別モーダルの e- 側なので、既存予定を上書きする心配はない）
   switchTab('input');
+  if(typeof clearForm==='function')clearForm();
+
   if(d)document.getElementById('s-date').value=d;
   document.getElementById('s-date-end').value='';
   // 1人目を責任者、残りを同行にする（予定のコピー機能と同じ入れ方）
   const lead=document.getElementById('s-leader');
   if(lead)lead.value=picked[0]||'';
   selectedMembers=[];
-  const shokunin=getShokunin();   // ★グローバルではない。既存のコピー機能と同じ取り方
   picked.slice(1).forEach(function(n){
     const i=shokunin.indexOf(n);
     if(i>=0)selectedMembers.push(i);
   });
   renderMemberChips('member-selector',selectedMembers,toggleMember);
   if(typeof refreshButaiField==='function')refreshButaiField('s',{force:true});
-  availPicked=[];
+  availPicked=[];availPickedKey='';
 }
 
 // 元請のプルダウンを作り直す（経験で並べ替えるため）。

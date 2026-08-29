@@ -28,15 +28,18 @@ export const SUGGEST_MAX_CANDIDATES = 40;   // 1回に送る候補の上限
 export const SUGGEST_MAX_TOKENS = 500;      // 1回に返させる長さの上限
 export const SUGGEST_DAILY_LIMIT = 200;     // 1日の呼び出し回数の上限
 export const SUGGEST_DEFAULT_MODEL = 'gpt-4o-mini';
+export const SUGGEST_TIMEOUT_MS = 15000;    // OpenAIの応答を待つ上限
 
 // 送ってよい形か検査する。★氏名らしき文字が混ざっていたら弾く（事故防止）。
 export function sanitizeCandidates(list) {
   const out = [];
-  (list || []).forEach((c, i) => {
-    if (!c || out.length >= SUGGEST_MAX_CANDIDATES) return;
+  // ★Codexレビュー[P2]: 40件たまった後も末尾まで走査していた。break で止める
+  for (const c of (list || [])) {
+    if (out.length >= SUGGEST_MAX_CANDIDATES) break;
+    if (!c) continue;
     const id = String(c.id || '').trim();
     // idは c1, c2 … の形だけ許す。氏名が入っていたらここで落ちる
-    if (!/^c[0-9]{1,3}$/.test(id)) return;
+    if (!/^c[0-9]{1,3}$/.test(id)) continue;
     out.push({
       id,
       days: Math.max(0, Math.min(9999, Number(c.days) || 0)),
@@ -45,7 +48,7 @@ export function sanitizeCandidates(list) {
       kyoten: ['本社', '関東支店', '両方'].indexOf(String(c.kyoten || '')) >= 0
         ? String(c.kyoten) : ''
     });
-  });
+  }
   return out;
 }
 
@@ -77,7 +80,7 @@ export function buildPrompt({ genba, need, candidates }) {
 }
 
 // AIの返事を検査して、こちらの候補にあるidだけ残す。
-export function parsePicks(text, candidates) {
+export function parsePicks(text, candidates, need) {
   const known = new Set(candidates.map(c => c.id));
   let obj = null;
   try {
@@ -93,20 +96,28 @@ export function parsePicks(text, candidates) {
     seen.add(id);
     out.push({ id, reason: String((p && p.reason) || '').slice(0, 60) });
   });
-  return out;
+  // ★Codexレビュー[P2]: 頼んだ人数より多く返ってきたら切る
+  const n = Math.max(1, Math.min(candidates.length, Number(need) || candidates.length));
+  return out.slice(0, n);
 }
 
 // 1日の呼び出し回数。D1に無ければ数えない（フェイルオープンにしない＝
 // 数えられないときは呼ばない。課金は止める側に倒す）。
-export async function overDailyLimit(env) {
+// ★Codexレビュー[P1]（2026-08-29）: 「数える→OpenAIを呼ぶ→記録する」の順だと、
+//   同時に大量に叩かれたとき全部が上限判定を通過してから呼びに行ける（すり抜け）。
+//   **先に1件記録してから数える**（席を取ってから数える）。取った席が上限を超えて
+//   いたら呼ばずに返す。多少多めに記録されても、課金する側が止まるので安全側。
+export async function reserveCall(env) {
   try {
+    await env.DB.prepare('INSERT INTO ai_log(at, ok) VALUES(?,?)')
+      .bind(new Date().toISOString(), 0).run();
     const today = new Date().toISOString().slice(0, 10);
     const res = await env.DB.prepare(
       'SELECT COUNT(*) AS c FROM ai_log WHERE at LIKE ?').bind(today + '%').all();
     const count = (res.results && res.results[0] && Number(res.results[0].c)) || 0;
-    return count >= SUGGEST_DAILY_LIMIT;
+    return count <= SUGGEST_DAILY_LIMIT;   // 席が取れたか
   } catch (_e) {
-    return true;   // ★数えられないなら呼ばない（課金が青天井になるのを防ぐ）
+    return false;   // ★記録も数えもできないなら呼ばない（課金が青天井になるのを防ぐ）
   }
 }
 
@@ -120,7 +131,12 @@ export async function logCall(env, ok) {
 // OpenAIを呼ぶ。fetchを差し替えられるようにしてテストから実際に動かす。
 export async function callOpenAI(env, prompt, fetchImpl) {
   const f = fetchImpl || fetch;
+  // ★Codexレビュー[P2]: タイムアウトが無いと、応答が返らないとき窓口が詰まる
+  const ac = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = ac ? setTimeout(() => ac.abort(), SUGGEST_TIMEOUT_MS) : null;
+  try {
   const res = await f('https://api.openai.com/v1/chat/completions', {
+    signal: ac ? ac.signal : undefined,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -136,6 +152,13 @@ export async function callOpenAI(env, prompt, fetchImpl) {
   });
   if (!res.ok) throw new Error('OpenAI ' + res.status);
   const j = await res.json();
-  return (j && j.choices && j.choices[0] && j.choices[0].message
-    && j.choices[0].message.content) || '';
+  const ch = j && j.choices && j.choices[0];
+  // ★Codexレビュー[P2]: 長さ切れで途中終了した返事をそのまま使わない
+  if (ch && ch.finish_reason && ch.finish_reason !== 'stop') {
+    throw new Error('OpenAI 応答が途中で終わりました (' + ch.finish_reason + ')');
+  }
+  return (ch && ch.message && ch.message.content) || '';
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
