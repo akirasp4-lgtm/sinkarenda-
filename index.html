@@ -4923,6 +4923,7 @@ function availToInput(){
   const lead=document.getElementById('s-leader');
   if(lead)lead.value=picked[0]||'';
   selectedMembers=[];
+  const shokunin=getShokunin();   // ★グローバルではない。既存のコピー機能と同じ取り方
   picked.slice(1).forEach(function(n){
     const i=shokunin.indexOf(n);
     if(i>=0)selectedMembers.push(i);
