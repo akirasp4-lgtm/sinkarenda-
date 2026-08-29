@@ -4686,7 +4686,9 @@ function renderAvailDay() {
   //   ★押しても予定は作らない。入力画面を開くところまで。
   const pickable = (n) => {
     const on = availPicked.indexOf(n) >= 0;
-    return '<span class="member-chip" onclick="availTogglePick(' + JSON.stringify(esc(n)) + ')"'
+    // ★onclickの中は単引用符。JSON.stringifyだと二重引用符が出て属性が切れる（実機で発覚）
+    const safe = String(n).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    return '<span class="member-chip" onclick="availTogglePick(&#39;' + esc(safe) + '&#39;)"'
       + ' style="cursor:pointer;user-select:none'
       + (on ? ';background:#0C447C;color:#fff;border-color:#0C447C' : '') + '">'
       + (on ? '✓ ' : '') + esc(n);
