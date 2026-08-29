@@ -1840,8 +1840,18 @@ function getShokunin(){
 //   画面の説明文（「空き人員のリストに出なくなります」）と一致させる。
 function getActiveShokunin(){
   const names=getShokunin();
+  // ★2026-08-29 Codexレビュー[P2]: 氏名だけで「無効」を集めていた。
+  //   奥田さんはグローライズとGRHDの両方に実在するので、他社の同名の人を
+  //   無効にすると、こちらの有効な人まで名簿から消えていた。
+  //   **今見ている画面に属する会社の行だけ**で判定する。
   const off={};
-  (allMembers||[]).forEach(m=>{ if(m&&m.active===false)off[String(m.name||'').trim()]=true; });
+  (allMembers||[]).forEach(m=>{
+    if(!m||m.active!==false)return;
+    const co=String(m.company||'');
+    const mine = currentCompany==='全社' ? true
+      : (hasKyotenAxis(currentCompany) ? hasKyotenAxis(co) : co===currentCompany);
+    if(mine)off[String(m.name||'').trim()]=true;
+  });
   return names.filter(n=>!off[String(n||'').trim()]);
 }
 
@@ -3020,6 +3030,23 @@ function conflictsIfAdded(existing, candidates) {
   return findConflicts((existing || []).concat(candidates)).filter(function (c) {
     return !before.has(sig(c));
   });
+}
+// ★2026-08-29 Codexレビュー[P3]: 空き確認と経営の画面で「その日の状態」を
+//   別々に書いていた。片方だけ直すと同じ「空き24人」が画面で食い違う。
+//   1つの関数にまとめて、両方から使う。
+//   'busy'（現場等）/'souko'（倉庫）/'yasumi'（休み）/未設定（空き）
+function dayStateByName(nippos, ymd) {
+  var state = {};
+  (nippos || []).forEach(function (n) {
+    if (!n || n.isGhost) return;
+    if (String(n.date || '') !== ymd) return;
+    var name = String(n.name || '').trim();
+    if (!name) return;
+    // 現場に出ているが最優先。同じ日に休みと出勤が両方あるときは「出勤」と見なす
+    if (state[name] === 'busy') return;
+    state[name] = n.yasumi ? 'yasumi' : (n.souko ? 'souko' : 'busy');
+  });
+  return state;
 }
 // ===== PHASE2-CONFLICT-RULE:END =====
 
@@ -4548,14 +4575,8 @@ function renderAvailDay() {
   if (!box) return;
   updateQualSelect();
   if (!d) { box.innerHTML = ''; return; }
-  const cn = companyNippos().filter(n => !n.isGhost && n.date === d);
-  const state = {};   // 氏名 → busy / yasumi / souko
-  cn.forEach(n => {
-    const cur = state[n.name];
-    // 現場に出ているが优先。同じ日に休みと出勤が両方あるときは「出勤」と見なす
-    if (cur === 'busy') return;
-    state[n.name] = n.yasumi ? 'yasumi' : (n.souko ? 'souko' : 'busy');
-  });
+  // ★2026-08-29: 分類は dayStateByName に一本化（経営の画面と同じ数え方にするため）
+  const state = dayStateByName(companyNippos(), d);
   // ★2026-08-28 フェーズ3: 資格で絞る。期限切れは「持っていない」扱い（qualHeldBy）。
   //   絞るのは名簿の側。空き・休み・出勤の数え方そのものは変えない。
   const wantQual = searchFilterValue('avail-qual');

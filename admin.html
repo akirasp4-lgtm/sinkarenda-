@@ -628,6 +628,12 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 <button class="btn btn-secondary" style="margin-top:8px" onclick="loadData()">更新</button>
 </div>
 
+<!-- 経営（依頼文10番「経営者が最初に確認する画面」）2026-08-29 -->
+<div id="screen-dash" class="screen">
+<div class="page-title">経営</div>
+<div id="dash-body"></div>
+</div>
+
 <!-- 事務 -->
 <div id="screen-jimu" class="screen">
 <div class="page-title">事務</div>
@@ -788,6 +794,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 
 <!-- タブバー -->
 <div class="tab-bar">
+  <button class="tab" onclick="switchTab('dash')"><span class="tab-icon">📈</span>経営</button>
   <button class="tab" onclick="switchTab('list')"><span class="tab-icon">📅</span>カレンダー</button>
   <button class="tab" onclick="switchTab('avail')"><span class="tab-icon">👥</span>空き確認</button>
   <button class="tab" onclick="switchTab('genba')"><span class="tab-icon">🏗️</span>現場管理</button>
@@ -1670,7 +1677,9 @@ function initApp(){
     if(sendQueue.count()>0){renderPendingUi();scheduleDrain(1000+Math.floor(Math.random()*2000));}
     window.addEventListener('online',()=>scheduleDrain(1000+Math.floor(Math.random()*2000)));
   }catch(e){}
-  switchTab('jimu');
+  // ★2026-08-29 依頼文10番「経営者が最初に確認する画面」。開いた最初に経営を出す。
+  //   事務の画面は1タップ隣（元に戻すならここを 'jimu' に戻すだけ）。
+  switchTab('dash');
 }
 
 // ===== モバイル便利機能 =====
@@ -1811,6 +1820,13 @@ function renderKyotenBar(){
     if(currentKyoten!==KYOTEN_ALL){currentKyoten=KYOTEN_ALL;try{localStorage.setItem('genba-kyoten',KYOTEN_ALL);}catch(e){}}
     return;
   }
+  // ★2026-08-29 Codexレビュー[P1]: 経営の画面は拠点で数字が変わらない
+  //   （本社の人が関東に出ていれば「空き」ではない＝空き人数は会社まるごとでしか
+  //     決まらない）。押しても何も変わらないバーを出すと、
+  //   「拠点で絞った数字」だと誤解される。この画面では隠す。
+  //   ★currentKyoten は触らない（他の画面で選んでいた拠点を勝手に戻さない）。
+  const active=document.querySelector('.screen.active');
+  if(active&&active.id==='screen-dash'){bar.style.display='none';return;}
   bar.style.display='flex';
   placeKyotenBar();          // ★見ている画面の見出しの下へ移す
   const chips=[KYOTEN_ALL,KYOTEN_HONSHA,KYOTEN_KANTO];
@@ -1848,6 +1864,9 @@ function switchCompany(c){
   dataLoadOk=false;
   selectedMembers=[];editSelectedMembers=[];
   initCompanyBar();renderKyotenBar();refreshKyotenField('s',{force:true});refreshKyotenField('e',{force:true});initMemberUI();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();updateNoticeBar();
+  // ★2026-08-29 Codexレビュー[P1]: これが無いと、会社を切り替えた直後に
+  //   前の会社の数字が経営の画面に残ったまま見える（loadData が終わるまで）。
+  try{renderDash();}catch(e){}
   refreshVehicleSelect('s');
   if(typeof renderVehicleWeek==='function'){renderVehicleWeek();renderVehicleList();}
   loadData();
@@ -1887,7 +1906,9 @@ function filteredNippos(){
 // ===== タブ =====
 function switchTab(t){
   setTimeout(()=>{try{renderKyotenBar();}catch(e){}},0);   // ★拠点バーを今の画面へ移す
-  const tabs=['list','avail','genba','vehicle','jimu','billing','history'];   // ★並びはタブボタンの順と必ず一致させる
+  // ★並びはタブボタンの順と必ず一致させる（ずれると別のタブが開く）
+  //   2026-08-29: 先頭に 'dash'（経営）を追加。ボタン側も先頭に足してある。
+  const tabs=['dash','list','avail','genba','vehicle','jimu','billing','history'];
   document.querySelectorAll('.tab').forEach((el,i)=>el.classList.toggle('active',tabs[i]===t));
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   const target=document.getElementById('screen-'+t);
@@ -1899,6 +1920,7 @@ function switchTab(t){
   if(t==='avail'){renderAvailList();try{renderAvailDay();}catch(e){}}
   if(t==='billing')initBillingTab();
   if(t==='history')loadHistory();
+  if(t==='dash')renderDash();
   hapticTap();
 }
 
@@ -2251,8 +2273,18 @@ function getShokunin(){
 //   画面の説明文（「空き人員のリストに出なくなります」）と一致させる。
 function getActiveShokunin(){
   const names=getShokunin();
+  // ★2026-08-29 Codexレビュー[P2]: 氏名だけで「無効」を集めていた。
+  //   奥田さんはグローライズとGRHDの両方に実在するので、他社の同名の人を
+  //   無効にすると、こちらの有効な人まで名簿から消えていた。
+  //   **今見ている画面に属する会社の行だけ**で判定する。
   const off={};
-  (allMembers||[]).forEach(m=>{ if(m&&m.active===false)off[String(m.name||'').trim()]=true; });
+  (allMembers||[]).forEach(m=>{
+    if(!m||m.active!==false)return;
+    const co=String(m.company||'');
+    const mine = currentCompany==='全社' ? true
+      : (hasKyotenAxis(currentCompany) ? hasKyotenAxis(co) : co===currentCompany);
+    if(mine)off[String(m.name||'').trim()]=true;
+  });
   return names.filter(n=>!off[String(n||'').trim()]);
 }
 function getGenbaMasterNames(){
@@ -2404,6 +2436,147 @@ function expandCompactRows(headers,rows){
   if(!headers||!headers.length)return rows||[];
   return (rows||[]).map(r=>{const o={};for(let i=0;i<headers.length;i++)o[headers[i]]=r[i];return o;});
 }
+// ===== PHASE4-DASH-RULE:BEGIN =====
+// 管理画面（経営者が最初に確認する画面）の数え方。2026-08-29。
+//
+// ★依頼文（原文）の10番:
+//   「経営者が最初に確認する画面では、
+//     『今日』… 稼働人数／空き人数／現場数／重複警告／未確定案件
+//     『今週』… 人員稼働率／空き予定／案件予定
+//     が一目で確認できるようにする。」
+//
+// ★DOMに一切触らない純関数だけを置くこと。
+//   cf/test/phase4-dash.test.js がこの区間だけを取り出して vm で実際に動かす。
+//
+// ★一番大事な決めごと：**空き確認の画面と同じ数え方をする**。
+//   同じ「空き24人」が画面ごとに違う数字だと、誰も数字を信じなくなる。
+//   renderAvailDay と同じ分類（休み／倉庫／出勤／空き）をここに写してある。
+//   片方を直したらもう片方も直すこと。
+
+// その人のその日の状態。'busy'（現場等）/'souko'（倉庫）/'yasumi'（休み）/なし（空き）
+// ★renderAvailDay と同じ優先順位: 現場に出ているが最優先。
+function dashDayState(nippos, ymd) {
+  // ★空き確認の画面と同じ関数を使う（PHASE2ブロックの dayStateByName）。
+  //   別々に書くと、同じ「空き24人」が画面ごとに食い違う。
+  return dayStateByName(nippos, ymd);
+}
+
+// 現場として数えない作業区分。
+// ★Codexレビュー[P2]（2026-08-29）: 現場名さえ入っていれば
+//   「事務所（本社）」「移動」まで1現場として数えていた。
+var DASH_NOT_SITE = ['事務所', '倉庫作業', '移動', '休み'];
+function dashIsSite(n) {
+  if (!n || n.isGhost || n.yasumi || n.yotei) return false;
+  if (!String(n.loc || '').trim()) return false;
+  return DASH_NOT_SITE.indexOf(String(n.workType || '').trim()) < 0;
+}
+
+// 現場の数＝その日に動いている「元請＋現場名」の種類。
+// ★休み・📌予定・ゴーストは数えない。現場名が空の行も数えない
+//   （事務所・移動などは現場ではない）。
+function dashSiteCount(nippos, ymd) {
+  var seen = {}, count = 0;
+  (nippos || []).forEach(function (n) {
+    if (!dashIsSite(n)) return;
+    if (String(n.date || '') !== ymd) return;
+    var key = String(n.genba || '').trim() + String.fromCharCode(1) + String(n.loc || '').trim();
+    if (seen[key]) return;
+    seen[key] = 1; count++;
+  });
+  return count;
+}
+
+// 今日の1行分。roster は名簿の氏名の配列（有効な人だけ）。
+function dashToday(nippos, roster, ymd) {
+  var state = dashDayState(nippos, ymd);
+  var working = 0, souko = 0, yasumi = 0, free = 0;
+  (roster || []).forEach(function (name) {
+    var s = state[String(name || '').trim()];
+    if (s === 'busy') working++;
+    else if (s === 'souko') souko++;
+    else if (s === 'yasumi') yasumi++;
+    else free++;
+  });
+  return {
+    // 稼働＝現場等＋倉庫。倉庫作業も仕事なので稼働に入れる
+    working: working + souko, genba: working, souko: souko,
+    yasumi: yasumi, free: free,
+    roster: (roster || []).length,
+    sites: dashSiteCount(nippos, ymd)
+  };
+}
+
+// 週の始まり（月曜）。'YYYY-MM-DD' を返す。
+function dashWeekStart(ymd) {
+  var t = Date.parse(String(ymd || '') + 'T00:00:00Z');
+  if (isNaN(t)) return '';
+  var d = new Date(t);
+  var w = d.getUTCDay();               // 0=日
+  var back = (w === 0) ? 6 : (w - 1);  // 月曜まで戻す
+  d.setUTCDate(d.getUTCDate() - back);
+  return d.toISOString().slice(0, 10);
+}
+
+// 月曜からの7日分の日付
+function dashWeekDays(ymd) {
+  var s = dashWeekStart(ymd);
+  if (!s) return [];
+  var out = [], base = Date.parse(s + 'T00:00:00Z');
+  for (var i = 0; i < 7; i++) {
+    out.push(new Date(base + i * 86400000).toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+// 今週の表。1日ずつ dashToday を出す。
+function dashWeek(nippos, roster, ymd) {
+  return dashWeekDays(ymd).map(function (d) {
+    var t = dashToday(nippos, roster, d);
+    t.date = d;
+    return t;
+  });
+}
+
+// 人員稼働率。
+// ★分母は「その日に動ける人（名簿 − 休み）」×「予定が1件でもある日」。
+//   ・休みの人は動かせないので分母から外す（外さないと有休が多い週ほど低く出る）
+//   ・日曜など1件も予定が無い日は分母から外す（入れると実態より低く出て意味を失う）
+// ★Codexレビュー[P2]（2026-08-29）: この式は「予定が入っている日の配置率」であって
+//   「会社の稼ぎ時をどれだけ使えたか」ではない。画面の但し書きにもそう書くこと。
+function dashUtilization(week) {
+  var work = 0, cap = 0, days = 0;
+  (week || []).forEach(function (d) {
+    if (!d) return;
+    if (d.working === 0 && d.yasumi === 0) return;   // まるごと予定が無い日は数えない
+    var c = d.roster - d.yasumi;                     // その日に動ける人
+    if (c <= 0) return;
+    work += d.working; cap += c; days++;
+  });
+  return { percent: cap ? Math.round(work * 1000 / cap) / 10 : null, work: work, cap: cap, days: days };
+}
+
+// 未確定案件＝現場マスタで「見積中」のもの（受注が決まっていない）。
+// ★完工・中止は数えない。
+function dashUnconfirmed(jobsites) {
+  return (jobsites || []).filter(function (j) {
+    return String((j && j.status) || '').trim() === '見積中';
+  }).length;
+}
+
+// 今週に動く案件（元請＋現場名の種類）。
+function dashWeekSites(nippos, ymd) {
+  var seen = {};
+  dashWeekDays(ymd).forEach(function (d) {
+    (nippos || []).forEach(function (n) {
+      if (!dashIsSite(n)) return;
+      if (String(n.date || '') !== d) return;
+      seen[String(n.genba || '').trim() + String.fromCharCode(1) + String(n.loc || '').trim()] = 1;
+    });
+  });
+  return Object.keys(seen).length;
+}
+// ===== PHASE4-DASH-RULE:END =====
+
 // ===== PHASE3-QUAL-RULE:BEGIN =====
 // 資格の判定（2026-08-28 フェーズ3の土台）。
 //
@@ -2676,6 +2849,23 @@ function conflictsIfAdded(existing, candidates) {
     return !before.has(sig(c));
   });
 }
+// ★2026-08-29 Codexレビュー[P3]: 空き確認と経営の画面で「その日の状態」を
+//   別々に書いていた。片方だけ直すと同じ「空き24人」が画面で食い違う。
+//   1つの関数にまとめて、両方から使う。
+//   'busy'（現場等）/'souko'（倉庫）/'yasumi'（休み）/未設定（空き）
+function dayStateByName(nippos, ymd) {
+  var state = {};
+  (nippos || []).forEach(function (n) {
+    if (!n || n.isGhost) return;
+    if (String(n.date || '') !== ymd) return;
+    var name = String(n.name || '').trim();
+    if (!name) return;
+    // 現場に出ているが最優先。同じ日に休みと出勤が両方あるときは「出勤」と見なす
+    if (state[name] === 'busy') return;
+    state[name] = n.yasumi ? 'yasumi' : (n.souko ? 'souko' : 'busy');
+  });
+  return state;
+}
 // ===== PHASE2-CONFLICT-RULE:END =====
 
 function parseRows(rows,company){
@@ -2719,6 +2909,7 @@ function generateGhosts(nippos){
 // 画面は手元の情報で先に更新し、サーバとの照合は裏で走らせる。
 // ※集計・マージ・アーカイブなど大量に動かす管理操作は従来どおり await のまま。
 function rerenderAll(){
+  try{renderDash();}catch(e){}   // ★経営の画面（データが届いたら数字を出し直す）
   try{initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();updateLocationSuggestions();refreshVehicleSelect('s');}catch(e){console.error(e);}
 }
 function removeLocalByIds(ids){
@@ -3027,6 +3218,9 @@ async function loadData(forceGas){
     // ★資格。古いGAS応答／古いD1スナップショットには入っていないので、その時は空のまま
     allQuals=qualSafe(Array.isArray(json.qualifications)?json.qualifications:[]);
     initMemberUI();initGenbaSelects();renderList();updateAvailability();updateJimu();updateGenbaFilter();refreshGmTab();updateLocationSuggestions();refreshVehicleSelect('s');
+    // ★2026-08-29 Codexレビュー[P1]: ここを忘れると経営の数字が0のままになる。
+    //   rerenderAll() はこの経路を通らない（テストがそこだけ見ていて素通りしていた）。
+    try{renderDash();}catch(e){}
     saveSnapshot(requestCompany,json);setStaleBadge(false);
     dataLoadOk=true;
   }catch(e){
@@ -3689,6 +3883,101 @@ function todayYmd(){
 // （実データでは典47件のうち今日以降が12件）。0件のときはバナーごと消す。
 function currentConflicts(){
   return findConflicts(companyNippos(),{from:todayYmd()});
+}
+
+// ===== 経営（依頼文10番）2026-08-29 =====
+// ★数字の定義を画面に書いておくこと。定義が見えない数字は経営判断に使えない。
+//   数え方そのものは PHASE4-DASH-RULE の純関数（cf/test/phase4-dash.test.js が検査）。
+function renderDash(){
+  const box=document.getElementById('dash-body');
+  if(!box)return;
+  const ymd=todayYmd();
+  const nippos=companyNippos();
+  const roster=getActiveShokunin();
+  const t=dashToday(nippos,roster,ymd);
+  const week=dashWeek(nippos,roster,ymd);
+  const util=dashUtilization(week);
+  const days=dashWeekDays(ymd);
+  // 重複警告は既存の判定をそのまま使う（フェーズ2で決めたルール）
+  let conflictToday=0,conflictAll=0;
+  try{
+    const cs=currentConflicts();
+    conflictAll=cs.length;
+    conflictToday=cs.filter(c=>c.date===ymd).length;
+  }catch(e){}
+  // ★Codexレビュー[P1]: allJobsites は全社ぶん入っている（グローライズ表示時は
+  //   会社指定なしで取得するため）。元請マスタで今の会社のものだけに絞る。
+  const allowed=new Set(getGenbaMasterNames());
+  const myJobsites=(allJobsites||[]).filter(j=>allowed.has(String((j&&j.genba)||'').trim()));
+  const unconf=dashUnconfirmed(myJobsites);
+  const weekSites=dashWeekSites(nippos,ymd);
+
+  const cell=(v,l,color)=>'<div class="metric"><div class="metric-val"'
+    +(color?(' style="color:'+color+'"'):'')+'>'+v+'</div><div class="metric-lbl">'+esc(l)+'</div></div>';
+
+  const wd=['月','火','水','木','金','土','日'];
+  // ★Codexレビュー[P1]: 拠点で数字は変わらない（誰が空いているかは会社ぜんぶで
+  //   見ないと決まらない＝本社の人が関東に出ていたら「空き」ではない）。
+  //   なのに拠点名を出すと「拠点で絞った数字」に見えてしまう。
+  //   **この画面は常に会社まるごと**であることを、はっきり書く。
+  const scope=hasKyotenAxis(currentCompany)?(esc(currentCompany)+'（本社＋関東支店の合計）')
+    :esc(currentCompany);
+  let html='<div style="font-size:12px;color:#666;margin-bottom:8px">'+esc(ymd)+'　'+scope+'</div>';
+
+  html+='<div style="font-size:14px;font-weight:600;margin:4px 0 6px">今日</div>'
+    +'<div class="grid2" style="grid-template-columns:repeat(3,1fr)">'
+    +cell(t.working+' 人','稼働（現場'+t.genba+'／倉庫'+t.souko+'）')
+    +cell(t.free+' 人','空き','#1D9E75')
+    +cell(t.sites+' 件','現場の数')
+    +'</div>'
+    +'<div class="grid2" style="grid-template-columns:repeat(3,1fr);margin-top:8px">'
+    +cell(conflictToday+' 件','重複警告（今日）',conflictToday?'#A32D2D':'')
+    +cell(unconf+' 件','未確定案件（見積中）',unconf?'#C77700':'')
+    +cell(t.yasumi+' 人','休み')
+    +'</div>';
+
+  if(conflictAll){
+    html+='<div style="margin-top:8px"><button class="btn btn-secondary btn-sm" style="width:100%" onclick="openConflictList()">'
+      +'⚠ 今日以降の重複 '+conflictAll+' 件を見る</button></div>';
+  }
+
+  html+='<div style="font-size:14px;font-weight:600;margin:16px 0 6px">今週（'
+    +esc(days[0]||'')+' 〜 '+esc(days[6]||'')+'）</div>'
+    +'<div class="grid2" style="grid-template-columns:repeat(2,1fr)">'
+    +cell(util.percent===null?'－':(util.percent+' %'),'人員稼働率（休みを除く）')
+    +cell(weekSites+' 件','案件（動く現場）')
+    +'</div>';
+
+  html+='<div style="overflow-x:auto;margin-top:10px"><table style="width:100%;border-collapse:collapse;font-size:13px">'
+    +'<tr style="color:#666;font-size:12px"><th style="text-align:left;padding:4px">日</th>'
+    +'<th style="text-align:right;padding:4px">稼働</th><th style="text-align:right;padding:4px">空き</th>'
+    +'<th style="text-align:right;padding:4px">休み</th><th style="text-align:right;padding:4px">現場</th></tr>'
+    +week.map((d,i)=>{
+      const today=d.date===ymd;
+      return '<tr style="border-top:1px solid #eee'+(today?';background:#EAF2FB;font-weight:600':'')+'">'
+        +'<td style="padding:5px 4px">'+esc(d.date.slice(5))+'（'+wd[i]+'）'+(today?' 今日':'')+'</td>'
+        +'<td style="text-align:right;padding:5px 4px">'+d.working+'</td>'
+        +'<td style="text-align:right;padding:5px 4px;color:#1D9E75">'+d.free+'</td>'
+        +'<td style="text-align:right;padding:5px 4px;color:#999">'+d.yasumi+'</td>'
+        +'<td style="text-align:right;padding:5px 4px">'+d.sites+'</td></tr>';
+    }).join('')
+    +'</table></div>';
+
+  html+='<div style="font-size:11px;color:#999;margin-top:12px;line-height:1.7">'
+    +'※ 名簿 '+t.roster+' 人（職人マスタで「有効」の人）。稼働＋空き＋休み＝名簿の人数。<br>'
+    +'※ 稼働＝現場などに出ている人＋倉庫作業の人。空き確認の画面と同じ数え方。<br>'
+    +'※ 現場の数＝その日に動いている「元請＋現場名」の種類。'
+    +'休み・📌予定・事務所・倉庫作業・移動は数えない。<br>'
+    +'※ 人員稼働率＝'+(util.percent===null?'－':(util.work+' ÷ '+util.cap))
+    +'（動ける人＝名簿−休み、'+util.days+'日ぶん）。予定が1件も無い日は数に入れない。<br>'
+    +'　これは「予定が入っている日に、動ける人をどれだけ配置できたか」であって、'
+    +'会社の稼ぎ時をどれだけ使えたか、ではありません。<br>'
+    +'※ この画面は拠点で分けません（本社の人が関東に出ていれば「空き」ではないため、'
+    +'空き人数は会社まるごとでしか決まりません）。<br>'
+    +'※ 未確定案件＝現場管理のステータスが「見積中」のもの。'
+    +'</div>';
+
+  box.innerHTML=html;
 }
 
 function renderConflictBanner(){
@@ -4785,14 +5074,8 @@ function renderAvailDay() {
   if (!box) return;
   updateQualSelect();
   if (!d) { box.innerHTML = ''; return; }
-  const cn = companyNippos().filter(n => !n.isGhost && n.date === d);
-  const state = {};   // 氏名 → busy / yasumi / souko
-  cn.forEach(n => {
-    const cur = state[n.name];
-    // 現場に出ているが优先。同じ日に休みと出勤が両方あるときは「出勤」と見なす
-    if (cur === 'busy') return;
-    state[n.name] = n.yasumi ? 'yasumi' : (n.souko ? 'souko' : 'busy');
-  });
+  // ★2026-08-29: 分類は dayStateByName に一本化（経営の画面と同じ数え方にするため）
+  const state = dayStateByName(companyNippos(), d);
   // ★2026-08-28 フェーズ3: 資格で絞る。期限切れは「持っていない」扱い（qualHeldBy）。
   //   絞るのは名簿の側。空き・休み・出勤の数え方そのものは変えない。
   const wantQual = searchFilterValue('avail-qual');

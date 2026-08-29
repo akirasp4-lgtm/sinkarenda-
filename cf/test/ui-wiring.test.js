@@ -244,11 +244,22 @@ describe('重複の知らせ（2026-08-27 フェーズ2 Task3）', () => {
     expect(m[0]).toContain('esc(j.genba)');
   });
 
-  it('★新しいUIに class="tab" を増やしていない（下部ナビの添字がずれる）', () => {
-    // switchTab() は querySelectorAll('.tab') と tabs配列を添字で対応させている。
-    // .tab が1つ増えるだけで下部ナビの選択表示が全部ずれる
-    expect((read('index.html').match(/class="tab"/g) || []).length).toBe(4);
-    expect((read('admin.html').match(/class="tab"/g) || []).length).toBe(6);
+  it('★下部ナビのボタンの並びと switchTab の tabs配列が完全に一致する', () => {
+    // switchTab() は querySelectorAll('.tab') と tabs配列を**添字で**対応させている。
+    // 1つずれるだけで「押したタブと違う画面が開く」。
+    // ★2026-08-29: 以前は個数を決め打ちで数えていたが、それだと
+    //   「両方を同時に間違えた」場合を通してしまう。実際の並びどうしを突き合わせる。
+    ['index.html', 'admin.html'].forEach(f => {
+      const src = read(f);
+      // 下部ナビのボタン（class="tab" / class="tab active"）を出てくる順に拾う
+      const buttons = [...src.matchAll(/<button class="tab(?: active)?"[^>]*onclick="switchTab\('([^']+)'\)"/g)]
+        .map(m => m[1]);
+      const arr = src.match(/const tabs=\[([^\]]*)\]/);
+      expect(arr, f + ' に tabs配列が無い').toBeTruthy();
+      const names = arr[1].split(',').map(x => x.trim().replace(/^'|'$/g, '')).filter(Boolean);
+      expect(buttons.length, f + ': ボタンが1つも拾えていない').toBeGreaterThan(0);
+      expect(names, f + ': タブボタンの並びと tabs配列がずれている').toEqual(buttons);
+    });
   });
 });
 
@@ -351,9 +362,13 @@ describe('空き人員の名前リスト（2026-08-27 フェーズ2 Task5・要�
     expect(r[0]).toContain('getActiveShokunin()');
   });
 
-  it('★同じ日に休みと出勤が両方あるときは「出勤」とみなす（空きに数えない）', () => {
+  it('★分類は共通関数 dayStateByName を使う（経営の画面と食い違わせない）', () => {
+    // ★2026-08-29: 以前はここで renderAvailDay の中に書かれた分岐を文字で見張っていた。
+    //   経営の画面が同じ分類を別に書いたので、1つの関数にまとめた。
+    //   優先順位そのもの（休みと出勤が両方なら出勤）は phase4-dash.test.js が
+    //   vm で実際に動かして検査している。
     const m = src.match(/function renderAvailDay\(\)\s*\{[\s\S]*?\n\}/);
-    expect(m[0]).toContain("if (cur === 'busy') return;");
+    expect(m[0]).toContain('dayStateByName(');
   });
 
   it('延期・中止になった現場の人を別枠で出す（要件8の後半）', () => {
@@ -512,5 +527,145 @@ describe('todayYmd は日本時間', () => {
       expect(body).toContain("timeZone:'Asia/Tokyo'");
       expect(body).toContain('en-CA');   // en-CA が YYYY-MM-DD を返す
     });
+  });
+});
+
+// ============================================================
+// 経営の画面（依頼文10番）2026-08-29
+// ★数え方そのものは phase4-dash.test.js が vm で実際に動かす。ここは配線の見張り。
+// ============================================================
+describe('経営の画面（管理画面のみ）', () => {
+  const src = read('admin.html');
+
+  it('画面・タブ・描画の呼び出しがそろっている', () => {
+    expect(src, '画面の箱').toContain('id="screen-dash"');
+    expect(src, '中身の入れ物').toContain('id="dash-body"');
+    expect(src, 'タブボタン').toContain("switchTab('dash')");
+    expect(src, 'タブを開いたときの描画').toMatch(/if\(t==='dash'\)renderDash\(\)/);
+    expect(src, '判定ブロック').toContain('// ===== PHASE4-DASH-RULE:BEGIN =====');
+  });
+
+  it('★データが届いたあとにも数字を出し直す（初回だけ空になるのを防ぐ）', () => {
+    const m = src.match(/function rerenderAll\(\)\{[\s\S]{0,400}/);
+    expect(m).toBeTruthy();
+    expect(m[0], 'rerenderAll から renderDash を呼んでいない').toContain('renderDash()');
+  });
+
+  it('★依頼文10番の8項目がすべて画面に出ている', () => {
+    const m = src.match(/function renderDash\(\)\{[\s\S]*?\n\}/);
+    expect(m).toBeTruthy();
+    const f = m[0];
+    ['稼働', '空き', '現場の数', '重複警告', '未確定案件',   // 今日の5つ
+     '人員稼働率', '案件'].forEach(w => expect(f, w + ' が無い').toContain(w));
+    expect(f, '今週の日別（空き予定）').toContain('dashWeek(');
+  });
+
+  it('★重複警告はフェーズ2の判定を使い回す（別の数え方をしない）', () => {
+    const f = src.match(/function renderDash\(\)\{[\s\S]*?\n\}/)[0];
+    expect(f).toContain('currentConflicts()');
+  });
+
+  it('★空き人数は空き確認と同じ名簿から出す', () => {
+    const f = src.match(/function renderDash\(\)\{[\s\S]*?\n\}/)[0];
+    expect(f).toContain('getActiveShokunin()');
+  });
+
+  it('氏名・現場名をそのままHTMLに入れていない（escを通している）', () => {
+    const f = src.match(/function renderDash\(\)\{[\s\S]*?\n\}/)[0];
+    // 画面に出す外部由来の文字は会社名・拠点・日付。すべて esc を通す
+    expect(f).toContain('esc(currentCompany)');
+    expect(f).toContain('esc(ymd)');
+  });
+
+  it('★職人用（index.html）には入れない（経営の数字は現場に出さない）', () => {
+    const idx = read('index.html');
+    expect(idx).not.toContain('id="screen-dash"');
+    expect(idx).not.toContain('PHASE4-DASH-RULE');
+  });
+});
+
+// ============================================================
+// 経営の画面：Codexレビューで見つかった穴の再発防止（2026-08-29）
+// ============================================================
+describe('経営の画面：Codexレビューの[P1]の再発防止', () => {
+  const src = read('admin.html');
+
+  it('★[P1] データが届く経路そのものから renderDash を呼んでいる', () => {
+    // ★以前は rerenderAll() の中だけを見張っていたが、loadData の成功経路は
+    //   rerenderAll() を通らない。つまり「テストは緑・画面はずっと0」だった。
+    //   数字が変わりうる3つの入口すべてを見張る。
+    const i = src.indexOf('saveSnapshot(requestCompany,json)');
+    expect(i, 'loadData の成功経路が見つからない').toBeGreaterThan(0);
+    expect(src.slice(i - 600, i), 'データ取得の直後に renderDash を呼んでいない')
+      .toContain('renderDash()');
+
+    const body = (name) => {
+      const st = src.indexOf('function ' + name + '(');
+      let d = 0;
+      for (let k = src.indexOf('{', st); k < src.length; k++) {
+        if (src[k] === '{') d++;
+        else if (src[k] === '}') { d--; if (d === 0) return src.slice(st, k + 1); }
+      }
+      return '';
+    };
+    expect(body('rerenderAll'), 'rerenderAll から呼んでいない').toContain('renderDash()');
+    expect(body('switchCompany'), '会社を切り替えた直後に前の会社の数字が残る')
+      .toContain('renderDash()');
+  });
+
+  it('★[P1] 未確定案件を今の会社の元請だけに絞っている（他社の見積中を混ぜない）', () => {
+    const f = src.match(/function renderDash\(\)\{[\s\S]*?\n\}/)[0];
+    expect(f, '会社で絞っていない').toContain('getGenbaMasterNames()');
+    expect(f, '全件をそのまま数えている').not.toMatch(/dashUnconfirmed\(allJobsites\)/);
+  });
+
+  it('★[P1] 拠点で数字は変わらないので、拠点名をラベルに出さない', () => {
+    const f = src.match(/function renderDash\(\)\{[\s\S]*?\n\}/)[0];
+    expect(f, '拠点名を出すと「拠点で絞った数字」に見える').not.toContain('esc(currentKyoten)');
+    expect(f).toContain('本社＋関東支店の合計');
+  });
+
+  it('★[P2] 現場として数えない作業区分がはっきり決まっている', () => {
+    expect(src).toContain('var DASH_NOT_SITE');
+    const f = src.match(/function dashIsSite\([\s\S]*?\n\}/)[0];
+    expect(f).toContain('DASH_NOT_SITE');
+  });
+});
+
+describe('無効の人の判定は会社ごと（2026-08-29 Codexレビュー[P2]）', () => {
+  FILES.forEach(f => {
+    it(f + ': ★他社の同姓同名が無効でも、こちらの人が消えない', () => {
+      // 奥田さんはグローライズとGRHDの両方に実在する
+      const src = read(f);
+      const m = src.match(/function getActiveShokunin\(\)\{[\s\S]*?\n\}/);
+      expect(m).toBeTruthy();
+      expect(m[0], '会社を見ずに氏名だけで無効にしている').toContain('hasKyotenAxis');
+    });
+  });
+});
+
+describe('タブと画面の対応（2026-08-29 Codexレビュー[P3]）', () => {
+  FILES.forEach(f => {
+    it(f + ': ★タブ名に対応する画面が1つずつ存在する', () => {
+      const src = read(f);
+      const arr = src.match(/const tabs=\[([^\]]*)\]/);
+      const names = arr[1].split(',').map(x => x.trim().replace(/^'|'$/g, '')).filter(Boolean);
+      names.forEach(t => {
+        const hits = (src.match(new RegExp('id="screen-' + t + '"', 'g')) || []).length;
+        expect(hits, f + ': screen-' + t + ' が ' + hits + ' 個ある（1個であるべき）').toBe(1);
+      });
+    });
+  });
+});
+
+describe('経営の画面では拠点バーを出さない（2026-08-29 Codexレビュー[P1]）', () => {
+  it('★押しても数字が変わらないバーを出さない（拠点で絞った数字だと誤解される）', () => {
+    const src = read('admin.html');
+    const m = src.match(/function renderKyotenBar\(\)\{[\s\S]*?\n\}/);
+    expect(m).toBeTruthy();
+    expect(m[0], '経営の画面でバーを隠していない').toContain("active.id==='screen-dash'");
+    // ★他の画面で選んでいた拠点を勝手に戻さないこと
+    const seg = m[0].slice(m[0].indexOf("screen-dash"), m[0].indexOf("screen-dash") + 120);
+    expect(seg, '拠点の選択を勝手に戻している').not.toContain('currentKyoten=');
   });
 });
