@@ -5185,9 +5185,11 @@ function renderAvailDay() {
   //   ★押しても予定は作らない。入力画面を開くところまで。
   const pickable = (n) => {
     const on = availPicked.indexOf(n) >= 0;
-    // ★onclickの中は単引用符。JSON.stringifyだと二重引用符が出て属性が切れる（実機で発覚）
-    const safe = String(n).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-    return '<span class="member-chip" onclick="availTogglePick(&#39;' + esc(safe) + '&#39;)"'
+    // ★氏名をJSのコードに埋めない（実機で引用符の事故を2回起こした）。
+    //   data属性に置き、クリックは下の委譲で拾う。引用符の心配が構造的に消える。
+    //   esc() は < > & を実体化するが " は残るので、属性用に " も逃がす。
+    const attr = esc(String(n)).replace(/"/g, '&quot;');
+    return '<span class="member-chip" data-pick="' + attr + '"'
       + ' style="cursor:pointer;user-select:none'
       + (on ? ';background:#0C447C;color:#fff;border-color:#0C447C' : '') + '">'
       + (on ? '✓ ' : '') + esc(n);
@@ -5399,6 +5401,14 @@ function availTogglePick(name){
   renderAvailDay();
 }
 function availClearPick(){availPicked=[];renderAvailDay();}
+// チップのクリックは委譲で拾う（氏名をJSのコードに埋めないため）。
+// ★1回だけ登録する。renderAvailDay は何度も呼ばれるので、ここで登録してはいけない。
+document.addEventListener('click', function (ev) {
+  const el = ev.target && ev.target.closest ? ev.target.closest('[data-pick]') : null;
+  if (!el) return;
+  availTogglePick(el.getAttribute('data-pick') || '');
+});
+
 
 // 選んだ人と日付を入れた状態で予定入力画面を開く
 function availToInput(){
