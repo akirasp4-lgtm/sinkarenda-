@@ -4933,6 +4933,14 @@ document.addEventListener('click', function (ev) {
 // 選んだ人と日付を入れた状態で予定入力画面を開く
 function availToInput(){
   if(!availPicked.length)return;
+  // ★Codexレビュー[P1]（2026-08-29）: 描画時のチェックだけでは足りない。
+  //   会社を切り替えても画面が描き直されるまで選択が残り、古い会社の人のまま
+  //   押せてしまう。**押した瞬間にも条件が変わっていないか確かめる。**
+  if(availPickKey()!==availPickedKey){
+    availPicked=[];availPickedKey='';renderAvailDay();
+    alert('日付か会社が変わったので、選び直してください。');
+    return;
+  }
   const d=(document.getElementById('avail-day')||{}).value||'';
   const picked=availPicked.slice();
   const shokunin=getShokunin();   // ★グローバルではない。既存のコピー機能と同じ取り方
