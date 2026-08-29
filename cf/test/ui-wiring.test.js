@@ -446,7 +446,7 @@ describe('管理画面にもフェーズ2のUIが入っていること（2026-08
     };
     // ★2026-08-28 フェーズ3: updateQualSelect（資格プルダウン）も同一を強制する
     ['renderConflictBanner', 'currentConflicts', 'renderAvailDay', 'releasedByStatus', 'searchNippos',
-     'updateQualSelect', 'activeRosterMembers', 'todayYmd']
+     'updateQualSelect', 'activeRosterMembers', 'todayYmd', 'updateGenbaRankSelect']
       .forEach(fn => {
         const a = pick(read('index.html'), fn), b = pick(src, fn);
         expect(a, 'index.html に ' + fn + ' が無い').toBeTruthy();
@@ -667,5 +667,30 @@ describe('経営の画面では拠点バーを出さない（2026-08-29 Codexレ
     // ★他の画面で選んでいた拠点を勝手に戻さないこと
     const seg = m[0].slice(m[0].indexOf("screen-dash"), m[0].indexOf("screen-dash") + 120);
     expect(seg, '拠点の選択を勝手に戻している').not.toContain('currentKyoten=');
+  });
+});
+
+// ============================================================
+// 候補者を出す（依頼文の要件5）2026-08-29
+// ★AIは使わない。空き × 資格 × 元請の経験で出す＝0円。
+// ============================================================
+describe('候補者の配線', () => {
+  FILES.forEach(f => {
+    const src = read(f);
+    it(f + ': 元請で並べ替えるプルダウンがある', () => {
+      expect(src).toContain('id="avail-genba"');
+      expect(src).toContain('function updateGenbaRankSelect(');
+      expect(src).toContain('// ===== PHASE5-PICK-RULE:BEGIN =====');
+    });
+    it(f + ': ★空きの一覧を経験順に並べている', () => {
+      const m = src.match(/function renderAvailDay\(\)\s*\{[\s\S]*?\n\}/);
+      expect(m[0]).toContain('rankCandidates(');
+      expect(m[0]).toContain("searchFilterValue('avail-genba')");
+    });
+    it(f + ': ★候補から予定を勝手に作らない（依頼文「最終決定は管理者が行う」）', () => {
+      const m = src.match(/function renderAvailDay\(\)\s*\{[\s\S]*?\n\}/);
+      ['saveNippo', 'submitNippo', 'action:\'add\'', 'openEditModal']
+        .forEach(bad => expect(m[0], bad + ' を呼んでいる').not.toContain(bad));
+    });
   });
 });

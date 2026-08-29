@@ -481,3 +481,77 @@ describe('POST /api/sync（修正7: force=1の結線）', () => {
     expect(state.snapshot.rows).toBe(100);
   });
 });
+
+
+// ============================================================
+// 毎朝のアラート（依頼文の要件9）2026-08-29
+// ★LINE Bot（VM上のPython・毎朝6:00のAPScheduler）がここを読んで社員へ流す。
+// ============================================================
+describe('GET /api/alerts', () => {
+  // 既存の makeSnapshot は19列。アラートは 作業区分・拠点・部隊 を見るので21列で作る。
+  const H21 = [...HEADERS, '作業区分', '車両', '拠点', '部隊'];
+  const r21 = (o = {}) => H21.map(h => {
+    const base = {
+      作業日: '2026-08-31', 元請名: 'きんでん東', 現場名: 'A現場', 氏名: 'A', 役割: '代表',
+      人工: 1, 会社: 'グローライズ', ID: 'x', 作業区分: '現場作業', 拠点: '本社'
+    };
+    const v = Object.prototype.hasOwnProperty.call(o, h) ? o[h] : base[h];
+    return v === undefined ? '' : v;
+  });
+  const snap21 = (rows) => {
+    const payload = JSON.stringify({
+      compact: 1, headers: H21, rows,
+      members: [{ name: 'A', company: 'グローライズ', division: '', butai: '', active: true },
+                { name: 'B', company: 'グローライズ', division: '', butai: '', active: true }],
+      genbaMaster: [], jobsites: [], qualifications: []
+    });
+    return { payload, rows: rows.length, hash: 'h', membersCount: 2, genbaCount: 0,
+             jobsitesCount: 0, bytes: payload.length, at: new Date().toISOString() };
+  };
+  const envOf = (rows) => ({
+    DB: makeMockDB({ snapshot: snap21(rows), syncLog: freshSyncLog() }).db
+  });
+
+  it('★問題が無ければ text が空（Bot側は空なら送らない）', async () => {
+    const res = await worker.fetch(new Request(
+      'https://worker.test/api/alerts?date=2026-08-31&today=2026-08-30'), envOf([r21()]), {});
+    const j = await res.json();
+    expect(j.status).toBe('ok');
+    expect(j.problem).toBe(false);
+    expect(j.text).toBe('');
+  });
+
+  it('重複があれば text に入る', async () => {
+    const res = await worker.fetch(new Request(
+      'https://worker.test/api/alerts?date=2026-08-31&today=2026-08-30'),
+      envOf([r21({ 現場名: 'X' }), r21({ 現場名: 'Y' })]), {});
+    const j = await res.json();
+    expect(j.problem).toBe(true);
+    expect(j.text).toContain('予定が重なっています');
+    expect(j.counts['重複']).toBe(1);
+  });
+
+  it('★date を省くと「明日」を見る（毎朝、翌日の段取りを確認するため）', async () => {
+    const res = await worker.fetch(new Request(
+      'https://worker.test/api/alerts?today=2026-08-30'), envOf([r21()]), {});
+    const j = await res.json();
+    expect(j.date).toBe('2026-08-31');
+  });
+
+  it('会社を指定できる（既定は全社）', async () => {
+    const res = await worker.fetch(new Request(
+      'https://worker.test/api/alerts?today=2026-08-30&company=' + encodeURIComponent('和信カインド')),
+      envOf([r21({ 現場名: 'X' }), r21({ 現場名: 'Y' })]), {});
+    const j = await res.json();
+    expect(j.company).toBe('和信カインド');
+    expect(j.problem, '他社の重複が混ざっている').toBe(false);
+  });
+
+  it('★取り込み前でもクラッシュせずエラーを返す（Botは送らない）', async () => {
+    const { db } = makeMockDB({ snapshot: null });
+    const res = await worker.fetch(new Request('https://worker.test/api/alerts'), { DB: db }, {});
+    expect(res.status).toBe(503);
+    const j = await res.json();
+    expect(j.status).toBe('error');
+  });
+});

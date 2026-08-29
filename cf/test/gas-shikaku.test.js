@@ -103,12 +103,16 @@ describe('資格マスタの投影（画面へ出す列だけに削る）', () =
     expect(json).not.toContain('1991-01-24');
   });
 
-  it('出すのは 氏名/会社/資格名/区分/有効期限 だけ（会社はWorkerが絞るために要る）', () => {
+  it('出すのは 氏名/会社/資格名/区分/有効期限/取得場所 だけ（免許番号は出さない）', () => {
+    // ★2026-08-29 取得場所を足した。「第一種工事検査員って何？」が
+    //   取得場所（富士通ネットワークソリューションズ）で一発で解けたため。
     const out = g.projectQualifications_(data, false, '');
     expect(out).toHaveLength(2);
-    expect(Object.keys(out[0]).sort()).toEqual(['company', 'expires', 'kind', 'name', 'qual']);
-    expect(out[0]).toEqual({ name: '真柄', company: 'グローライズ', qual: '高所作業車運転技能講習', kind: '技能講習', expires: '' });
-    expect(out[1]).toEqual({ name: '河原', company: 'グローライズ', qual: '第一種電気工事士', kind: '国家資格', expires: '2029-01-17' });
+    expect(Object.keys(out[0]).sort()).toEqual(['company', 'expires', 'kind', 'name', 'place', 'qual']);
+    expect(out[0]).toEqual({ name: '真柄', company: 'グローライズ', qual: '高所作業車運転技能講習',
+      kind: '技能講習', expires: '', place: '' });
+    expect(out[1]).toEqual({ name: '河原', company: 'グローライズ', qual: '第一種電気工事士',
+      kind: '国家資格', expires: '2029-01-17', place: '' });
   });
 
   it('会社で絞れる（和信カインドの画面にグローライズの資格を出さない）', () => {
@@ -116,7 +120,7 @@ describe('資格マスタの投影（画面へ出す列だけに削る）', () =
       row('真柄', 'グローライズ', '', '玉掛け', '技能講習', '', '', '', ''),
       row('誰か', '和信カインド', '', 'フォークリフト', '技能講習', '', '', '', '')];
     const out = g.projectQualifications_(d, true, '和信カインド');
-    expect(out).toEqual([{ name: '誰か', company: '和信カインド', qual: 'フォークリフト', kind: '技能講習', expires: '' }]);
+    expect(out).toEqual([{ name: '誰か', company: '和信カインド', qual: 'フォークリフト', kind: '技能講習', expires: '', place: '' }]);
   });
 
   it('氏名か資格名が空の行は捨てる', () => {
@@ -125,7 +129,7 @@ describe('資格マスタの投影（画面へ出す列だけに削る）', () =
       row('真柄', 'グローライズ', '', '', '技能講習', '', '', '', ''),
       row('真柄', 'グローライズ', '', '玉掛け', '技能講習', '', '', '', '')];
     expect(g.projectQualifications_(d, false, '')).toEqual(
-      [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習', expires: '' }]);
+      [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習', expires: '', place: '' }]);
   });
 
   it('★見出しの並びが変わっても名前で探す（列を足されても壊れない）', () => {
@@ -134,7 +138,7 @@ describe('資格マスタの投影（画面へ出す列だけに削る）', () =
       ['グローライズ', '玉掛け', '真柄', '2030-03-31', '技能講習', 'なにか']
     ];
     expect(g.projectQualifications_(d, false, '')).toEqual(
-      [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習', expires: '2030-03-31' }]);
+      [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習', expires: '2030-03-31', place: '' }]);
   });
 
   it('★必要な見出しが無ければ空で返す（doGet全体を巻き込んで落とさない）', () => {

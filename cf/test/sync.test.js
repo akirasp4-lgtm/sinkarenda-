@@ -1318,10 +1318,12 @@ describe('21列目 部隊（フェーズ1）', () => {
 describe('資格をD1へ持ち込む', () => {
   it('★qualifications が消えずに残る（書き忘れ検出）', () => {
     const out = sanitizeForStorage(makeCompactPayload({
-      qualifications: [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習', expires: '2030-03-31' }]
+      qualifications: [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習',
+                         expires: '2030-03-31', place: 'コベルコ教習所' }]
     }));
     expect(out.qualifications).toEqual(
-      [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習', expires: '2030-03-31' }]);
+      [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習',
+         expires: '2030-03-31', place: 'コベルコ教習所' }]);
   });
 
   it('★免許番号など余計な列が混ざっていても捨てる（二重の歯止め）', () => {
@@ -1330,7 +1332,7 @@ describe('資格をD1へ持ち込む', () => {
     }));
     expect(JSON.stringify(out.qualifications)).not.toContain('03569');
     expect(JSON.stringify(out.qualifications)).not.toContain('河原　将司');
-    expect(Object.keys(out.qualifications[0]).sort()).toEqual(['company', 'expires', 'kind', 'name', 'qual']);
+    expect(Object.keys(out.qualifications[0]).sort()).toEqual(['company', 'expires', 'kind', 'name', 'place', 'qual']);
   });
 
   it('★古いGAS応答（qualifications が無い）でも取り込みを止めない', () => {
@@ -1347,7 +1349,8 @@ describe('資格をD1へ持ち込む', () => {
 //   「本当に前回の値を引き継ぐか」を1度も確かめていなかった＝素通りだった。
 // ============================================================
 describe('syncAll：資格の引き継ぎ', () => {
-  const QUALS = [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習', expires: '' }];
+  const QUALS = [{ name: '真柄', company: 'グローライズ', qual: '玉掛け', kind: '技能講習',
+                   expires: '', place: 'コベルコ教習所' }];
 
   it('★GAS応答に資格が無いとき、D1の前回の資格をそのまま残す（空で上書きしない）', async () => {
     const clock = stubIncreasingClock();

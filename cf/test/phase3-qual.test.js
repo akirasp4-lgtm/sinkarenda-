@@ -253,7 +253,8 @@ describe('画面側の歯止め（qualSafe）', () => {
       name: '河原', company: GLO, qual: '第一種電気工事士', kind: '国家資格', expires: '',
       免許番号: '03569', 正式氏名: '河原　将司', 取得日: '1991-01-24', 出典: 'x.xlsx'
     }]);
-    expect(Object.keys(out[0]).sort()).toEqual(['company', 'expires', 'kind', 'name', 'qual']);
+    // ★2026-08-29 取得場所(place)を足した。免許番号は引き続き出さない
+    expect(Object.keys(out[0]).sort()).toEqual(['company', 'expires', 'kind', 'name', 'place', 'qual']);
     const j = JSON.stringify(out);
     expect(j).not.toContain('03569');
     expect(j).not.toContain('将司');

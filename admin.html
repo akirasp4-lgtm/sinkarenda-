@@ -502,6 +502,13 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <select id="avail-qual" onchange="renderAvailDay()" style="margin-bottom:0">
     <option value="">資格で絞らない</option>
   </select>
+  <!-- ★2026-08-29 要件5（候補者を提案する）。空き × 資格 × その元請の経験。
+       AIは使わない＝0円。並べて見せるだけで、予定は勝手に作らない
+       （依頼文「最終決定は管理者が行う」） -->
+  <label style="margin-top:10px">元請の経験がある人を上に</label>
+  <select id="avail-genba" onchange="renderAvailDay()" style="margin-bottom:0">
+    <option value="">並べ替えない</option>
+  </select>
   <div id="avail-day-result"></div>
 </div>
 <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:12px">
@@ -2577,6 +2584,76 @@ function dashWeekSites(nippos, ymd) {
 }
 // ===== PHASE4-DASH-RULE:END =====
 
+// ===== PHASE5-PICK-RULE:BEGIN =====
+// 候補者を出す（依頼文の要件5・2026-08-29）。
+//
+// ★依頼文（原文）:
+//   「5. AI人員配置提案 — 案件に必要な人数・資格・経験を入力すると、
+//     予定・資格・経験・過去案件を確認して候補者を提案する。
+//     ただしAIが勝手に予定確定しない。最終決定は管理者が行う。」
+//
+// ★欲しいのは「候補者のリスト」。それは
+//     その日空いている ＋ 資格を持っている ＋ その元請の経験がある
+//   で出せる。**AIは要らない＝0円**（利用者判断 2026-08-29）。
+//   AIを足すとしたら「なぜこの人か」の文章と細かい順位付けだけ。
+//
+// ★「最終決定は管理者が行う」＝ここは並べ替えて見せるだけ。
+//   予定を勝手に作らない。押したら登録される、みたいな作りにしないこと。
+//
+// ★DOMに一切触らない純関数だけを置くこと。
+//   cf/test/phase5-pick.test.js がこの区間だけを取り出して vm で動かす。
+//   ★index.html と admin.html でこのブロックは1文字も違ってはいけない。
+
+// その人がその元請で働いた「日数」。同じ日に何件あっても1日と数える。
+// ★休み・📌予定・ゴーストは経験に数えない。
+function experienceDays(nippos, name, genba) {
+  var n2 = String(name == null ? '' : name).trim();
+  var g2 = String(genba == null ? '' : genba).trim();
+  if (!n2 || !g2) return 0;
+  var days = {};
+  (nippos || []).forEach(function (n) {
+    if (!n || n.isGhost || n.yasumi || n.yotei) return;
+    if (String(n.name || '').trim() !== n2) return;
+    if (String(n.genba || '').trim() !== g2) return;
+    var d = String(n.date || '').trim();
+    if (d) days[d] = 1;
+  });
+  return Object.keys(days).length;
+}
+
+// 元請の一覧（経験のある人がいる順）。プルダウン用。
+function experienceGenbaChoices(nippos, roster) {
+  var names = {};
+  (roster || []).forEach(function (m) { names[String((m && m.name) || m || '').trim()] = 1; });
+  var count = {};
+  (nippos || []).forEach(function (n) {
+    if (!n || n.isGhost || n.yasumi || n.yotei) return;
+    var g = String((n && n.genba) || '').trim();
+    if (!g || !names[String((n && n.name) || '').trim()]) return;
+    count[g] = (count[g] || 0) + 1;
+  });
+  return Object.keys(count).sort(function (a, b) {
+    if (count[b] !== count[a]) return count[b] - count[a];
+    return a < b ? -1 : (a > b ? 1 : 0);
+  });
+}
+
+// 候補者を並べる。names は「その日空いている人」の氏名の配列。
+// 経験が多い順 → 同じなら元の並び順（名簿の順）を保つ。
+// ★元請を指定していないときは並べ替えない（勝手に順番を変えない）。
+function rankCandidates(names, nippos, genba) {
+  var list = (names || []).map(function (n, i) {
+    return { name: n, days: experienceDays(nippos, n, genba), _i: i };
+  });
+  if (!String(genba == null ? '' : genba).trim()) return list;
+  list.sort(function (a, b) {
+    if (b.days !== a.days) return b.days - a.days;
+    return a._i - b._i;
+  });
+  return list;
+}
+// ===== PHASE5-PICK-RULE:END =====
+
 // ===== PHASE3-QUAL-RULE:BEGIN =====
 // 資格の判定（2026-08-28 フェーズ3の土台）。
 //
@@ -2639,7 +2716,8 @@ function qualIndexBy(quals) {
     for (var i = 0; i < list.length; i++) { if (list[i].qual === qual) { found = i; break; } }
     var raw = String((q && q.expires) || '');
     var expires = (raw === '' || raw === QUAL_UNKNOWN || qualValidYmd(raw)) ? raw : QUAL_UNKNOWN;
-    var item = { qual: qual, kind: String((q && q.kind) || ''), expires: expires };
+    var item = { qual: qual, kind: String((q && q.kind) || ''), expires: expires,
+                 place: String((q && q.place) || '') };
     if (found < 0) { list.push(item); return; }
     var old = list[found];
     if (old.expires === '') return;                       // 期限なしが一番強い
@@ -2715,6 +2793,7 @@ function qualAlerts(idx, roster, todayYmd) {
       if (st !== 'expired' && st !== 'soon' && st !== 'unknown') return;
       out.push({
         name: name, qual: q.qual, expires: q.expires, status: st,
+        place: q.place || '',
         days: st === 'unknown' ? null : qualDaysUntil(q.expires, todayYmd)
       });
     });
@@ -2737,7 +2816,10 @@ function qualSafe(list) {
     return {
       name: String((q && q.name) || ''), company: String((q && q.company) || ''),
       qual: String((q && q.qual) || ''), kind: String((q && q.kind) || ''),
-      expires: String((q && q.expires) || '')
+      expires: String((q && q.expires) || ''),
+      // ★2026-08-29 取得場所。「第一種工事検査員って何？」が取得場所（富士通）で
+      //   解けたので画面にも出す。免許番号は引き続き出さない。
+      place: String((q && q.place) || '')
     };
   });
 }
@@ -5073,6 +5155,7 @@ function renderAvailDay() {
   const box = document.getElementById('avail-day-result');
   if (!box) return;
   updateQualSelect();
+  updateGenbaRankSelect();
   if (!d) { box.innerHTML = ''; return; }
   // ★2026-08-29: 分類は dayStateByName に一本化（経営の画面と同じ数え方にするため）
   const state = dayStateByName(companyNippos(), d);
@@ -5091,9 +5174,20 @@ function renderAvailDay() {
   const yasumi = roster.filter(name => state[name] === 'yasumi');
   const souko = roster.filter(name => state[name] === 'souko');
   const busy = roster.filter(name => state[name] === 'busy');
-  const chip = (names) => names.length
-    ? names.map(n => '<span class="member-chip" style="pointer-events:none">' + esc(n) + '</span>').join('')
-    : '<span style="color:#999;font-size:13px">いません</span>';
+  // ★2026-08-29 要件5: その元請の経験がある人を上に並べ、経験の日数を出す。
+  //   予定は作らない＝見せるだけ（依頼文「最終決定は管理者が行う」）。
+  const wantGenba = searchFilterValue('avail-genba');
+  const chip = (names, rank) => {
+    if (!names.length) return '<span style="color:#999;font-size:13px">いません</span>';
+    if (!rank || !wantGenba) {
+      return names.map(n => '<span class="member-chip" style="pointer-events:none">' + esc(n) + '</span>').join('');
+    }
+    return rankCandidates(names, companyNippos(), wantGenba).map(c =>
+      '<span class="member-chip" style="pointer-events:none">' + esc(c.name)
+      + (c.days ? '<span style="font-size:11px;color:#0C447C">（' + c.days + '日）</span>'
+                : '<span style="font-size:11px;color:#999">（経験なし）</span>')
+      + '</span>').join('');
+  };
   let html = '<div style="margin-top:12px">';
   if (wantQual) {
     html += '<div style="font-size:13px;color:#0C447C;background:#EAF2FB;border-radius:6px;padding:6px 10px;margin-bottom:8px">'
@@ -5101,7 +5195,7 @@ function renderAvailDay() {
       + '<span style="color:#666">（有効期限が切れている人は外しています）</span></div>';
   }
   html += '<div style="font-size:14px;font-weight:600;color:#1D9E75;margin-bottom:6px">空いている ' + free.length + ' 人</div>'
-    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">' + chip(free) + '</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">' + chip(free, true) + '</div>'
     + '<div style="font-size:13px;color:#666;margin-bottom:4px">休み ' + yasumi.length + ' 人　倉庫 ' + souko.length + ' 人　出勤 ' + busy.length + ' 人</div>';
   const released = releasedByStatus(d);
   if (released.length) {
@@ -5114,6 +5208,10 @@ function renderAvailDay() {
   }
   // ★資格の期限のお知らせ。切れている物ともうすぐ切れる物だけ出す
   //   （毎日200件出る警告は誰も読まない＝フェーズ2で学んだこと）。
+  if (wantGenba) {
+    html = html.replace('空いている ' + free.length + ' 人',
+      '空いている ' + free.length + ' 人（「' + esc(wantGenba) + '」の経験が多い順）');
+  }
   const alerts = qualAlerts(qidx, rosterMembers, todayYmd());
   if (alerts.length) {
     html += '<div style="font-size:14px;font-weight:600;color:#A32D2D;margin:12px 0 6px">'
@@ -5122,6 +5220,7 @@ function renderAvailDay() {
       + alerts.map(a => '<div style="font-size:12px;background:' + (a.status === 'expired' ? '#FBEAEA' : (a.status === 'unknown' ? '#EEE' : '#FFF6E5'))
         + ';border-radius:6px;padding:5px 8px">'
         + '<b>' + esc(a.name) + '</b>　' + esc(a.qual)
+        + (a.place ? '<span style="font-size:11px;color:#999">（' + esc(a.place) + '）</span>' : '')
         + '<span style="color:#666">　'
         + (a.status === 'unknown'
             ? '有効期限の欄が読めません（資格マスタを直してください）'
@@ -5155,6 +5254,23 @@ function updateQualSelect() {
   sel.innerHTML = '<option value="">資格で絞らない</option>'
     + (missing ? '<option value="' + esc(cur) + '">' + esc(cur) + '（この日に使える人はいません）</option>' : '')
     + opts.map(q => '<option value="' + esc(q) + '">' + esc(q) + '</option>').join('');
+  if (cur) sel.value = cur;
+}
+
+// 元請のプルダウンを作り直す（経験で並べ替えるため）。
+// ★選んでいた元請が消えても、選択を勝手に外さない（資格のプルダウンと同じ考え方）。
+function updateGenbaRankSelect() {
+  const sel = document.getElementById('avail-genba');
+  if (!sel) return;
+  const list = experienceGenbaChoices(companyNippos(), activeRosterMembers());
+  const cur = sel.value;
+  const missing = cur && list.indexOf(cur) < 0;
+  const sig = list.join(String.fromCharCode(1)) + String.fromCharCode(2) + (missing ? cur : '');
+  if (sel.dataset.sig === sig) return;
+  sel.dataset.sig = sig;
+  sel.innerHTML = '<option value="">並べ替えない</option>'
+    + (missing ? '<option value="' + esc(cur) + '">' + esc(cur) + '（実績なし）</option>' : '')
+    + list.map(g => '<option value="' + esc(g) + '">' + esc(g) + '</option>').join('');
   if (cur) sel.value = cur;
 }
 

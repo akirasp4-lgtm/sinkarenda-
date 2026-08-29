@@ -1695,7 +1695,7 @@ function getOrCreateVehicleResSheet_(ss) {
 //   資格マスタには 免許番号・正式氏名・取得日・出典 が入っている。
 //   現場画面(index.html)はPINが無く全社員が使い、受け取った内容は
 //   CloudflareのD1と端末のlocalStorageにも残る。
-//   そのため **GASを出る時点で 氏名/資格名/区分/有効期限 の4つに削る**。
+//   そのため **GASを出る時点で 氏名/会社/資格名/区分/有効期限/取得場所 だけに削る**。
 //   単価(rate)をWorkerで落としているのと同じ考え方だが、資格は
 //   「そもそもGASから出さない」＝もっと手前で止める。
 //   免許番号が要る場面（提出書類など）はスプレッドシートを直接見る。
@@ -1759,6 +1759,11 @@ function projectQualifications_(data, filterByCompany, requestedCompany) {
   // 氏名と資格名が無ければ、この機能は成立しない。doGet全体を巻き込まず空で返す。
   if (iName < 0 || iQual < 0) return [];
   const iCo = idx('会社'), iKind = idx('区分'), iExp = idx('有効期限');
+  // ★2026-08-29 利用者判断で「取得場所」を足した。
+  //   「第一種工事検査員って何？」が取得場所（富士通ネットワークソリューションズ）で
+  //   一発で解けた。資格名だけでは何の資格か分からないことが実際に起きた。
+  //   ★免許番号は引き続き出さない（個人情報）。
+  const iPlace = idx('取得場所');
   const out = [];
   for (let i = 1; i < data.length; i++) {
     const r = data[i];
@@ -1777,7 +1782,8 @@ function projectQualifications_(data, filterByCompany, requestedCompany) {
       company: iCo >= 0 ? String(r[iCo] == null ? '' : r[iCo]).trim() : '',
       qual: qual,
       kind: iKind >= 0 ? String(r[iKind] == null ? '' : r[iKind]).trim() : '',
-      expires: iExp >= 0 ? normalizeQualDate_(r[iExp]) : ''
+      expires: iExp >= 0 ? normalizeQualDate_(r[iExp]) : '',
+      place: iPlace >= 0 ? String(r[iPlace] == null ? '' : r[iPlace]).trim() : ''
     });
   }
   return out;

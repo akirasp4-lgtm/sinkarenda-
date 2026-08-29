@@ -2,6 +2,15 @@ import { readSchedule } from './read.js';
 import { syncAll, cleanupSyncLog } from './sync.js';
 import { readPresident } from './pres-read.js';
 import { syncPresident, cleanupPresSyncLog } from './pres-sync.js';
+import { buildAlerts, formatAlertsText, hasProblem, addDays } from './alerts.js';
+
+// ★日本時間の「今日」。Workerは世界標準時で動くので、そのまま new Date() を使うと
+//   朝6時の通知が前日ぶんになる日が出る（画面側の todayYmd と同じ考え方）。
+function jstToday() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date());
+}
 
 // 画面（GitHub Pages）だけが正規の呼び出し元。/api/syncのOrigin検証・CORSの両方で使う。
 const ALLOWED_ORIGIN = 'https://akirasp4-lgtm.github.io';
@@ -114,6 +123,38 @@ export default {
         return json(await readSchedule(env, company, kyoten));
       } catch (e) {
         // 画面側は status!=='ok' を見てGASへ落ちる
+        return json({ status: 'error', message: String(e.message || e) }, 500);
+      }
+    }
+
+    // ===== 毎朝のアラート（依頼文の要件9）2026-08-29 =====
+    // ★LINE Bot（VM上のPython・毎朝6:00のAPScheduler）がここを読んで社員へ流す。
+    //   読み取りだけ・鍵は要らない（/api/schedule と同じ扱い＝WorkerのURL自体は公開情報）。
+    //   ★問題が無い日は text を空文字で返す。Bot側は空なら送らない。
+    //     毎日必ず届く通知は読まれなくなる（利用者判断 2026-08-29）。
+    if (url.pathname === '/api/alerts') {
+      try {
+        const company = (url.searchParams.get('company') || '全社').trim() || '全社';
+        // date 未指定なら「明日」（毎朝、翌日の段取りを確認するため）
+        const today = (url.searchParams.get('today') || jstToday()).trim();
+        const date = (url.searchParams.get('date') || addDays(today, 1)).trim();
+        const snap = await readSchedule(env, '', '');
+        if (!snap || snap.status !== 'ok') {
+          return json({ status: 'error', message: '予定データを読めませんでした' }, 503);
+        }
+        const a = buildAlerts(snap, { date, today, company });
+        return json({
+          status: 'ok', date, today, company,
+          problem: hasProblem(a), text: formatAlertsText(a),
+          counts: {
+            重複: a.conflicts.length, 責任者なし: a.noLead.length,
+            資格まもなく切れる: a.quals.length, 拠点またぎ: a.moves.length,
+            延期なのに人あり: a.stoppedWithPeople.length,
+            現場: a.siteCount, 出る人: a.workingCount, 空き: a.freeCount, 名簿: a.rosterCount,
+            見積中: a.unconfirmed.length
+          }
+        });
+      } catch (e) {
         return json({ status: 'error', message: String(e.message || e) }, 500);
       }
     }

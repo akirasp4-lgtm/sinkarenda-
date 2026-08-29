@@ -198,7 +198,9 @@ export function sanitizeForStorage(json, prevQualifications) {
       ? json.qualifications.map(q => ({
           name: String(q.name || ''), company: String(q.company || ''),
           qual: String(q.qual || ''),
-          kind: String(q.kind || ''), expires: String(q.expires || '')
+          kind: String(q.kind || ''), expires: String(q.expires || ''),
+          // ★2026-08-29 取得場所。ここに書かないと黙って消える
+          place: String(q.place || '')
         }))
       : (Array.isArray(prevQualifications) ? prevQualifications : [])
   };
