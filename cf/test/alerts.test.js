@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path';
 import vm from 'node:vm';
 import {
   buildAlerts, formatAlertsText, hasProblem, toRecords, findConflicts,
-  activeRoster, addDays, qualStatus, rosterKey
+  activeRoster, addDays, qualStatus, rosterKey, usualHeadcount
 } from '../src/alerts.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -337,5 +337,126 @@ describe('★画面の parseRows と同じ読み方をしている（2026-08-29 
     expect(src).toContain("yasumi:String(r['夜勤']||'')==='休み'");
     const mine = readFileSync(join(here, '..', 'src', 'alerts.js'), 'utf8');
     expect(mine, 'Worker側が trim している').not.toContain("get(r, '夜勤') || '').trim()");
+  });
+});
+
+
+// ============================================================
+// 人員不足 = 「いつもより人が少ない現場」（2026-08-29）
+//
+// ★依頼書の「人員不足」。現場マスタに「必要人数」の欄が無いので、
+//   その現場の過去の実績から「いつも何人か」を出して比べる。入力ゼロで効く。
+// ★一番怖いのは **鳴りすぎ**（毎朝出ると読まれなくなる）と
+//   **実績の浅い現場で誤報**（1日しか実績が無い現場に「いつも」は無い）。
+//   その2つを重点的に見張る。
+// ============================================================
+
+// n日ぶん、同じ現場に people 人ずつ入れる
+function history(genba, loc, days) {
+  const out = [];
+  days.forEach(([ymd, n]) => {
+    for (let k = 0; k < n; k++) {
+      out.push(row({ 作業日: ymd, 元請名: genba, 現場名: loc, 氏名: '人' + k,
+                     役割: k === 0 ? '代表' : '' }));
+    }
+  });
+  return out;
+}
+
+describe('人員不足 — いつもより人が少ない現場', () => {
+  const past = [['2026-08-01', 4], ['2026-08-02', 4], ['2026-08-03', 4],
+                ['2026-08-04', 4], ['2026-08-05', 4]];
+
+  it('いつも4人の現場がその日2人なら知らせる', () => {
+    const rows = history('きんでん西', 'SB心斎橋', past.concat([[D, 2]]));
+    const a = buildAlerts(payload(rows), opt);
+    expect(a.shortStaff).toHaveLength(1);
+    expect(a.shortStaff[0]).toMatchObject({ genba: 'きんでん西', loc: 'SB心斎橋', usual: 4, count: 2 });
+    expect(hasProblem(a)).toBe(true);
+    expect(formatAlertsText(a)).toContain('いつもより人が少ない現場');
+    expect(formatAlertsText(a)).toContain('いつも4人 → 2人');
+  });
+
+  it('★いつもどおりの人数なら鳴らない（これが鳴ると毎朝出る）', () => {
+    const rows = history('きんでん西', 'SB心斎橋', past.concat([[D, 4]]));
+    const a = buildAlerts(payload(rows), opt);
+    expect(a.shortStaff).toEqual([]);
+    expect(hasProblem(a)).toBe(false);
+    expect(formatAlertsText(a)).toBe('');
+  });
+
+  it('1人少ないだけでは鳴らない（4人→3人。日常の増減で毎朝出てしまう）', () => {
+    const rows = history('きんでん西', 'SB心斎橋', past.concat([[D, 3]]));
+    expect(buildAlerts(payload(rows), opt).shortStaff).toEqual([]);
+  });
+
+  it('★大きい現場で2人減っても鳴らない（10人→8人。割合の判定が効いているか）', () => {
+    // ★わざと壊して確認（2026-08-29）: 割合の判定を消してもテストが緑のままだった。
+    //   人数差の判定だけが効いていて、割合の判定を誰も見張っていなかった。
+    //   10人の現場が8人になるのは日常。ここが鳴ると大きい現場で毎朝出る。
+    const big = [['2026-08-01', 10], ['2026-08-02', 10], ['2026-08-03', 10],
+                 ['2026-08-04', 10], ['2026-08-05', 10]];
+    const rows = history('きんでん西', '大現場', big.concat([[D, 8]]));
+    expect(buildAlerts(payload(rows), opt).shortStaff).toEqual([]);
+  });
+
+  it('大きい現場でも半分以下なら鳴る（10人→5人）', () => {
+    const big = [['2026-08-01', 10], ['2026-08-02', 10], ['2026-08-03', 10],
+                 ['2026-08-04', 10], ['2026-08-05', 10]];
+    const rows = history('きんでん西', '大現場', big.concat([[D, 5]]));
+    const a = buildAlerts(payload(rows), opt);
+    expect(a.shortStaff).toHaveLength(1);
+    expect(a.shortStaff[0]).toMatchObject({ usual: 10, count: 5 });
+  });
+
+  it('★実績が4日しかない現場は判定しない（「いつも」が決められない）', () => {
+    const rows = history('きんでん西', '新規現場',
+      [['2026-08-01', 4], ['2026-08-02', 4], ['2026-08-03', 4], ['2026-08-04', 4], [D, 1]]);
+    expect(buildAlerts(payload(rows), opt).shortStaff).toEqual([]);
+  });
+
+  it('★その日が初日の現場は絶対に鳴らない（1日で終わる現場が大多数）', () => {
+    const rows = history('きんでん西', '単発現場', [[D, 1]]);
+    expect(buildAlerts(payload(rows), opt).shortStaff).toEqual([]);
+  });
+
+  it('中央値を使う＝1日だけ大人数を入れた日に引っ張られない', () => {
+    // 実績 3,3,3,3,20 → 平均7.2だが中央値3。その日2人でも「いつも3人」で判定
+    const rows = history('きんでん西', 'B現場',
+      [['2026-08-01', 3], ['2026-08-02', 3], ['2026-08-03', 3], ['2026-08-04', 3],
+       ['2026-08-05', 20], [D, 2]]);
+    const a = buildAlerts(payload(rows), opt);
+    expect(a.shortStaff).toEqual([]);   // 中央値3 × 0.6 = 1.8 → 2人は下回らない
+  });
+
+  it('★休み・予定の行は人数に数えない', () => {
+    const rows = history('きんでん西', 'SB心斎橋', past).concat([
+      row({ 作業日: D, 元請名: 'きんでん西', 現場名: 'SB心斎橋', 氏名: '人0', 役割: '代表' }),
+      row({ 作業日: D, 元請名: 'きんでん西', 現場名: 'SB心斎橋', 氏名: '人1', 夜勤: '休み' }),
+      row({ 作業日: D, 元請名: 'きんでん西', 現場名: 'SB心斎橋', 氏名: '人2', 夜勤: '予定' })]);
+    const a = buildAlerts(payload(rows), opt);
+    expect(a.shortStaff).toHaveLength(1);
+    expect(a.shortStaff[0].count).toBe(1);
+  });
+
+  it('★倉庫・事務所は現場として数えない（過去の集計でも当日でも同じ条件）', () => {
+    const rows = history('グローライズ自社', '事務所', past.concat([[D, 1]]))
+      .map(r => { const c = r.slice(); c[H.indexOf('作業区分')] = '事務所'; return c; });
+    expect(buildAlerts(payload(rows), opt).shortStaff).toEqual([]);
+  });
+
+  it('同じ人が同じ日に2行あっても1人と数える', () => {
+    const rows = history('きんでん西', 'SB心斎橋', past).concat([
+      row({ 作業日: D, 元請名: 'きんでん西', 現場名: 'SB心斎橋', 氏名: '人0', 役割: '代表' }),
+      row({ 作業日: D, 元請名: 'きんでん西', 現場名: 'SB心斎橋', 氏名: '人0' })]);
+    const a = buildAlerts(payload(rows), opt);
+    expect(a.shortStaff[0].count).toBe(1);
+  });
+
+  it('usualHeadcount は現場ごとに中央値と日数を返す', () => {
+    const recs = toRecords(payload(history('元A', '現場A', past)));
+    const u = usualHeadcount(recs);
+    const k = Object.keys(u)[0];
+    expect(u[k]).toEqual({ usual: 4, days: 5 });
   });
 });

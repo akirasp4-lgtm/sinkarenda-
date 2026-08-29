@@ -148,6 +148,7 @@ export default {
           problem: hasProblem(a), text: formatAlertsText(a),
           counts: {
             重複: a.conflicts.length, 責任者なし: a.noLead.length,
+            いつもより人が少ない: (a.shortStaff || []).length,
             資格まもなく切れる: a.quals.length, 拠点またぎ: a.moves.length,
             延期なのに人あり: a.stoppedWithPeople.length,
             現場: a.siteCount, 出る人: a.workingCount, 空き: a.freeCount, 名簿: a.rosterCount,

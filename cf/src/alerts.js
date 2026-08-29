@@ -80,6 +80,24 @@ const QUAL_SOON_DAYS = 60;
 const QUAL_NOTIFY_DAYS = [60, 30, 14, 7, 3, 1, 0];
 // 移動として見る拠点。「両方」は移動ではないので入れない。
 const MOVE_KYOTEN = ['本社', '関東支店'];
+
+// ===== 人員不足（実績ベース）=====================================
+// ★2026-08-29 利用者判断。依頼書の「人員不足」を、現場マスタに欄を足さずに出す。
+//   現場マスタに「必要人数」の列は無い。列を足しても**184現場を手で埋めるまで効かない**。
+//   代わりに、その現場の過去の実績から「いつも何人か」を出し、
+//   その日だけ大きく少なければ知らせる。**入力ゼロで明日から効く。**
+//
+//   ⚠️ 限界（正直に書く）: 223現場のうち「いつも」が決められるのは
+//      **5日以上の実績がある32現場だけ**。1日で終わる現場は判定しない
+//      （実績1日では「いつも」が無く、必ず誤報になる）。
+//
+//   しきい値は実データ130日で測って決めた（2026-08-29）:
+//     50%未満/2人差 → 全期間3日・これから0日（鳴らなすぎ）
+//     60%未満/2人差 → 全期間7日・これから1日  ← これを採用
+//     60%未満/3人差 → 全期間0日（鳴らなすぎ）
+const SHORT_MIN_DAYS = 5;    // これ未満の実績しかない現場は判定しない
+const SHORT_RATIO = 0.6;     // いつもの何割を下回ったら
+const SHORT_MIN_GAP = 2;     // かつ何人以上少なかったら
 export function qualValidYmd(s) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
   if (!m) return false;
@@ -162,6 +180,42 @@ export function activeRoster(members, company) {
 
 // ---- 本体 --------------------------------------------------------------
 // date … 見る日（ふつうは「明日」）。today … 実行日（資格の期限の基準）。
+// その行を「現場の稼働」として数えるか。★当日の集計と過去の集計で必ず同じ条件を使う。
+//   ここがズレると「いつも」と「その日」を違う物差しで比べることになり、誤報が出る。
+function isSiteWork(r) {
+  if (!r || !r.loc || !r.name) return false;
+  if (r.yotei || r.yasumi) return false;
+  if (r.souko) return false;
+  return ['事務所', '倉庫作業', '移動'].indexOf(r.workType) < 0;
+}
+
+// 現場ごとの「いつもの人数」＝日ごとの実人数の中央値。
+//   平均でなく中央値にするのは、1日だけ大人数を入れた日に引っ張られないため。
+export function usualHeadcount(recs, { minDays = SHORT_MIN_DAYS } = {}) {
+  const byDay = {};                       // 現場+SEP+日 -> Set(氏名)
+  recs.forEach(r => {
+    if (!isSiteWork(r)) return;
+    const k = r.genba + SEP + r.loc + SEP + r.date;
+    (byDay[k] || (byDay[k] = new Set())).add(r.name);
+  });
+  const counts = {};                      // 現場 -> [人数,...]
+  Object.keys(byDay).forEach(k => {
+    const idx = k.lastIndexOf(SEP);
+    const site = k.slice(0, idx);
+    (counts[site] || (counts[site] = [])).push(byDay[k].size);
+  });
+  const out = {};
+  Object.keys(counts).forEach(site => {
+    const a = counts[site].slice().sort((x, y) => x - y);
+    if (a.length < minDays) return;       // 実績が浅い現場は「いつも」を決めない
+    const m = a.length % 2
+      ? a[(a.length - 1) / 2]
+      : (a[a.length / 2 - 1] + a[a.length / 2]) / 2;
+    out[site] = { usual: m, days: a.length };
+  });
+  return out;
+}
+
 export function buildAlerts(payload, { date, today, company } = {}) {
   const recs = toRecords(payload).filter(r => !company || company === '全社'
     || rosterKey(r.company) === rosterKey(company));
@@ -188,6 +242,21 @@ export function buildAlerts(payload, { date, today, company } = {}) {
   });
   const siteList = Object.keys(sites).map(k => sites[k]);
   const noLead = siteList.filter(s => !s.lead);
+
+  // ②-2 人員不足 … その現場のいつもの人数より大きく少ない日
+  // ★テストが見つけた不具合（2026-08-29）: 判定する日自身を「いつも」の計算に入れていた。
+  //   ①その日が少ないと基準まで一緒に下がって、鳴るべき日が鳴らない
+  //   ②実績4日しかない現場が、その日を足して5日になり判定対象になってしまう
+  //   → その日を除いた過去だけで「いつも」を出す。
+  const usual = usualHeadcount(recs.filter(r => r.date !== date));
+  const shortStaff = siteList.map(s => {
+    const u = usual[s.genba + SEP + s.loc];
+    if (!u) return null;                        // 実績が浅い現場は判定しない
+    const n = new Set(s.people).size;
+    if (n >= u.usual * SHORT_RATIO) return null;
+    if (u.usual - n < SHORT_MIN_GAP) return null;
+    return { genba: s.genba, loc: s.loc, usual: u.usual, count: n, days: u.days };
+  }).filter(Boolean);
 
   // ③ 空き人員
   const busy = new Set(working.filter(r => !r.souko).map(r => r.name));
@@ -286,14 +355,16 @@ export function buildAlerts(payload, { date, today, company } = {}) {
     free, freeCount: free.length, rosterCount: roster.length,
     sites: siteList, siteCount: siteList.length,
     workingCount: new Set(working.map(r => r.name)).size,
-    unconfirmed, unconfirmedWithPeople, stoppedWithPeople, stoppedAll, quals, moves
+    unconfirmed, unconfirmedWithPeople, stoppedWithPeople, stoppedAll, quals, moves,
+    shortStaff
   };
 }
 
 // 通知に「問題」として出すものがあるか。翌日の現場・空き人員は"お知らせ"であって問題ではない。
 export function hasProblem(a) {
   return !!(a && (a.conflicts.length || a.noLead.length || a.stoppedWithPeople.length
-    || a.unconfirmedWithPeople.length || a.quals.length || a.moves.length));
+    || a.unconfirmedWithPeople.length || a.quals.length || a.moves.length
+    || (a.shortStaff && a.shortStaff.length)));
 }
 
 const WD = ['日', '月', '火', '水', '木', '金', '土'];
@@ -317,6 +388,12 @@ export function formatAlertsText(a) {
         + c.jobs.map(j => (j.genba ? j.genba + ' ' : '') + j.loc).join(' と '));
     });
     if (a.conflicts.length > 10) L.push('・ほか ' + (a.conflicts.length - 10) + '件');
+  }
+  if (a.shortStaff && a.shortStaff.length) {
+    L.push('');
+    L.push('■ いつもより人が少ない現場 ' + a.shortStaff.length + '件');
+    a.shortStaff.slice(0, 10).forEach(s => L.push('・' + (s.genba ? s.genba + ' ' : '') + s.loc
+      + ' … いつも' + s.usual + '人 → ' + s.count + '人'));
   }
   if (a.noLead.length) {
     L.push('');
