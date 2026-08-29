@@ -58,7 +58,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;bac
 @media(max-width:600px){
   .kyoten-chip{min-height:46px;font-size:15px}
 }
-.butai-tag{display:inline-block;font-size:10px;padding:1px 5px;border-radius:3px;background:#EDE7F6;color:#5E35B1;border:1px solid #B39DDB;margin-left:3px;vertical-align:middle}
 .kyoten-tag{display:inline-block;font-size:9px;line-height:1;padding:1px 3px;border-radius:3px;margin-right:3px;vertical-align:middle;font-weight:700}
 .kyoten-tag.k-kanto{background:#ffd8a8;color:#8a4b00}
 .kyoten-tag.k-both{background:#d3f9d8;color:#1a6b2e}
@@ -3478,11 +3477,6 @@ function readButai(p){
   if(v===BUTAI_KEEP)return BUTAI_KEEP;   // 「そのまま」は保存側でグループごとに解決する
   return normalizeButai(v);
 }
-function butaiTag(v){
-  const b=normalizeButai(v&&v.butai!==undefined?v.butai:v);
-  if(!b)return '';
-  return '<span class="butai-tag">'+esc(b.replace('部隊',''))+'</span>';
-}
 
 // ==============================================================
 // ★2026-08-27 フェーズ1: 案件ステータス（8段階）
@@ -4175,7 +4169,7 @@ function renderCalendar(){
         }
       }
       // ★2026-08-26 全拠点ビューでは「どちらの予定か一目で分かる」印を付ける（依頼書②）
-      eventsHtml+=`<div class="cal-event" style="background:${g.color||map[type]}">${kyotenTag(g)}${butaiTag(g)}${esc(label)}</div>`;
+      eventsHtml+=`<div class="cal-event" style="background:${g.color||map[type]}">${kyotenTag(g)}${esc(label)}</div>`;
     });
     if(overflow>0)eventsHtml+=`<div class="cal-overflow">+${overflow}</div>`;
     html+=`<div class="${cls}" onclick="openCalDay('${dateStr}')"><div class="cal-day-num">${d}</div>${holiday?`<div class="cal-holiday-name">${esc(holiday)}</div>`:''}${eventsHtml}</div>`;
@@ -4313,6 +4307,7 @@ function renderEventDetail(){
     ${badges.length?`<div style="padding:0 0 8px 18px">${badges.map(b=>`<span style="display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;background:#f2f2f7;margin-right:6px">${b}</span>`).join('')}</div>`:''}
     ${g.loc&&!g.souko?`<div class="detail-row"><div class="detail-row-icon">📍</div><div class="detail-row-content"><div class="detail-row-label">現場名</div>${esc(g.loc)}</div></div>`:''}
     <div class="detail-row"><div class="detail-row-icon">🏷️</div><div class="detail-row-content"><div class="detail-row-label">作業区分</div>${esc(wt)}</div></div>
+    ${normalizeButai(g.butai)?`<div class="detail-row"><div class="detail-row-icon">🚩</div><div class="detail-row-content"><div class="detail-row-label">部隊</div>${esc(normalizeButai(g.butai))}</div></div>`:''}
     <div class="detail-row"><div class="detail-row-icon">👥</div><div class="detail-row-content"><div class="detail-row-label">メンバー（${g.members.length}人）</div>${memberLine||'—'}</div></div>
     ${(g.yasumi||g.yotei)?'':`<div class="detail-row"><div class="detail-row-icon">🔢</div><div class="detail-row-content"><div class="detail-row-label">人工</div>${totalKo}</div></div>`}
     ${g.company?`<div class="detail-row"><div class="detail-row-icon">🏢</div><div class="detail-row-content"><div class="detail-row-label">会社</div>${esc(g.company)}</div></div>`:''}
