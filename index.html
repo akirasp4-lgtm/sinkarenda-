@@ -4680,16 +4680,33 @@ function renderAvailDay() {
   // ★2026-08-29 要件5: その元請の経験がある人を上に並べ、経験の日数を出す。
   //   予定は作らない＝見せるだけ（依頼文「最終決定は管理者が行う」）。
   const wantGenba = searchFilterValue('avail-genba');
+  // ★2026-08-29 利用者指示: 空いている人を選んで、その人たちで予定を作れるようにする。
+  //   「新しい予定入れる時に複数人選択した状態で入れれるようになったら嬉しい」
+  //   選べるのは「空いている人」だけ（休み・倉庫・出勤の人は選ばせない）。
+  //   ★押しても予定は作らない。入力画面を開くところまで。
+  const pickable = (n) => {
+    const on = availPicked.indexOf(n) >= 0;
+    return '<span class="member-chip" onclick="availTogglePick(' + JSON.stringify(esc(n)) + ')"'
+      + ' style="cursor:pointer;user-select:none'
+      + (on ? ';background:#0C447C;color:#fff;border-color:#0C447C' : '') + '">'
+      + (on ? '✓ ' : '') + esc(n);
+  };
   const chip = (names, rank) => {
     if (!names.length) return '<span style="color:#999;font-size:13px">いません</span>';
     if (!rank || !wantGenba) {
-      return names.map(n => '<span class="member-chip" style="pointer-events:none">' + esc(n) + '</span>').join('');
+      return names.map(n => pickable(n) + '</span>').join('');
     }
     return rankCandidates(names, companyNippos(), wantGenba).map(c =>
-      '<span class="member-chip" style="pointer-events:none">' + esc(c.name)
+      pickable(c.name)
       + (c.days ? '<span style="font-size:11px;color:#0C447C">（' + c.days + '日）</span>'
                 : '<span style="font-size:11px;color:#999">（経験なし）</span>')
       + '</span>').join('');
+  };
+  // 出勤・休み・倉庫の人は選ばせない（見せるだけ）
+  const chipPlain = (names) => {
+    if (!names.length) return '<span style="color:#999;font-size:13px">いません</span>';
+    return names.map(n => '<span class="member-chip" style="pointer-events:none">'
+      + esc(n) + '</span>').join('');
   };
   let html = '<div style="margin-top:12px">';
   if (wantQual) {
@@ -4714,6 +4731,15 @@ function renderAvailDay() {
   if (wantGenba) {
     html = html.replace('空いている ' + free.length + ' 人',
       '空いている ' + free.length + ' 人（「' + esc(wantGenba) + '」の経験が多い順）');
+  }
+  // 選んだ人で予定を作るバー
+  if (availPicked.length) {
+    html += '<div style="position:sticky;bottom:0;background:#fff;border-top:1px solid #ddd;'
+      + 'padding:8px 0;margin-top:8px;display:flex;gap:8px;align-items:center">'
+      + '<span style="font-size:13px;color:#0C447C;font-weight:600">選んだ ' + availPicked.length + ' 人</span>'
+      + '<button class="btn btn-sm" style="flex:1;margin:0" onclick="availToInput()">この人たちで予定を作る</button>'
+      + '<button class="btn btn-secondary btn-sm" style="margin:0" onclick="availClearPick()">やめる</button>'
+      + '</div>';
   }
   prepareAiSuggest(free, wantGenba, qidx, rosterMembers);
   const alerts = qualAlerts(qidx, rosterMembers, todayYmd());
@@ -4841,6 +4867,59 @@ async function askAiSuggest() {
   }
 }
 
+
+// ===== ①その日のカレンダーへ飛ぶ（利用者指示 2026-08-29）=====================
+// 「空き確認とか現場管理から結構その予定見るやんか。なら、それをその日の予定が
+//   入ってるカレンダーに飛んだりすることってできへんのかな。まあまあ不便やね」
+// ★月を手で送って探し直す手間をなくす。日付を押したらその日が開く。
+function goToCalendarDate(ymd){
+  const d=String(ymd||'').slice(0,10);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(d))return;
+  listMonth=d.slice(0,7);              // その日が入っている月へ
+  currentDateFilter='';                // 日付の絞り込みは持ち越さない
+  switchTab('list');
+  renderList();
+  openCalDay(d);                       // その日の予定一覧を開く
+}
+
+// ===== ②空き確認で人を選んで、その人たちで予定を作る =========================
+// 「空き確認で絞ったら名前出てくるわけやんか。その人を画面から選んで、
+//   カレンダーの予定に反映させるような、ちょっと便利な機能が欲しい」
+// 「新しい予定入れる時に複数人選択した状態で入れれるようになったら嬉しい」
+// ★元請・現場名が未定でも困らない。入力画面でいつもどおり入れるだけ
+//   （日付と人が先に埋まっている状態で開く）。
+// ★勝手に登録はしない。入力画面を開くところまで（依頼文「最終決定は管理者が行う」）。
+let availPicked=[];      // 選ばれた氏名
+
+function availTogglePick(name){
+  const n=String(name||'');
+  const i=availPicked.indexOf(n);
+  if(i>=0)availPicked.splice(i,1); else availPicked.push(n);
+  renderAvailDay();
+}
+function availClearPick(){availPicked=[];renderAvailDay();}
+
+// 選んだ人と日付を入れた状態で予定入力画面を開く
+function availToInput(){
+  if(!availPicked.length)return;
+  const d=(document.getElementById('avail-day')||{}).value||'';
+  const picked=availPicked.slice();
+  switchTab('input');
+  if(d)document.getElementById('s-date').value=d;
+  document.getElementById('s-date-end').value='';
+  // 1人目を責任者、残りを同行にする（予定のコピー機能と同じ入れ方）
+  const lead=document.getElementById('s-leader');
+  if(lead)lead.value=picked[0]||'';
+  selectedMembers=[];
+  picked.slice(1).forEach(function(n){
+    const i=shokunin.indexOf(n);
+    if(i>=0)selectedMembers.push(i);
+  });
+  renderMemberChips('member-selector',selectedMembers,toggleMember);
+  if(typeof refreshButaiField==='function')refreshButaiField('s',{force:true});
+  availPicked=[];
+}
+
 // 元請のプルダウンを作り直す（経験で並べ替えるため）。
 // ★選んでいた元請が消えても、選択を勝手に外さない（資格のプルダウンと同じ考え方）。
 function updateGenbaRankSelect() {
@@ -4915,7 +4994,9 @@ function renderAvailWeek(){
   const cn=filteredNippos();const shokunin=getActiveShokunin();   // ★無効の人は空きに出さない
   if(shokunin.length===0){document.getElementById('avail-weekly').innerHTML='<div style="color:#999;text-align:center;padding:20px">更新ボタンを押してください</div>';return;}
   let html='<table class="week-table"><thead><tr><th></th>';
-  days.forEach(d=>{const cls=d.dow===0?' class="week-sun"':d.dow===6?' class="week-sat"':'';html+=`<th${cls}>${d.label}<br>${dayNames[d.dow]}</th>`;});
+  // ★2026-08-29 利用者指示: 日付を押したらカレンダーのその日へ飛ぶ。
+  //   「その日の予定が入ってるカレンダーに飛んだりすることってできへんのかな」
+  days.forEach(d=>{const cls=d.dow===0?' class="week-sun"':d.dow===6?' class="week-sat"':'';html+=`<th${cls}><span onclick="goToCalendarDate('${d.date}')" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" title="この日のカレンダーを開く">${d.label}<br>${dayNames[d.dow]}</span></th>`;});
   html+='</tr></thead><tbody>';
   shokunin.forEach(name=>{
     html+='<tr><td class="name-col">'+esc(name)+'</td>';
