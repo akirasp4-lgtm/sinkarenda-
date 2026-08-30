@@ -52,12 +52,27 @@ describe('全角と半角を同じ物として扱う', () => {
     expect(G.genbaNorm('HSJ')).toBe('hsj');
   });
 
+  it('★ひらがなでも引ける（日本語入力の変換前で0件にしない）', () => {
+    // 本番の画面で確かめたら「ぐろ」で0件だった。
+    // 日本語入力は変換前がひらがななので、打っている最中ずっと
+    // 「見つかりません」に見えてしまう。
+    expect(G.genbaNorm('ぐろーらいず')).toBe(G.genbaNorm('グローライズ'));
+    expect(G.genbaNorm('きんでん')).toBe(G.genbaNorm('キンデン'));
+  });
+
+  it('カタカナ以外は変えない（漢字・英字はそのまま）', () => {
+    expect(G.genbaNorm('中村電設')).toBe('中村電設');
+    expect(G.genbaNorm('JTE')).toBe('jte');
+  });
+
   it('全角スペースも普通の空白として扱う', () => {
     expect(G.genbaNorm('公共工事　入札')).toBe('公共工事 入札');
   });
 
   it('前後の空白は落とす／空でも落ちない', () => {
-    expect(G.genbaNorm('  きんでん東  ')).toBe('きんでん東');
+    // ★ひらがなはカタカナに寄せてから比べる（上の「ひらがなでも引ける」参照）ので、
+    //   ここでの期待値もカタカナになる。比較用の芯なので画面の表示は変わらない。
+    expect(G.genbaNorm('  きんでん東  ')).toBe('キンデン東');
     expect(G.genbaNorm(null)).toBe('');
     expect(G.genbaNorm(undefined)).toBe('');
   });

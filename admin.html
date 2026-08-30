@@ -2620,6 +2620,9 @@ function genbaNorm(s) {
   return String(s == null ? '' : s)
     .replace(/[\uFF01-\uFF5E]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); })
     .replace(/\u3000/g, ' ')
+    // ひらがなはカタカナとして扱う。日本語入力は変換前がひらがななので、
+    // これが無いと「ぐろ」と打っている間ずっと0件で、探せていないように見える。
+    .replace(/[\u3041-\u3096]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) + 0x60); })
     .trim().toLowerCase();
 }
 
