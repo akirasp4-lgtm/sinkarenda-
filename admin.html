@@ -355,6 +355,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   </select>
   <div id="s-worktype-notice" style="color:#dc2626;font-size:13px;font-weight:600;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:8px 12px;margin-bottom:12px">⚠️ 最初に「作業区分」を選択してください。選択するまで以下の項目は入力できません。</div>
   <label>元請名<span style="color:#ff3b30;font-weight:600;margin-left:2px">*</span></label>
+  <input type="search" id="s-genba-search" placeholder="🔍 元請名で絞り込み（部分一致）" oninput="onGenbaSearch('s')" style="margin-bottom:4px;font-size:13px;padding:6px 10px;width:100%;box-sizing:border-box;border:1px solid #ddd;border-radius:6px">
   <div class="select-add-wrap">
     <select id="s-genba-select" onchange="onGenbaSelect('s')"><option value="">選択してください</option><option value="__manual__">直接入力する</option></select>
     <button class="btn btn-secondary btn-sm add-inline-btn" onclick="openGenbaSettingsFor('s-genba-select')">➕</button>
@@ -666,6 +667,14 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   </table>
 </div>
 <button class="btn btn-secondary" style="margin-bottom:8px" onclick="loadData()">更新</button>
+<div class="card" style="margin-top:8px;background:#EFF6FF;border:1px solid #93C5FD">
+  <div style="font-size:13px;color:#1E3A8A;margin-bottom:4px;font-weight:600">🔀 元請名の表記ゆれを直す</div>
+  <div style="font-size:12px;color:#1E3A8A;margin-bottom:8px;line-height:1.6">
+    同じ会社が違う名前で入っていると、<b>検索にも集計にも出てきません</b>。<br>
+    似ている名前を自動で拾いました。正しい名前に統一してください。
+  </div>
+  <div id="gfix-body" style="font-size:13px">読み込み中…</div>
+</div>
 <div class="card" style="margin-top:8px">
   <div style="font-size:13px;color:#666;margin-bottom:8px;font-weight:500">📋 期間の出面をパッと見る（10日締め用・Excel不要）</div>
   <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">
@@ -856,6 +865,7 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <input type="date" id="e-date" onchange="onEditDateChange()">
   </div>
   <label>元請名</label>
+  <input type="search" id="e-genba-search" placeholder="🔍 元請名で絞り込み（部分一致）" oninput="onGenbaSearch('e')" style="margin-bottom:4px;font-size:13px;padding:6px 10px;width:100%;box-sizing:border-box;border:1px solid #ddd;border-radius:6px">
   <select id="e-genba-select" onchange="onGenbaSelect('e')"><option value="">選択してください</option><option value="__manual__">直接入力する</option></select>
   <input type="text" id="e-genba" style="display:none;margin-bottom:12px">
   <label>現場名</label>
@@ -1612,6 +1622,10 @@ let settingsOpenedForSelect=null;
 let genbaSettingsOpenedForSelect=null;
 
 function esc(s){const d=document.createElement('div');d.textContent=String(s||'');return d.innerHTML;}
+// 属性値（value="..." など）に埋めるとき用。
+// esc() は & < > しか逃がさないので、引用符入りの名前だと属性がそこで閉じて画面が壊れる。
+// ★属性に埋めるときは必ずこちらを使う。
+function escAttr(str){return esc(str).replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function linkify(escapedHtml){return String(escapedHtml||'').replace(/(https?:\/\/[^\s<]+)/g,u=>`<a href="${u}" target="_blank" rel="noopener noreferrer" style="color:#1D9E75;text-decoration:underline;word-break:break-all">${u}</a>`);}
 function uuid(){return 'xxxx-xxxx-xxxx'.replace(/x/g,()=>Math.floor(Math.random()*16).toString(16))+'-'+Date.now().toString(36);}
 function setLoading(on){document.getElementById('loading-bar').classList.toggle('active',on);}
@@ -2589,6 +2603,149 @@ function dashWeekSites(nippos, ymd) {
   return Object.keys(seen).length;
 }
 // ===== PHASE4-DASH-RULE:END =====
+
+// ===== PHASE6-GENBA-RULE:BEGIN =====
+// 元請プルダウンの中身を決める（2026-08-31 利用者要望「直接入力で入れた元請けを検索できるように」）
+//
+// これまでは元請マスタ（33件）だけを出していた。「直接入力する」で打った元請は
+// 予定には残るのにプルダウンへ戻ってこないので、次に同じ元請を入れるとき毎回打ち直しになる。
+// 実データで16件・87行ぶんがこの状態だった。同じ会社が
+// 「HSJ」「ＨＳＪ」「株式会社HSJ」「HSJ-KNSI」の4通りに割れていたのもこれが原因。
+//
+// ★index.html と admin.html でこのブロックは1文字も違ってはいけない。
+
+// 全角と半角を同じ物として扱う（「ＨＳＪ」を hsj で引けるように）。
+// これが無いと、打ち間違いで全角になった元請だけ永久に検索から漏れる。
+function genbaNorm(s) {
+  return String(s == null ? '' : s)
+    .replace(/[\uFF01-\uFF5E]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); })
+    .replace(/\u3000/g, ' ')
+    .trim().toLowerCase();
+}
+
+// master  … 元請マスタの名前の配列
+// nippos  … 予定の配列（{genba,date,company,isGhost}）
+// company … '全社' なら会社で絞らない
+// query   … 絞り込み文字（空なら全部）
+// keep    … 今選ばれている値。絞り込みで消えても必ず残す（選択を勝手に捨てないため）
+// 戻り値  … { reg:[登録済み], used:[{name,count,last}]（直接入力ぶん）, total, hit }
+function genbaSelectChoices(master, nippos, company, query, keep) {
+  var inMaster = {};
+  (master || []).forEach(function (m) { if (m) inMaster[m] = true; });
+  var stat = {};
+  (nippos || []).forEach(function (n) {
+    if (!n || n.isGhost) return;
+    var g = String(n.genba == null ? '' : n.genba).trim();
+    if (!g || inMaster[g]) return;
+    if (company && company !== '全社' && n.company !== company) return;
+    if (!stat[g]) stat[g] = { name: g, count: 0, last: '' };
+    stat[g].count++;
+    var d = String(n.date == null ? '' : n.date);
+    if (d > stat[g].last) stat[g].last = d;
+  });
+  var reg = (master || []).filter(Boolean).slice().sort();
+  var used = Object.keys(stat).map(function (k) { return stat[k]; })
+    .sort(function (a, b) {
+      var d = b.last.localeCompare(a.last);       // 最近使った順
+      return d !== 0 ? d : a.name.localeCompare(b.name);
+    });
+  var total = reg.length + used.length;
+  var q = genbaNorm(query);
+  if (!q) return { reg: reg, used: used, total: total, hit: total };
+  var k = String(keep == null ? '' : keep);
+  var ok = function (name) { return name === k || genbaNorm(name).indexOf(q) >= 0; };
+  var hitReg = reg.filter(ok);
+  var hitUsed = used.filter(function (u) { return ok(u.name); });
+  return { reg: hitReg, used: hitUsed, total: total, hit: hitReg.length + hitUsed.length };
+}
+
+// 表記ゆれを見つけるための「芯」を取り出す。
+// 「株式会社HSJ」「ＨＳＪ」「HSJ」を全部 hsj にして、同じ会社だと気づけるようにする。
+function genbaCanon(s) {
+  var t = genbaNorm(s);
+  t = t.replace(/株式会社|有限会社|合同会社|\(株\)|\(有\)|\u3231|\u3230|\u32a4/g, '');
+  t = t.replace(/[\s\-_,.'"()\[\]\u30fb\uff08\uff09\u300c\u300d]/g, '');
+  return t;
+}
+
+// 元請ごとに「何件使われているか・最後にいつ使ったか・マスタにあるか」を数える
+function genbaUsageList(master, nippos, company) {
+  var stat = {};
+  var add = function (name, inMaster) {
+    var g = String(name == null ? '' : name).trim();
+    if (!g) return null;
+    if (!stat[g]) stat[g] = { name: g, count: 0, last: '', inMaster: false };
+    if (inMaster) stat[g].inMaster = true;
+    return stat[g];
+  };
+  (master || []).forEach(function (m) { add(m, true); });
+  (nippos || []).forEach(function (n) {
+    if (!n || n.isGhost) return;
+    if (company && company !== '全社' && n.company !== company) return;
+    var e = add(n.genba, false);
+    if (!e) return;
+    e.count++;
+    var d = String(n.date == null ? '' : n.date);
+    if (d > e.last) e.last = d;
+  });
+  return Object.keys(stat).map(function (k) { return stat[k]; });
+}
+
+// 似ている元請を組にする（2件以上の組だけ返す）
+//   ・芯が同じ            → 同じ会社の表記ゆれ（例 HSJ / ＨＳＪ / 株式会社HSJ）
+//   ・片方の芯が丸ごと入る → 似ている（例 グローライズ ⊂ グローライズ自社）
+// ★短い名前で無関係な物まで束ねないよう、「含む」判定は芯が3文字以上のときだけ。
+// ★ここは候補を出すだけ。実際に統一するかどうかは必ず人が選ぶ。
+function genbaVariantGroups(list) {
+  var items = (list || []).filter(function (x) { return x && x.name; })
+    .map(function (x) {
+      return { name: x.name, count: x.count || 0, last: x.last || '',
+               inMaster: !!x.inMaster, canon: genbaCanon(x.name) };
+    })
+    .filter(function (x) { return x.canon; });
+  var near = function (a, b) {
+    if (a.canon === b.canon) return true;
+    var s = a.canon, l = b.canon;
+    if (s.length > l.length) { s = b.canon; l = a.canon; }
+    return s.length >= 3 && l.indexOf(s) >= 0;
+  };
+  // A〜B・B〜C なら A・B・C をひとつの組にする
+  var parent = items.map(function (_, i) { return i; });
+  var find = function (i) { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  for (var i = 0; i < items.length; i++) {
+    for (var j = i + 1; j < items.length; j++) {
+      if (near(items[i], items[j])) { var a = find(i), b = find(j); if (a !== b) parent[a] = b; }
+    }
+  }
+  var byRoot = {};
+  items.forEach(function (it, i) { var r = find(i); (byRoot[r] || (byRoot[r] = [])).push(it); });
+  var groups = [];
+  Object.keys(byRoot).forEach(function (r) { if (byRoot[r].length >= 2) groups.push(byRoot[r]); });
+  // 組の中は「残すべき候補」を先頭に（マスタ登録済み → 件数が多い → 名前順）
+  groups.forEach(function (g) {
+    g.sort(function (a, b) {
+      if (a.inMaster !== b.inMaster) return a.inMaster ? -1 : 1;
+      if (a.count !== b.count) return b.count - a.count;
+      return a.name.localeCompare(b.name);
+    });
+  });
+  // 影響の大きい組を上に
+  groups.sort(function (a, b) {
+    var sa = 0, sb = 0;
+    a.forEach(function (x) { sa += x.count; });
+    b.forEach(function (x) { sb += x.count; });
+    return sb - sa;
+  });
+  return groups;
+}
+
+// 表記ゆれではないが元請マスタに載っていない物（＝直接入力しっぱなし）
+function genbaUnregistered(list) {
+  return (list || []).filter(function (x) { return x && x.name && !x.inMaster && x.count > 0; })
+    .slice()
+    .sort(function (a, b) { return b.count - a.count || a.name.localeCompare(b.name); });
+}
+// ===== PHASE6-GENBA-RULE:END =====
 
 // ===== PHASE5-PICK-RULE:BEGIN =====
 // 候補者を出す（依頼文の要件5・2026-08-29）。
@@ -3866,6 +4023,8 @@ async function submitNippo(){
     const _ls=document.getElementById('s-location-select');if(_ls)_ls.value='';
     const _li=document.getElementById('s-location');if(_li){_li.value='';_li.style.display='none';}
     const _lse=document.getElementById('s-location-search');if(_lse)_lse.value='';
+    const _gse=document.getElementById('s-genba-search');if(_gse)_gse.value='';
+    populateGenbaSelect('s');
     const _lsim=document.getElementById('s-loc-similar');if(_lsim){_lsim.style.display='none';_lsim.innerHTML='';}
     document.getElementById('s-jobno-hint').style.display='none';
     document.getElementById('s-jobno-div-wrap').style.display='none';
@@ -5924,6 +6083,7 @@ function updateJimu(){
   document.getElementById('j-shokunin-tbl').innerHTML=entries.length?
     entries.map(([name,v])=>`<tr><td>${esc(name)}</td><td><span class="company-badge">${esc(v.company)}</span></td><td>${v.days}日</td><td>${v.kosu.toFixed(1)}人工</td></tr>`).join(''):
     `<tr><td colspan="4" class="empty">データなし</td></tr>`;
+  renderGenbaFix();   // ★元請の表記ゆれカードも一緒に描き直す
 }
 // Excel(xlsx) ダウンロード（任意で期間フィルタ。日報データ／アーカイブのみ GAS 側でフィルタされる）
 async function downloadSheetXlsx(){
@@ -6299,16 +6459,168 @@ async function saveJobNoFix(idx,genba,loc){
 
 // ===== 元請セレクト =====
 function initGenbaSelects(){
-  const gList=getGenbaMasterNames();
-  ['s','e'].forEach(p=>{
-    const sel=document.getElementById(p+'-genba-select');if(!sel)return;
-    const cur=sel.value;
-    let opts='<option value="">選択してください</option>';
-    gList.forEach(g=>{opts+=`<option value="${esc(g)}"${g===cur?' selected':''}>${esc(g)}</option>`;});
-    opts+='<option value="__manual__">直接入力する</option>';
-    sel.innerHTML=opts;
-  });
+  ['s','e'].forEach(function(p){ populateGenbaSelect(p); });
 }
+
+// 元請プルダウンを組み立てる（絞り込み・直接入力ぶんの合流）
+function populateGenbaSelect(p){
+  const sel=document.getElementById(p+'-genba-select');
+  if(!sel)return;
+  const cur=sel.value;
+  const searchEl=document.getElementById(p+'-genba-search');
+  const q=searchEl?searchEl.value:'';
+  const keep=(cur&&cur!=='__manual__')?cur:'';
+  const c=genbaSelectChoices(getGenbaMasterNames(),allNippos,currentCompany,q,keep);
+  const label=q?`絞り込み中（${c.hit}/${c.total}件）`:'選択してください';
+  let opts=`<option value="">${esc(label)}</option>`;
+  c.reg.forEach(g=>{opts+=`<option value="${escAttr(g)}">${esc(g)}</option>`;});
+  if(c.used.length){
+    opts+='<optgroup label="── 直接入力で使った元請（マスタ未登録）──">';
+    c.used.forEach(u=>{opts+=`<option value="${escAttr(u.name)}">${esc(u.name)}（${u.count}件）</option>`;});
+    opts+='</optgroup>';
+  }
+  opts+='<option value="__manual__">直接入力する</option>';
+  sel.innerHTML=opts;
+  // ★選択を必ず戻す。__manual__ も戻すこと。
+  //   戻さないと「直接入力する」を選んだ直後に絞り込み欄を打っただけで
+  //   プルダウンが先頭へ飛び、打ちかけの文字だけが宙に浮く。
+  const has=[...sel.options].some(o=>o.value===cur);
+  sel.value=has?cur:'';
+}
+
+function onGenbaSearch(p){
+  populateGenbaSelect(p);
+}
+
+// ========== 元請の表記ゆれを直す（2026-08-31 利用者要望） ==========
+// 「グローライズ自社」があるのに「グローライズ」で入っていると、
+// 検索にも集計にも出てこない。事務員が自分で直せるようにする。
+// ★AIがデータを直すのではなく、画面から人が直す。誰がやったかはGAS側の操作ログに残る。
+let gfixGroups = [];
+let gfixUnreg = [];
+// ★通信中の二重押し止め。マージは取り消せないので、
+//   同じボタンを2回押して2回書き換わる事故だけは必ず止める。
+let gfixBusy = false;
+
+function renderGenbaFix(){
+  const box=document.getElementById('gfix-body');
+  if(!box)return;
+  const list=genbaUsageList(getGenbaMasterNames(),allNippos,currentCompany);
+  gfixGroups=genbaVariantGroups(list);
+  gfixUnreg=genbaUnregistered(list).filter(u=>!gfixGroups.some(g=>g.some(x=>x.name===u.name)));
+  const tag=x=>x.inMaster
+    ? '<span style="color:#1D9E75;font-size:11px">\u2705 マスタ登録済み</span>'
+    : '<span style="color:#C2410C;font-size:11px">\u26a0\ufe0f 未登録（直接入力）</span>';
+  let html='';
+  if(!gfixGroups.length){
+    html+='<div style="color:#666;padding:4px 0">似ている元請は見つかりませんでした。</div>';
+  }else{
+    gfixGroups.forEach((g,gi)=>{
+      html+='<div style="background:#fff;border:1px solid #BFDBFE;border-radius:8px;padding:10px;margin-bottom:8px">';
+      html+='<div style="font-size:12px;color:#666;margin-bottom:6px">残す名前を選んでください</div>';
+      html+=`<select data-gfixkeep="${gi}" style="margin-bottom:8px">`;
+      g.forEach((x,xi)=>{html+=`<option value="${xi}">${esc(x.name)}（${x.count}件）</option>`;});
+      html+='</select>';
+      g.forEach((x,xi)=>{
+        html+='<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #F1F5F9">';
+        html+=`<div style="flex:1"><b>${esc(x.name)}</b> <span style="color:#666;font-size:12px">${x.count}件`
+             +(x.last?`・最終 ${esc(x.last)}`:'')+`</span><br>${tag(x)}</div>`;
+        html+=`<button class="btn btn-secondary btn-sm" data-gfixmerge="${gi}" data-gfixidx="${xi}">\u2192 これに統一</button>`;
+        html+='</div>';
+      });
+      html+='</div>';
+    });
+  }
+  if(gfixUnreg.length){
+    html+='<div style="margin-top:10px;font-size:12px;color:#1E3A8A;font-weight:600">元請マスタに載っていない元請</div>';
+    html+='<div style="font-size:11px;color:#666;margin-bottom:6px">表記ゆれではなさそうな物です。正しい元請なら登録すると、次からプルダウンに出ます。<br>元請ではない物（休み・移動・社内用事など）は、登録せずそのままで大丈夫です。</div>';
+    gfixUnreg.forEach((u,ui)=>{
+      html+='<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #E5E7EB">';
+      html+=`<div style="flex:1"><b>${esc(u.name)}</b> <span style="color:#666;font-size:12px">${u.count}件`
+           +(u.last?`・最終 ${esc(u.last)}`:'')+'</span></div>';
+      html+=`<button class="btn btn-secondary btn-sm" data-gfixadd="${ui}">元請マスタに登録</button>`;
+      html+='</div>';
+    });
+  }
+  box.innerHTML=html;
+}
+
+// 「〇〇 を 残す名前 に統一する」
+async function gfixMerge(gi,xi){
+  if(gfixBusy){alert('前の処理がまだ終わっていません。少し待ってください。');return;}
+  const g=gfixGroups[gi];
+  if(!g)return;
+  const sel=document.querySelector(`[data-gfixkeep="${gi}"]`);
+  const keep=g[sel?Number(sel.value):0];
+  const from=g[xi];
+  if(!keep||!from)return;
+  if(keep.name===from.name){alert('「残す名前」と同じです。別の名前を選んでください。');return;}
+  const msg='元請名を統一します。\n\n'
+    +'「'+from.name+'」（'+from.count+'件）\n'
+    +'  ↓\n'
+    +'「'+keep.name+'」\n\n'
+    +'予定・アーカイブ・現場マスタ・元請マスタを全部まとめて書き換えます。\n'
+    +'★この操作は取り消せません。よろしいですか？';
+  if(!confirm(msg))return;
+  gfixBusy=true;
+  try{
+    setLoading&&setLoading(true);
+    const res=await fetch(getGasUrl(),{method:'POST',
+      body:JSON.stringify({action:'merge_genba',from:from.name,to:keep.name,updatedBy:getUsername()}),
+      headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){
+      alert('\u2713 統一しました\n\n予定: '+(json.nippoUpdated||0)+'件\nアーカイブ: '+(json.archiveUpdated||0)
+        +'件\n現場マスタ: '+(json.jobsiteUpdated||0)+'件');
+      // ★残す名前が元請マスタに無いままだと、統一してもプルダウンに出てこない。
+      //   GAS側は「消す方」がマスタに載っている時しか改名してくれないので、
+      //   どちらも未登録だった場合はここで登録まで済ませる。
+      if(!keep.inMaster&&currentCompany!=='全社'
+         &&confirm('「'+keep.name+'」はまだ元請マスタに登録されていません。\n'
+                  +'今のうちに登録しますか？\n（登録すると次からプルダウンの上の方に出ます）')){
+        try{
+          const r2=await fetch(getGasUrl(),{method:'POST',
+            body:JSON.stringify({action:'add_genba',name:keep.name,company:currentCompany}),
+            headers:{'Content-Type':'text/plain'}});
+          const j2=await r2.json();
+          if(j2.status!=='ok')alert('登録でエラー: '+(j2.message||'不明'));
+        }catch(e2){alert('登録でエラー: '+e2.message);}
+      }
+      await loadData();
+    }else alert('エラー: '+(json.message||'不明なエラー'));
+  }catch(e){alert('エラー: '+e.message);}
+  finally{gfixBusy=false;setLoading&&setLoading(false);}
+}
+
+// 「元請マスタに登録する」
+async function gfixAdd(ui){
+  if(gfixBusy){alert('前の処理がまだ終わっていません。少し待ってください。');return;}
+  const u=gfixUnreg[ui];
+  if(!u)return;
+  if(currentCompany==='全社'){alert('会社を選んでから登録してください');return;}
+  if(!confirm('「'+u.name+'」を '+currentCompany+' の元請マスタに登録しますか？'))return;
+  gfixBusy=true;
+  try{
+    setLoading&&setLoading(true);
+    const res=await fetch(getGasUrl(),{method:'POST',
+      body:JSON.stringify({action:'add_genba',name:u.name,company:currentCompany}),
+      headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){alert('\u2713 登録しました');await loadData();}
+    else alert('エラー: '+json.message);
+  }catch(e){alert('エラー: '+e.message);}
+  finally{gfixBusy=false;setLoading&&setLoading(false);}
+}
+
+// ★名前をHTMLの文字列に埋め込まない（引用符で何度も事故ったため）。
+//   番号だけ data-* に持たせて、押された時に配列から引く。
+document.addEventListener('click',function(ev){
+  const m=ev.target.closest&&ev.target.closest('[data-gfixmerge]');
+  if(m){gfixMerge(Number(m.getAttribute('data-gfixmerge')),Number(m.getAttribute('data-gfixidx')));return;}
+  const a=ev.target.closest&&ev.target.closest('[data-gfixadd]');
+  if(a){gfixAdd(Number(a.getAttribute('data-gfixadd')));return;}
+});
+
 function onGenbaSelect(p){
   const sel=document.getElementById(p+'-genba-select');const inp=document.getElementById(p+'-genba');
   if(sel.value==='__manual__'){inp.style.display='';inp.value='';inp.focus();}else{inp.style.display='none';inp.value=sel.value;}
@@ -6328,7 +6640,12 @@ function getGenbaValue(p){
   return sel.value;
 }
 function setGenbaValue(p,val){
-  const sel=document.getElementById(p+'-genba-select');const inp=document.getElementById(p+'-genba');
+  const sel=document.getElementById(p+'-genba-select');
+  const inp=document.getElementById(p+'-genba');
+  // ★絞り込み中だと目当ての元請がプルダウンから消えていて、
+  //   既存の元請なのに「直接入力」扱いになってしまう。先に絞り込みを解く。
+  const searchEl=document.getElementById(p+'-genba-search');
+  if(searchEl&&searchEl.value){searchEl.value='';sel.value='';populateGenbaSelect(p);}
   const opts=[...sel.options].map(o=>o.value);
   if(val&&opts.includes(val)){sel.value=val;inp.style.display='none';inp.value=val;}
   else{sel.value='__manual__';inp.style.display='';inp.value=val||'';}
