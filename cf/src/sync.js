@@ -206,6 +206,24 @@ export function sanitizeForStorage(json, prevQualifications) {
   };
 }
 
+// ★2026-08-31 CPU上限対策: 解析せず「生の文字列のまま」取ってくる。
+//   同じ内容かどうかは生のまま比べれば分かるので、JSONの解析を後回しにできる。
+//   HTML（GASのエラーページ）が返ったときは、以前と同じくやり直しの対象にする。
+export async function fetchTextWithRetry(url, tries = 3) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      if (!res.ok) { last = new Error('HTTP ' + res.status); continue; }
+      const text = await res.text();
+      // 先頭だけ見る（全文の解析はしない＝ここがCPUを使わない肝）
+      if (!/^\s*\{/.test(text)) { last = new Error('JSONではない応答が返りました'); continue; }
+      return text;
+    } catch (e) { last = e; }
+  }
+  throw last || new Error('取得に失敗しました');
+}
+
 export async function fetchWithRetry(url, tries = 3) {
   let last = null;
   for (let i = 0; i < tries; i++) {
@@ -220,10 +238,13 @@ export async function fetchWithRetry(url, tries = 3) {
   throw last || new Error('取得に失敗しました');
 }
 
-async function sha256Hex(text) {
-  const bytes = new TextEncoder().encode(text);
+async function sha256HexFromBytes(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function sha256Hex(text) {
+  return sha256HexFromBytes(new TextEncoder().encode(text));
 }
 
 // sync_log に1行残す（取り込みの成功/失敗どちらも記録する。障害調査用）。
@@ -428,7 +449,37 @@ export async function syncAll(env, opts = {}) {
     const url = env.GAS_URL + '?compact=1&company=&t=' + fetchStartedAt;
     // ★5回目レビュー修正6: FETCH_TIMEOUT_MSを60秒に延ばした分、リトライ回数は
     // 3→2に減らす（上のFETCH_TIMEOUT_MSのコメント参照。最悪でも60秒×2=120秒に収める）。
-    const raw = await fetchWithRetry(url, 2);
+    const rawText = await fetchTextWithRetry(url, 2);
+
+    // ★2026-08-31 CronのCPU上限対策（本番障害）:
+    //   GASの応答は同じ内容なら1バイトも変わらない（実測で確認済み）。
+    //   そして実際のログでは、ほぼ毎回「変更なし」。
+    //   なので**まず生のまま比べて**、同じなら解析も組み直しも全部やめる。
+    //   ここを通ると、この後の JSON.parse / sanitize / JSON.stringify を丸ごと省ける。
+    const rawBytes = new TextEncoder().encode(rawText);
+    const rawHash = await sha256HexFromBytes(rawBytes);
+
+    const existingRes = await env.DB.prepare(
+      'SELECT rows, hash, raw_hash, members_count, genba_count, jobsites_count FROM snapshot WHERE id = 1'
+    ).all();
+    const existing = (existingRes.results && existingRes.results[0]) || null;
+
+    // ★raw_hash が NULL の行（この機能より前に保存された行）では省かない＝安全側。
+    if (existing && existing.raw_hash && existing.raw_hash === rawHash) {
+      const message = '変更なし（前回と同じ応答のため取り込みを省きました）';
+      await safeWriteSyncLog(env, { rows: existing.rows, ok: 1, message, payloadHash: existing.hash });
+      return { ok: true, rows: existing.rows, message, skipped: true, skipReason: 'unchanged' };
+    }
+
+    // ここから先は「中身が変わった回」だけが通る。重い処理はここに集めてある。
+    let raw;
+    try {
+      raw = JSON.parse(rawText);
+    } catch (e) {
+      const message = '応答をJSONとして読めませんでした: ' + String((e && e.message) || e);
+      await safeWriteSyncLog(env, { rows: 0, ok: 0, message });
+      return { ok: false, rows: 0, message };
+    }
 
     // ★修正3: 応答の妥当性検証。おかしければ書き込まず失敗として記録する
     // （→ 読み取り側は既存のsnapshotをそのまま返し続け、利用者には見えない）。
@@ -476,11 +527,6 @@ export async function syncAll(env, opts = {}) {
     // 必要とするため、ここで先に計算しておく（以前は変更なしスキップの直前だけで
     // 計算していた）。値そのものは変わらない＝安全なリファクタリング。
     const hash = await sha256Hex(payloadText);
-
-    const existingRes = await env.DB.prepare(
-      'SELECT rows, hash, members_count, genba_count, jobsites_count FROM snapshot WHERE id = 1'
-    ).all();
-    const existing = (existingRes.results && existingRes.results[0]) || null;
 
     // ★修正3（急激な件数減少ガード。マスタにも適用）: GAS側の障害・誤設定で
     // 全消え・大幅減少するのを防ぐ。日報(rows)だけでなく職人・元請・現場の
@@ -582,6 +628,19 @@ export async function syncAll(env, opts = {}) {
     // skip「前回の同期が進行中のためスキップ」にはこの値を付けないため、
     // GASへ一度も取得しに行っていないskipと区別できる）。
     if (existing && existing.hash === hash) {
+      // ★2026-08-31: ここまで来た＝「生の応答は違って見えたが、組み直したら中身は同じ」。
+      //   このとき raw_hash を控えておかないと、次回も同じ重い処理を繰り返す。
+      //   （raw_hash は「変わった回」の書き込みでしか入らないので、
+      //     内容が長く変わらない期間はいつまでも省けないままになる）
+      //   payload は今保存されている物と同じだと確認済みなので、印だけ付け替えて安全。
+      if (existing.raw_hash !== rawHash) {
+        try {
+          await env.DB.prepare('UPDATE snapshot SET raw_hash = ? WHERE id = 1 AND hash = ?')
+            .bind(rawHash, hash).run();
+        } catch (e) {
+          // 控えられなくても実害は「次も省けない」だけ。取り込み自体は成功している。
+        }
+      }
       const message = '変更なし（書き込みをスキップしました）' + shrinkNote;
       await safeWriteSyncLog(env, { rows: rowCount, ok: 1, message, payloadHash: hash });
       return { ok: true, rows: rowCount, message, skipped: true, skipReason: 'unchanged' };
@@ -604,11 +663,12 @@ export async function syncAll(env, opts = {}) {
     // 無くなる（＝最初に書き込めた方が保持される。それ以上は分からないので保守的に
     // 「何もしない」側へ倒す）。
     const writeRes = await env.DB.prepare(
-      `INSERT INTO snapshot (id, payload, hash, rows, members_count, genba_count, jobsites_count, bytes, fetch_started_at, at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO snapshot (id, payload, hash, raw_hash, rows, members_count, genba_count, jobsites_count, bytes, fetch_started_at, at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          payload = excluded.payload,
          hash = excluded.hash,
+         raw_hash = excluded.raw_hash,
          rows = excluded.rows,
          members_count = excluded.members_count,
          genba_count = excluded.genba_count,
@@ -617,7 +677,7 @@ export async function syncAll(env, opts = {}) {
          fetch_started_at = excluded.fetch_started_at,
          at = excluded.at
        WHERE CAST(excluded.fetch_started_at AS INTEGER) > CAST(snapshot.fetch_started_at AS INTEGER)`
-    ).bind(payloadText, hash, rowCount, memberCount, genbaCount, jobsitesCount, bytes, String(fetchStartedAt), at).run();
+    ).bind(payloadText, hash, rawHash, rowCount, memberCount, genbaCount, jobsitesCount, bytes, String(fetchStartedAt), at).run();
 
     const wrote = !!(writeRes && writeRes.meta && writeRes.meta.changes > 0);
     if (!wrote) {

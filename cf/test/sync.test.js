@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi } from 'vitest';
 import { validateGasPayload, sanitizeForStorage, fetchWithRetry, syncAll, OPTIONAL_HEADERS } from '../src/sync.js';
 
@@ -202,11 +203,14 @@ function makeMockDB({ initialLockedAt = null, throwOnSnapshotWrite = false, thro
     return {
       async all() {
         if (throwOnLockRead && /sync_lock/.test(sql)) throw new Error('mock lock read failure');
-        if (/SELECT rows, hash, members_count, genba_count, jobsites_count FROM snapshot/.test(sql)) {
+        if (/SELECT rows, hash, raw_hash, members_count, genba_count, jobsites_count FROM snapshot/.test(sql)) {
           return {
             results: state.snapshot
               ? [{
                   rows: state.snapshot.rows, hash: state.snapshot.hash,
+                  // ★2026-08-31 CPU上限対策で足した列。ニセ側にも持たせないと
+                  //   「前回と同じなら解析を省く」道をテストできない。
+                  raw_hash: state.snapshot.rawHash ?? null,
                   members_count: state.snapshot.membersCount, genba_count: state.snapshot.genbaCount,
                   jobsites_count: state.snapshot.jobsitesCount
                 }]
@@ -250,15 +254,25 @@ function makeMockDB({ initialLockedAt = null, throwOnSnapshotWrite = false, thro
         if (/INSERT INTO snapshot/.test(sql) && /ON CONFLICT/.test(sql)) {
           calls.snapshotWriteAttempts++;
           if (throwOnSnapshotWrite) throw new Error('mock snapshot write failure');
-          const [payload, hash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at] = args;
+          const [payload, hash, rawHash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at] = args;
           // ★3回目レビュー修正4: 本番のWHERE条件が `>=` から `>` に変わったことに合わせる。
           // 初回（保存済みが無い）はON CONFLICTに入らず素直にINSERTされるのでtrue。
           // 2回目以降は「保存済みより厳密に新しい」ときだけ上書きできる（同着は不可）。
           const isNewer = !state.snapshot || Number(fetchStartedAt) > Number(state.snapshot.fetchStartedAt);
           if (!isNewer) return { success: true, meta: { changes: 0 } };
-          state.snapshot = { payload, hash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at };
+          state.snapshot = { payload, hash, rawHash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at };
           calls.snapshotWrites++;
           return { success: true, meta: { changes: 1 } };
+        }
+        if (/UPDATE snapshot SET raw_hash/.test(sql)) {
+          // ★2026-08-31: 「中身は同じだった」回に印だけ付け替える道。
+          //   本物と同じく hash が一致するときだけ書き換える。
+          const [rawHash, hash] = args;
+          if (state.snapshot && state.snapshot.hash === hash) {
+            state.snapshot.rawHash = rawHash;
+            return { success: true, meta: { changes: 1 } };
+          }
+          return { success: true, meta: { changes: 0 } };
         }
         if (/INSERT OR REPLACE INTO sync_log/.test(sql)) {
           const [at, rows, ok, message, payloadHash] = args;
@@ -292,8 +306,12 @@ function makeMockDB({ initialLockedAt = null, throwOnSnapshotWrite = false, thro
 }
 
 function mockFetchOk(payload) {
+  // ★2026-08-31: 本物は res.text() を読むようになった（CPU上限対策で
+  //   「生のまま前回と比べて、同じなら解析しない」形にしたため）。
+  //   ニセ側も text() を返さないと、本物と違う道を試すことになる。
+  const text = JSON.stringify(payload);
   global.fetch = vi.fn(async () => ({
-    ok: true, status: 200, json: async () => payload
+    ok: true, status: 200, json: async () => payload, text: async () => text
   }));
 }
 
@@ -350,6 +368,145 @@ describe('syncAll（正常系）', () => {
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
     await syncAll(env);
     expect(state.lockedAt).toBeNull();
+  });
+});
+
+// ===========================================================================
+// 2026-08-31 未明の本番障害: CronがCPU上限を超えて毎回落ちた（00:28 JST以降）。
+//
+// 毎回やっていた「784KBのJSONを解析 → 組み直す → もう一度文字列にする」が
+// 日報の増加（2,415→2,571行）で上限に届いた。
+// GASの応答は同じ内容なら1バイトも変わらない（実測確認済み）ので、
+// 生のまま前回と比べ、同じならその重い処理を丸ごとやめる。
+//
+// ★ここは「条件分岐が正しいか」ではなく「本当に解析していないか」を見る。
+//   ニセの json() をわざと爆発させ、呼ばれたら落ちるようにして確かめる。
+// ===========================================================================
+describe('syncAll（2026-08-31 CPU上限対策: 同じ応答なら解析しない）', () => {
+  // 生の文字列だけ返し、json() を呼んだら落ちるニセfetch
+  function mockFetchTextOnly(payload) {
+    const text = JSON.stringify(payload);
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      text: async () => text,
+      json: async () => { throw new Error('json() を呼んではいけない（解析を省くはずの道）'); }
+    }));
+    return text;
+  }
+
+  it('★2回目は JSON の解析すらしない（重い処理を丸ごと省く）', async () => {
+    const payload = makeCompactPayload({ rows: makeRows(300) });
+    // 1回目は普通に取り込む（ここでは json() を使わない実装なので text だけで足りる）
+    mockFetchTextOnly(payload);
+    const { db, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+
+    const first = await syncAll(env);
+    expect(first.ok).toBe(true);
+    expect(calls.snapshotWrites).toBe(1);
+
+    const second = await syncAll(env);
+    expect(second.ok).toBe(true);
+    expect(second.skipped).toBe(true);
+    expect(second.skipReason).toBe('unchanged');
+    expect(second.message).toMatch(/取り込みを省きました/);
+    expect(calls.snapshotWrites).toBe(1);
+  });
+
+  it('★省いた回も sync_log に ok=1 を残す（鮮度ガードが「止まっている」と誤解しないため）', async () => {
+    const payload = makeCompactPayload({ rows: makeRows(10) });
+    mockFetchTextOnly(payload);
+    const { db, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    await syncAll(env);
+    await syncAll(env);
+    expect(calls.syncLogWrites.length).toBe(2);
+    expect(calls.syncLogWrites[1].ok).toBe(1);
+  });
+
+  it('★省いた回も件数を正しく返す（0件と誤って報告しない）', async () => {
+    const payload = makeCompactPayload({ rows: makeRows(42) });
+    mockFetchTextOnly(payload);
+    const { db } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    await syncAll(env);
+    const second = await syncAll(env);
+    expect(second.rows).toBe(42);
+  });
+
+  it('中身が変わったらちゃんと解析して書き込む（省きすぎない）', async () => {
+    const { db, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    // 世代の逆転防止（fetch_started_at の比較）が同一ミリ秒で効いてしまうため、
+    // 既存の「内容が変わっていれば2回目も書き込む」と同じく時計を進める。
+    const clock = stubIncreasingClock();
+    try {
+      mockFetchTextOnly(makeCompactPayload({ rows: makeRows(100) }));
+      await syncAll(env);
+      mockFetchTextOnly(makeCompactPayload({ rows: makeRows(120) }));
+      const second = await syncAll(env);
+      expect(second.ok).toBe(true);
+      expect(second.skipped).toBeFalsy();
+      expect(calls.snapshotWrites).toBe(2);
+    } finally {
+      clock.stop();
+    }
+  });
+
+  it('★この仕組みより前に保存された行（raw_hash が空）では省かない＝安全側に倒す', async () => {
+    const payload = makeCompactPayload({ rows: makeRows(50) });
+    const { db, state, calls } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    mockFetchOk(payload);
+    await syncAll(env);
+    // 古い行を模す（raw_hash が無い状態）
+    state.snapshot.rawHash = null;
+    mockFetchOk(payload);
+    const second = await syncAll(env);
+    expect(second.ok).toBe(true);
+    // 省かず最後まで走り、内容が同じなので既存の「変更なし」判定で止まる
+    expect(second.message).toMatch(/変更なし（書き込みをスキップしました）/);
+    expect(calls.snapshotWrites).toBe(1);
+  });
+
+  it('★「変わったように見えたが中身は同じ」回にも印を控える（次回から省けるように）', async () => {
+    // ★これが無いと raw_hash は「中身が変わった回」の書き込みでしか入らない。
+    //   予定が何日も変わらない期間は永久に省けず、CPU上限の対策にならない。
+    //   実際、直した直後の本番がこの状態だった。
+    const payload = makeCompactPayload({ rows: makeRows(30) });
+    const { db, state } = makeMockDB();
+    const env = { DB: db, GAS_URL: 'https://example.test/exec' };
+    mockFetchOk(payload);
+    await syncAll(env);
+    state.snapshot.rawHash = null;        // 古い行（印が無い）を模す
+    mockFetchOk(payload);
+    const second = await syncAll(env);
+    expect(second.message).toMatch(/変更なし（書き込みをスキップしました）/);
+    expect(state.snapshot.rawHash, '印が控えられていない').toBeTruthy();
+  });
+
+  it('JSONでない応答（GASのエラーページ等）は取り込まない', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      text: async () => '<!DOCTYPE html><html>error</html>',
+      json: async () => { throw new Error('呼ばれないはず'); }
+    }));
+    const { db, calls } = makeMockDB();
+    const res = await syncAll({ DB: db, GAS_URL: 'https://example.test/exec' });
+    expect(res.ok).toBe(false);
+    expect(calls.snapshotWrites).toBe(0);
+  });
+
+  it('★JSONでない応答なら指定回数だけやり直す', async () => {
+    let n = 0;
+    global.fetch = vi.fn(async () => {
+      n++;
+      return { ok: true, status: 200, text: async () => 'not json', json: async () => ({}) };
+    });
+    const { db } = makeMockDB();
+    const res = await syncAll({ DB: db, GAS_URL: 'https://example.test/exec' });
+    expect(res.ok).toBe(false);
+    expect(n).toBe(2);   // syncAll は tries=2 で呼んでいる
   });
 });
 

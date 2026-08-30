@@ -25,11 +25,13 @@ function makeMockDB({ snapshot = null, syncLog = null } = {}) {
   function respond(sql, args) {
     return {
       async all() {
-        if (/SELECT rows, hash, members_count, genba_count, jobsites_count FROM snapshot/.test(sql)) {
+        if (/SELECT rows, hash, raw_hash, members_count, genba_count, jobsites_count FROM snapshot/.test(sql)) {
           return {
             results: state.snapshot
               ? [{
                   rows: state.snapshot.rows, hash: state.snapshot.hash,
+                  // ★2026-08-31 CPU上限対策で足した列
+                  raw_hash: state.snapshot.rawHash ?? null,
                   members_count: state.snapshot.membersCount || 0, genba_count: state.snapshot.genbaCount || 0,
                   jobsites_count: state.snapshot.jobsitesCount || 0
                 }]
@@ -77,11 +79,11 @@ function makeMockDB({ snapshot = null, syncLog = null } = {}) {
           return { success: true };
         }
         if (/INSERT INTO snapshot/.test(sql) && /ON CONFLICT/.test(sql)) {
-          const [payload, hash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at] = args;
+          const [payload, hash, rawHash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at] = args;
           // ★3回目レビュー修正4: 本番のWHERE条件が`>=`から`>`（同着不可）に変わった。
           const isNewer = !state.snapshot || Number(fetchStartedAt) > Number(state.snapshot.fetchStartedAt || 0);
           if (!isNewer) return { success: true, meta: { changes: 0 } };
-          state.snapshot = { payload, hash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at };
+          state.snapshot = { payload, hash, rawHash, rows, membersCount, genbaCount, jobsitesCount, bytes, fetchStartedAt, at };
           return { success: true, meta: { changes: 1 } };
         }
         if (/INSERT OR REPLACE INTO sync_log/.test(sql)) {
@@ -185,7 +187,7 @@ describe('POST /api/sync（修正2: 共有秘密による簡易認証）', () =>
   it('SYNC_KEYが未設定なら、認証ヘッダ無しでも実行される', async () => {
     global.fetch = vi.fn(async () => ({
       ok: true, status: 200,
-      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] }), text: async () => JSON.stringify({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
     }));
     const { db } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec' }; // SYNC_KEY未設定
@@ -225,7 +227,7 @@ describe('POST /api/sync（修正2: 共有秘密による簡易認証）', () =>
   it('SYNC_KEYが設定されていて、ヘッダの値が一致すれば実行される', async () => {
     global.fetch = vi.fn(async () => ({
       ok: true, status: 200,
-      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] }), text: async () => JSON.stringify({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
     }));
     const { db, state } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec', SYNC_KEY: 'himitsu-123' };
@@ -285,7 +287,7 @@ describe('POST /api/sync（3回目レビュー修正5: Origin検証）', () => {
   it('正しいOriginなら（SYNC_KEY未設定の環境で）通常どおり実行される（回帰確認）', async () => {
     global.fetch = vi.fn(async () => ({
       ok: true, status: 200,
-      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] }), text: async () => JSON.stringify({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
     }));
     const { db, state } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
@@ -324,7 +326,7 @@ describe('POST /api/sync（3回目レビュー修正5: レート制限）', () =
   it('直近1分間の実行回数がしきい値未満なら、通常どおり実行される', async () => {
     global.fetch = vi.fn(async () => ({
       ok: true, status: 200,
-      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] }), text: async () => JSON.stringify({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
     }));
     const { db, state } = makeMockDB();
     const now = Date.now();
@@ -345,7 +347,7 @@ describe('POST /api/sync（3回目レビュー修正5: レート制限）', () =
   it('1分より古いsync_logはカウントに含まれない（古い実行が居座って永久にレート制限されることはない）', async () => {
     global.fetch = vi.fn(async () => ({
       ok: true, status: 200,
-      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] }), text: async () => JSON.stringify({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
     }));
     const { db, state } = makeMockDB();
     const now = Date.now();
@@ -386,7 +388,7 @@ describe('POST /api/sync（6回目レビュー修正1: skipReasonの受け渡し
   it('2回連続で同じ内容を同期すると、2回目のHTTP応答にskipReason:"unchanged"が含まれる（sync-guard.jsのdecideSyncOutcomeが確実成功として扱うための合図。recheckが/api/healthではなく/api/syncを見に行く6回目修正の前提）', async () => {
     global.fetch = vi.fn(async () => ({
       ok: true, status: 200,
-      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] }), text: async () => JSON.stringify({ status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [] })
     }));
     const { db } = makeMockDB();
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
@@ -467,7 +469,7 @@ describe('POST /api/sync（修正7: force=1の結線）', () => {
     const rows100 = Array.from({ length: 100 }, (_, i) => makeRow({ ID: 'new' + i, 作業日: '2026-05-01' }));
     global.fetch = vi.fn(async () => ({
       ok: true, status: 200,
-      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: rows100, members: [], genbaMaster: [], jobsites: [] })
+      json: async () => ({ status: 'ok', compact: 1, headers: HEADERS, rows: rows100, members: [], genbaMaster: [], jobsites: [] }), text: async () => JSON.stringify({ status: 'ok', compact: 1, headers: HEADERS, rows: rows100, members: [], genbaMaster: [], jobsites: [] })
     }));
     const env = { DB: db, GAS_URL: 'https://example.test/exec' };
 

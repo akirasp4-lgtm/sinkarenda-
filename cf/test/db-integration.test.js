@@ -42,7 +42,9 @@ function makeCompactPayload(overrides = {}) {
   return { status: 'ok', compact: 1, headers: HEADERS, rows: [], members: [], genbaMaster: [], jobsites: [], ...overrides };
 }
 function mockFetchOk(payload) {
-  global.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => payload }));
+  // ★2026-08-31: 本物は res.text() を読む（CPU上限対策）。ニセ側も合わせる。
+  const text = JSON.stringify(payload);
+  global.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => payload, text: async () => text }));
 }
 
 // ★D1のprepare/bind/run/all()互換の薄いアダプタ。本物のSQLを本物のSQLiteに

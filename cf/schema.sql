@@ -67,6 +67,10 @@ CREATE TABLE IF NOT EXISTS snapshot (
   id               INTEGER PRIMARY KEY CHECK (id = 1),  -- 常に1行だけ（CHECKで強制）
   payload          TEXT NOT NULL,     -- GASのcompact応答をJSON文字列にしたもの（単価は除去済み。給料情報はD1へ持ち込まない）
   hash             TEXT NOT NULL,     -- 中身が変わったかの判定用（SHA-256）。夜間・休日の無変化時は書き込みをスキップする
+  raw_hash         TEXT,              -- GASの生の応答そのもののSHA-256。前回と同じなら
+                                       -- JSONの解析も組み直しも丸ごと省く（CronのCPU上限対策・
+                                       -- 2026-08-31の本番障害）。古い行にはNULLが入るので
+                                       -- 「NULLなら省かない」＝安全側に倒れる
   rows             INTEGER NOT NULL,  -- 日報(rows)の行数（健全性確認・急減検知用）
   members_count    INTEGER NOT NULL,  -- 職人マスタの件数（急減・全消え検知用。修正3）
   genba_count      INTEGER NOT NULL,  -- 元請マスタの件数（同上）
