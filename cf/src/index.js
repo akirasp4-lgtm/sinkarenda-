@@ -315,16 +315,36 @@ export default {
     return json({ status: 'error', message: 'not found' }, 404);
   },
 
+  // ★★本番障害の修正（2026-08-30）★★
+  //
+  // 何が起きたか: 5分ごとのCronが **Exceeded CPU Limit** で毎回落ちていた。
+  //   Workerのログに `"*/5 * * * *" - Exceeded CPU Limit` が出ていた。
+  //   取り込みが7時間半止まり、毎朝6時のアラートが運用初日に1通も送れなかった。
+  //   画面はGASへ自動で切り替わるので動いていた（安全装置は正しく働いた）。
+  //
+  // なぜ今になって壊れたか: **データが増えて予算を超えた**。
+  //   2,415行 → 2,541行。じわじわ増えて限界を越えた。放置すればまた壊れる。
+  //
+  // 直し方: 1回のCronで4つ全部やっていたのをやめ、**1回1仕事**にする。
+  //   予定の取り込み（syncAll）は毎回。残りは順番に回す。
+  //   ★予定の取り込みだけは絶対に落とさない。他は後回しでよい。
+  //
+  //   分の値で振り分ける（5分ごとなので 0,5,10,...,55 が来る）:
+  //     毎回        … syncAll（予定の取り込み）
+  //     :00 と :30  … syncPresident（社長予定。30分に1回で足りる）
+  //     :15         … cleanupSyncLog（掃除。1時間に1回で足りる）
+  //     :45         … cleanupPresSyncLog
   async scheduled(event, env, ctx) {
+    // 予定の取り込みは毎回・最優先。ここだけは他の仕事と同居させない。
     ctx.waitUntil(syncAll(env));
-    // ★修正8（低・sync_logの掃除）: 同期本体とは独立に、古いsync_log行を掃除する。
-    // 失敗しても同期そのものには影響しない（cleanupSyncLogは例外を投げない契約）。
-    ctx.waitUntil(cleanupSyncLog(env));
-    // ★2026-08-26追加: 社長予定の取り込み。syncAllとは独立に走らせる
-    // （どちらも例外を投げない契約なので、片方が失敗しても他方に影響しない）。
-    // PRES_PIN未設定の間は syncPresident 自身が手前で失敗を記録して終わるため、
-    // GASへの余計なアクセスは発生しない。
-    ctx.waitUntil(syncPresident(env));
-    ctx.waitUntil(cleanupPresSyncLog(env));
+
+    const min = new Date(event.scheduledTime || Date.now()).getUTCMinutes();
+    if (min === 0 || min === 30) {
+      ctx.waitUntil(syncPresident(env));
+    } else if (min === 15) {
+      ctx.waitUntil(cleanupSyncLog(env));
+    } else if (min === 45) {
+      ctx.waitUntil(cleanupPresSyncLog(env));
+    }
   }
 };
