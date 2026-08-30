@@ -4480,7 +4480,7 @@ function renderGmList(){
     return`<div class="gm-day-row"${_overdueStyle}>
       <input type="checkbox" class="gm-day-check" data-idx="${idx}" onchange="updateGmDeleteBar()">
       <div class="gm-day-info">
-        <div class="gm-day-date" data-goday="${g.date}" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" title="この日のカレンダーを開く">${formatDate(g.date)}</div>
+        <div class="gm-day-date" data-goday="${esc(g.date)}" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" title="この日のカレンダーを開く">${formatDate(g.date)}</div>
         <div class="gm-day-members">${esc(memberNames)}${updaterHtml}</div>
         ${badges.length?`<div style="margin-top:4px">${badges.join('')}</div>`:''}
       </div>
@@ -4713,6 +4713,11 @@ function renderAvailDay() {
     return names.map(n => '<span class="member-chip" style="pointer-events:none">'
       + esc(n) + '</span>').join('');
   };
+  // ★コードレビュー（2026-08-30）: これより下で chip(free,true) が availPicked を
+  //   読んでチェック印を描くので、**描く前に**同期しておく必要がある。
+  //   後ろで同期していたため、日付や会社を変えた直後に
+  //   「チップには✓が付いているのにバーは0人」という食い違いが出ていた。
+  availSyncPicked(free);
   let html = '<div style="margin-top:12px">';
   if (wantQual) {
     html += '<div style="font-size:13px;color:#0C447C;background:#EAF2FB;border-radius:6px;padding:6px 10px;margin-bottom:8px">'
@@ -4737,8 +4742,7 @@ function renderAvailDay() {
     html = html.replace('空いている ' + free.length + ' 人',
       '空いている ' + free.length + ' 人（「' + esc(wantGenba) + '」の経験が多い順）');
   }
-  availSyncPicked(free);   // ★条件が変わったら選択を捨てる（P1対応）
-  // 選んだ人で予定を作るバー
+  // 選んだ人で予定を作るバー（同期は上の chip を描く前に済ませてある）
   if (availPicked.length) {
     html += '<div style="position:sticky;bottom:0;background:#fff;border-top:1px solid #ddd;'
       + 'padding:8px 0;margin-top:8px;display:flex;gap:8px;align-items:center">'
@@ -4905,8 +4909,10 @@ function goToCalendarDate(ymd){
   if(!/^\d{4}-\d{2}-\d{2}$/.test(d))return;
   listMonth=d.slice(0,7);              // その日が入っている月へ
   currentDateFilter='';                // 日付の絞り込みは持ち越さない
-  switchTab('list');
-  renderList();
+  // ★コードレビュー（2026-08-30）: switchTab('list') の中で既に renderList() を
+  //   呼んでいるので、ここで呼ぶと2,200行超のグループ化と月表示を二度組み立てる。
+  //   スマホから日付をタップする導線（今回の主目的）で毎回起きるので体感に響く。
+  switchTab('list');                   // この中で renderList() が走る
   openCalDay(d);                       // その日の予定一覧を開く
 }
 

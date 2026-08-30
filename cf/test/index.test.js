@@ -577,24 +577,38 @@ describe('★Cronは1回1仕事にする（CPU上限で落ちないため）', (
     return ran.length;
   }
 
-  it('★毎回やるのは「予定の取り込み」だけ（他は別の回に回す）', () => {
-    // :05 :10 :20 … は取り込みだけ＝1つ
-    [5, 10, 20, 25, 35, 40, 50, 55].forEach((m) => {
+  it('★取り込みだけの回がある（他は別の回に回す）', () => {
+    [15, 25, 45, 55].forEach((m) => {
       expect(runScheduled(m)).toBe(1);
     });
   });
 
-  it('掃除・社長予定は決まった分にだけ回す（同時に4つ走らせない）', () => {
-    expect(runScheduled(0)).toBe(2);    // 取り込み + 社長予定
-    expect(runScheduled(30)).toBe(2);   // 取り込み + 社長予定
-    expect(runScheduled(15)).toBe(2);   // 取り込み + 掃除
-    expect(runScheduled(45)).toBe(2);   // 取り込み + 掃除
+  it('★社長予定は10分に1回（鮮度ガード15分の中に収める）', () => {
+    // ★コードレビュー（2026-08-30）で見つけた回帰:
+    //   30分に1回まで減らしたが pres-read.js の鮮度ガードは15分。
+    //   :15〜:30 と :45〜:00 が必ず「古い」判定になっていた。
+    [0, 10, 20, 30, 40, 50].forEach((m) => {
+      expect(runScheduled(m)).toBe(2);   // 取り込み + 社長予定
+    });
   });
 
-  it('★どの回でも3つ以上は同時に走らせない（これが障害の原因だった）', () => {
+  it('掃除は重い2つと同じ回に重ねない', () => {
+    expect(runScheduled(5)).toBe(2);    // 取り込み + 掃除（軽い）
+    expect(runScheduled(35)).toBe(3);   // 取り込み + 掃除2つ（どれも軽い）
+  });
+
+  it('★重い仕事（取り込み・社長予定）を3つ以上重ねない（障害の原因だった）', () => {
+    // :35 は掃除2つが増えるが、どちらもDELETE1文で軽い。
     for (let m = 0; m < 60; m += 5) {
-      expect(runScheduled(m)).toBeLessThanOrEqual(2);
+      expect(runScheduled(m)).toBeLessThanOrEqual(m === 35 ? 3 : 2);
     }
+  });
+
+  it('★scheduledTime が無くても社長予定は走る（鮮度を優先して倒す）', () => {
+    const ran = [];
+    const env = { DB: makeMockDB({ snapshot: null }).db };
+    worker.scheduled({}, env, { waitUntil: (p) => { ran.push(p); return p; } });
+    expect(ran.length).toBe(2);   // 取り込み + 社長予定
   });
 });
 

@@ -3,7 +3,7 @@ import { syncAll, cleanupSyncLog } from './sync.js';
 import { readPresident } from './pres-read.js';
 import { syncPresident, cleanupPresSyncLog } from './pres-sync.js';
 import { buildAlerts, formatAlertsText, hasProblem, addDays } from './alerts.js';
-import { sanitizeCandidates, buildPrompt, parsePicks, reserveCall, logCall, callOpenAI } from './suggest.js';
+import { sanitizeCandidates, buildPrompt, parsePicks, reserveCall, logCall, callOpenAI, cleanupAiLog } from './suggest.js';
 
 // ★日本時間の「今日」。Workerは世界標準時で動くので、そのまま new Date() を使うと
 //   朝6時の通知が前日ぶんになる日が出る（画面側の todayYmd と同じ考え方）。
@@ -20,7 +20,9 @@ const CORS = {
   'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
   'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
   // ★修正2: 画面側が /api/sync の簡易認証ヘッダ(X-Sync-Key)を送れるよう許可する。
-  'Access-Control-Allow-Headers': 'Content-Type, X-Sync-Key'
+  // ★コードレビュー（2026-08-30）: /api/alerts に鍵を要求するようにしたので、
+  //   ブラウザから呼ぶ場合に備えて X-Alert-Key も許可しておく。
+  'Access-Control-Allow-Headers': 'Content-Type, X-Sync-Key, X-Alert-Key'
 };
 
 // ★3回目レビュー修正5（/api/syncの認証）: SYNC_KEYは空でも設定しても、backend.jsonという
@@ -184,7 +186,8 @@ export default {
       if (!candidates.length) return json({ status: 'ok', enabled: true, picks: [] });
       // ★Codexレビュー[P1]: 先に席を取ってから呼ぶ（数える→呼ぶ の間の
       //   すり抜けを塞ぐ）。席が取れなければOpenAIを呼ばない＝課金しない。
-      if (!(await reserveCall(env))) {
+      const seat = await reserveCall(env);
+      if (!seat.ok) {
         return json({ status: 'ok', enabled: false, reason: 'daily limit' });
       }
       try {
@@ -192,9 +195,10 @@ export default {
           genba: body.genba, need: body.need, candidates
         }));
         const picks = parsePicks(text, candidates, body.need);
-        await logCall(env, true);
+        await logCall(env, true, seat.id);      // ★予約した行を更新（新しい行を足さない）
         return json({ status: 'ok', enabled: true, picks });
       } catch (e) {
+        await logCall(env, false, seat.id);     // 失敗も同じ行に記録する
         return json({ status: 'error', message: String(e.message || e) }, 502);
       }
     }
@@ -361,13 +365,27 @@ export default {
     })());
 
     // 掃除と社長予定は「落ちても予定の取り込みに影響させない」ので分けたまま。
-    const min = new Date(event.scheduledTime || Date.now()).getUTCMinutes();
-    if (min === 0 || min === 30) {
-      ctx.waitUntil(syncPresident(env));
-    } else if (min === 15) {
-      ctx.waitUntil(cleanupSyncLog(env));
-    } else if (min === 45) {
+    //
+    // ★コードレビュー（2026-08-30）: 社長予定を30分に1回まで減らしたが、
+    //   pres-read.js の鮮度ガードは **15分**（PRES_FRESHNESS_THRESHOLD_MS）。
+    //   :15〜:30 と :45〜:00 は必ず「古い」判定になり、社長画面が毎時30分ぶん
+    //   GASへ落ちて遅くなっていた（自分で入れた回帰）。
+    //   → **10分に1回**（:00 :10 :20 :30 :40 :50）にして15分の中に収める。
+    //   ★1回に走らせる仕事は多くても2つまで。重い2つ（取り込み＋社長予定）と
+    //     掃除が同じ回に重ならないよう、掃除は :05 と :35 に置く。
+    //
+    // ★scheduledTime が 0 や未定義でも「実行時刻の分」に化けないようにする。
+    //   化けると社長予定も掃除も一度も走らない回が出る。
+    //   分からないときは**社長予定を走らせる側**に倒す（鮮度を優先）。
+    const st = Number(event && event.scheduledTime);
+    const min = Number.isFinite(st) ? new Date(st).getUTCMinutes() : 0;
+    if (min % 10 === 0) {
+      ctx.waitUntil(syncPresident(env));       // :00 :10 :20 :30 :40 :50
+    } else if (min === 5) {
+      ctx.waitUntil(cleanupSyncLog(env));      // 1時間に1回で足りる
+    } else if (min === 35) {
       ctx.waitUntil(cleanupPresSyncLog(env));
+      ctx.waitUntil(cleanupAiLog(env));        // ★AIの記録も掃除する（無制限に増えていた）
     }
   }
 };

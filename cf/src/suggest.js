@@ -107,25 +107,42 @@ export function parsePicks(text, candidates, need) {
 //   同時に大量に叩かれたとき全部が上限判定を通過してから呼びに行ける（すり抜け）。
 //   **先に1件記録してから数える**（席を取ってから数える）。取った席が上限を超えて
 //   いたら呼ばずに返す。多少多めに記録されても、課金する側が止まるので安全側。
+// ★コードレビュー（2026-08-30）: 予約で1行、成功でもう1行 INSERT していたため、
+//   **1日200回の上限が実質100回**になっていた（成功1回につき2行数えていた）。
+//   さらに ok 列は予約行が常に0のままで、成功率の判定にも使えなかった。
+//   → 予約した行のidを返し、結果はその行を **UPDATE** する。1呼び出し＝1行。
 export async function reserveCall(env) {
   try {
-    await env.DB.prepare('INSERT INTO ai_log(at, ok) VALUES(?,?)')
+    const ins = await env.DB.prepare('INSERT INTO ai_log(at, ok) VALUES(?,?)')
       .bind(new Date().toISOString(), 0).run();
+    const id = (ins && ins.meta && ins.meta.last_row_id) || null;
     const today = new Date().toISOString().slice(0, 10);
     const res = await env.DB.prepare(
       'SELECT COUNT(*) AS c FROM ai_log WHERE at LIKE ?').bind(today + '%').all();
     const count = (res.results && res.results[0] && Number(res.results[0].c)) || 0;
-    return count <= SUGGEST_DAILY_LIMIT;   // 席が取れたか
+    return { ok: count <= SUGGEST_DAILY_LIMIT, id };   // 席が取れたか＋予約した行
   } catch (_e) {
-    return false;   // ★記録も数えもできないなら呼ばない（課金が青天井になるのを防ぐ）
+    // ★記録も数えもできないなら呼ばない（課金が青天井になるのを防ぐ）
+    return { ok: false, id: null };
   }
 }
 
-export async function logCall(env, ok) {
+// 予約した行に結果を書く。★新しい行を足さない（足すと上限が半分になる）。
+export async function logCall(env, ok, id) {
   try {
-    await env.DB.prepare('INSERT INTO ai_log(at, ok) VALUES(?,?)')
-      .bind(new Date().toISOString(), ok ? 1 : 0).run();
+    if (id == null) return;              // 予約できていなければ何もしない
+    await env.DB.prepare('UPDATE ai_log SET ok = ? WHERE id = ?')
+      .bind(ok ? 1 : 0, id).run();
   } catch (_e) { /* 記録できなくても本筋は止めない */ }
+}
+
+// 古い記録を消す。★Cronから呼ぶ。放っておくと無制限に増え、
+//   reserveCall が毎回走らせる COUNT が行数に比例して重くなる。
+export async function cleanupAiLog(env, keepDays = 30) {
+  try {
+    const cutoff = new Date(Date.now() - keepDays * 86400000).toISOString();
+    await env.DB.prepare('DELETE FROM ai_log WHERE at < ?').bind(cutoff).run();
+  } catch (_e) { /* 掃除に失敗しても本筋は止めない */ }
 }
 
 // OpenAIを呼ぶ。fetchを差し替えられるようにしてテストから実際に動かす。

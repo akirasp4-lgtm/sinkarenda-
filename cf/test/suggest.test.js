@@ -7,7 +7,7 @@
 //   4. 外へ実際の通信をしない（全部モックする）
 import { describe, it, expect } from 'vitest';
 import {
-  sanitizeCandidates, buildPrompt, parsePicks, reserveCall, callOpenAI,
+  sanitizeCandidates, buildPrompt, parsePicks, reserveCall, logCall, callOpenAI,
   SUGGEST_MAX_CANDIDATES, SUGGEST_MAX_TOKENS, SUGGEST_DAILY_LIMIT
 } from '../src/suggest.js';
 
@@ -52,14 +52,20 @@ describe('★課金が青天井にならない', () => {
   // ★Codexレビュー[P1]（2026-08-29）: 「数える→呼ぶ→記録する」の順だと、
   //   同時に大量に叩かれたとき全部が判定を通ってから呼びに行ける（すり抜け）。
   //   **先に1件記録してから数える**（席を取ってから数える）形に変えた。
+  // ★SQLの種類ごとに回数を数える。二重計上（INSERTが2回）を捕まえるため。
   const dbWith = (count) => {
-    const calls = { inserted: 0 };
+    const calls = { inserted: 0, updated: 0, deleted: 0 };
     return {
       calls,
       DB: {
         prepare: (sql) => ({
           bind: () => ({
-            run: async () => { calls.inserted++; },
+            run: async () => {
+              if (/^INSERT/i.test(sql)) calls.inserted++;
+              else if (/^UPDATE/i.test(sql)) calls.updated++;
+              else if (/^DELETE/i.test(sql)) calls.deleted++;
+              return { meta: { last_row_id: 4242 } };
+            },
             all: async () => ({ results: [{ c: count + calls.inserted }] })
           })
         })
@@ -69,9 +75,9 @@ describe('★課金が青天井にならない', () => {
 
   it('席が取れれば呼ぶ／上限を超えたら呼ばない', async () => {
     // 既に199件 → 自分の1件で200。上限ちょうどなので通す
-    expect(await reserveCall(dbWith(SUGGEST_DAILY_LIMIT - 1))).toBe(true);
+    expect((await reserveCall(dbWith(SUGGEST_DAILY_LIMIT - 1))).ok).toBe(true);
     // 既に200件 → 自分の1件で201。超えるので呼ばない
-    expect(await reserveCall(dbWith(SUGGEST_DAILY_LIMIT))).toBe(false);
+    expect((await reserveCall(dbWith(SUGGEST_DAILY_LIMIT))).ok).toBe(false);
   });
 
   it('★先に記録してから数える（同時に叩かれてもすり抜けない）', async () => {
@@ -80,9 +86,38 @@ describe('★課金が青天井にならない', () => {
     expect(env.calls.inserted).toBe(1);   // 呼ぶ前に席を取っている
   });
 
+  it('★1回の呼び出しで記録は1行だけ（上限が半分になるのを防ぐ）', async () => {
+    // ★コードレビュー（2026-08-30）で見つけた不具合:
+    //   予約で1行・成功でもう1行 INSERT していたため、
+    //   1日200回の上限が実質100回になっていた。
+    const env = dbWith(0);
+    const seat = await reserveCall(env);
+    await logCall(env, true, seat.id);
+    expect(env.calls.inserted).toBe(1);   // 増えるのは1行だけ
+    expect(env.calls.updated).toBe(1);    // 結果は同じ行を書き換える
+  });
+
+  it('予約した行のidを返す（どの行を更新するか分かるように）', async () => {
+    const seat = await reserveCall(dbWith(0));
+    expect(seat.id).toBe(4242);
+  });
+
+  it('予約できていなければ結果を書きに行かない', async () => {
+    const env = dbWith(0);
+    await logCall(env, true, null);
+    expect(env.calls.updated).toBe(0);
+  });
+
   it('★記録も数えもできないときは「呼ばない」側に倒す', async () => {
     const broken = { DB: { prepare: () => { throw new Error('D1 down'); } } };
-    expect(await reserveCall(broken)).toBe(false);
+    expect((await reserveCall(broken)).ok).toBe(false);
+  });
+
+  it('★古い記録を掃除する仕組みがある（無制限に増えると数えるのが重くなる）', async () => {
+    const m = await import('../src/suggest.js');
+    const env = dbWith(0);
+    await m.cleanupAiLog(env, 30);
+    expect(env.calls.deleted).toBe(1);
   });
 
   it('1回に返させる長さに上限をかけている', async () => {

@@ -139,3 +139,46 @@ FILES.forEach((f) => {
     });
   });
 });
+
+
+// ============================================================
+// 描く順番（コードレビュー 2026-08-30）
+//
+// renderAvailDay の中で chip(free,true) は availPicked を読んでチェック印を描く。
+// その **後ろ** で availSyncPicked が選択を捨てる／間引くと、
+// 「チップには✓が付いているのにバーは0人」という食い違いが画面に出る。
+// 実際にそうなっていたので、順番をソースの並びで固定する。
+// ============================================================
+describe('renderAvailDay の描く順番', () => {
+  ['index.html', 'admin.html'].forEach((f) => {
+    const src = read(f);
+
+    it(f + ': availSyncPicked は chip(free,true) より前に呼ぶ', () => {
+      const sync = src.indexOf('availSyncPicked(free)');
+      const chip = src.indexOf('chip(free, true)');
+      expect(sync).toBeGreaterThan(-1);
+      expect(chip).toBeGreaterThan(-1);
+      expect(sync).toBeLessThan(chip);
+    });
+
+    it(f + ': availSyncPicked の呼び出しは1か所だけ（二重に同期しない）', () => {
+      const n = src.split('availSyncPicked(free)').length - 1;
+      expect(n).toBe(1);
+    });
+
+    it(f + ': goToCalendarDate は renderList を自分で呼ばない（switchTabが呼ぶ）', () => {
+      const i = src.indexOf('function goToCalendarDate');
+      // ★コメントに「renderList()」と書いてあるだけで落ちないよう、
+      //   コメント行を落としてから中身を見る。
+      const body = src.slice(i, src.indexOf('\n}', i))
+        .split('\n').map(function (L) { return L.replace(/\/\/.*$/, ''); }).join('\n');
+      expect(body).toContain("switchTab('list')");
+      expect(body).not.toContain('renderList()');
+    });
+
+    it(f + ': 現場管理の日付は data-goday をエスケープして埋める', () => {
+      expect(src).toContain('data-goday="${esc(g.date)}"');
+      expect(src).not.toContain('data-goday="${g.date}"');
+    });
+  });
+});
