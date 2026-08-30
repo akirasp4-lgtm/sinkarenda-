@@ -155,13 +155,38 @@ describe('表記ゆれを拾う（事務員が直すための候補）', () => {
     expect(g[0][0].inMaster).toBe(true);
   });
 
-  it('★HSJ の4通りがひとつの組にまとまる', () => {
+  it('★HSJ の表記ゆれ3つは1組、HSJ-KNSI は代表との2つ組で出す', () => {
+    // ★Codexレビュー（2026-08-31）で作り直した。
+    //   以前は「片方が丸ごと含まれる」だけで数珠つなぎにまとめていたので、
+    //   「大阪電設」「大阪電設工業」「電設工業」まで1組になった（次のテスト）。
+    //   芯が完全に同じ物だけを1組にし、含む関係は2つずつの組にする。
     const list = G.genbaUsageList([], [
       n('HSJ'), n('ＨＳＪ'), n('株式会社HSJ'), n('HSJ-KNSI')
     ], '全社');
     const g = G.genbaVariantGroups(list);
-    expect(g.length).toBe(1);
-    expect(g[0].length).toBe(4);
+    const exact = g.find((x) => x.length === 3);
+    expect(exact, '芯が同じ3つが1組になっていない').toBeTruthy();
+    expect(exact.map((x) => x.name).sort()).toEqual(['HSJ', 'ＨＳＪ', '株式会社HSJ'].sort());
+    // HSJ-KNSI も候補から落とさない（代表との2つ組で出す）
+    const pair = g.find((x) => x.some((y) => y.name === 'HSJ-KNSI'));
+    expect(pair, 'HSJ-KNSI が候補から落ちている').toBeTruthy();
+    expect(pair.length).toBe(2);
+  });
+
+  it('★無関係な元請が橋渡しで数珠つなぎにならない（Codexが再現した壊れ方）', () => {
+    // 「大阪電設」と「電設工業」は互いに似ていないのに、
+    // 真ん中の「大阪電設工業」が橋渡しして1組になっていた。
+    // 取り消せない統一の候補にこれを並べるのは危ない。
+    const list = G.genbaUsageList([], [
+      n('大阪電設'), n('大阪電設工業'), n('電設工業')
+    ], '全社');
+    const g = G.genbaVariantGroups(list);
+    g.forEach((grp) => {
+      const names = grp.map((x) => x.name);
+      expect(names.includes('大阪電設') && names.includes('電設工業'),
+        '似ていない2つが同じ組に入っている').toBe(false);
+      expect(grp.length).toBe(2);
+    });
   });
 
   it('★きんでん東 と きんでん西 は別物として扱う（違う元請を勝手に束ねない）', () => {
@@ -258,6 +283,53 @@ describe('画面の配線', () => {
         expect(body, fn + ' がフラグを立てていない').toContain('gfixBusy=true;');
         expect(body, fn + ' がフラグを戻していない').toContain('finally{gfixBusy=false;');
       });
+    });
+
+    it(f + ': ★会社をまたいで書き換えない（Codexレビュー P1）', () => {
+      // 実データ: 「不動産」はGRHDに21件・グローライズに1件、
+      //           「オリエンス」は和信カインドに114件・グローライズに2件。
+      //   グローライズの画面で「1件」と確認して実行したのに、他社の行まで
+      //   書き換わっていた。「和信カインド・ラーテル・GRHDは触らない」に反する。
+      const i = src.indexOf('async function gfixMerge');
+      const body = src.slice(i, src.indexOf('\n}', i));
+      // 会社を限定する新しい入口だけを呼ぶ（古い merge_genba は呼ばない）
+      expect(body).toContain("action:'merge_genba_company'");
+      expect(body).not.toContain("action:'merge_genba'");
+      expect(body).toContain('company:targetCompany');
+      // 会社が決まっていない「全社」では実行させない
+      expect(body).toContain("targetCompany==='全社'");
+    });
+
+    it(f + ': ★押した時点の会社を握って離さない（通信中の会社切替で別会社を触らない）', () => {
+      ['async function gfixMerge', 'async function gfixAdd'].forEach((fn) => {
+        const i = src.indexOf(fn);
+        const body = src.slice(i, src.indexOf('\n}', i));
+        expect(body, fn + ' が会社を控えていない').toContain('const targetCompany=currentCompany;');
+        // await より後ろで currentCompany を読み直していないこと
+        const after = body.slice(body.indexOf('await fetch'));
+        expect(after, fn + ' が通信後に currentCompany を読み直している')
+          .not.toContain('currentCompany');
+      });
+    });
+
+    it(f + ': ★古い画面（キャッシュ表示中）からは実行させない', () => {
+      // 通信できずキャッシュを出しているだけのとき、他の人が既に直した後かもしれない。
+      // 逆向きに統一して、直した内容を巻き戻す事故が起きる。
+      ['async function gfixMerge', 'async function gfixAdd'].forEach((fn) => {
+        const i = src.indexOf(fn);
+        const body = src.slice(i, src.indexOf('\n}', i));
+        expect(body, fn + ' が dataLoadOk を見ていない').toContain('if(!dataLoadOk)');
+      });
+    });
+
+    it(f + ': ★ボタンの向きが読み違えられないようにする（取り消せない操作）', () => {
+      // 以前は「→ これに統一」と書いてあったが、実際に消えるのは押した行の方。
+      // 非エンジニアが逆に読むと、残したい名前を消してしまう。
+      expect(src).toContain('この名前をやめる');
+      expect(src).not.toContain('これに統一</button>');
+      // 「残す名前」に選ばれている行は押せなくする
+      expect(src).toContain('function gfixMarkKeep(gi){');
+      expect(src).toContain('b.disabled=isKeep;');
     });
 
     it(f + ': ★統一先が未登録なら、その場で元請マスタへ登録できる', () => {

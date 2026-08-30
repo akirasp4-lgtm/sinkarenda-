@@ -529,6 +529,7 @@ function isAdminDailyMutation_(action) {
   return action === 'archive'
       || action === 'cleanup_orphan_jobnos'
       || action === 'merge_genba'
+      || action === 'merge_genba_company'
       || action === 'merge_loc'
       || action === 'reassign_jobno';
 }
@@ -842,6 +843,27 @@ function doPost(e) {
       const cleaned = cleanupOrphanJobNos_(ss);
       logOperation_(ss, 'cleanup_orphan_jobnos', '休み/倉庫/予定', '清掃=' + cleaned, updatedBy);
       return ok({cleaned: cleaned});
+    }
+
+    // ★2026-08-31 Codexレビュー[P1]: 会社ごとに限定した元請の統一。
+    //   従来の merge_genba は会社を見ずに全行を書き換えるため、
+    //   グローライズの画面で「2件」と確認して実行すると、
+    //   和信カインドの同名114件まで書き換わっていた（実データで確認）。
+    //   「和信カインド・ラーテル・GRHDは触らない」という決まりに反するので、
+    //   会社を必ず受け取る新しい入口を用意した。
+    //   ★新しい名前にしたのは、古いGASのままの環境では「不明なaction」で
+    //     止まる＝何も壊さずに失敗させるため（安全側に倒す）。
+    if (action === 'merge_genba_company') {
+      const from = String(body.from || '').trim();
+      const to = String(body.to || '').trim();
+      const company = String(body.company || '').trim();
+      if (!from || !to) return error('from と to を指定してください');
+      if (from === to) return error('同じ名前です');
+      if (!company) return error('会社を指定してください（会社をまたぐ統一はできません）');
+      const result = mergeGenbaForCompany_(ss, from, to, company);
+      logOperation_(ss, 'merge_genba_company', company + '：' + from + ' → ' + to,
+                    JSON.stringify(result), updatedBy);
+      return ok(result);
     }
 
     if (action === 'merge_genba') {
@@ -3512,6 +3534,75 @@ function mergeGenba_(ss, fromName, toName) {
         result.masterAction = 'renamed';
       }
     } else {
+      result.masterAction = 'from_not_found';
+    }
+  }
+  return result;
+}
+
+// 会社を限定して元請名を統一する（2026-08-31 Codexレビュー[P1]）。
+// mergeGenba_ との違いは「会社の列を見て、その会社の行だけ書き換える」こと。
+// 元請マスタも (名前, 会社) の組で判断するので、他社の登録は消さない。
+function mergeGenbaForCompany_(ss, fromName, toName, company) {
+  const result = { nippoUpdated: 0, archiveUpdated: 0, jobsiteUpdated: 0,
+                   masterAction: 'none', company: company, skippedOtherCompanies: 0 };
+  // 日報データ / アーカイブ
+  [SHEET_NAME, ARCHIVE_SHEET].forEach(function (name, idx) {
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) return;
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return;
+    const headers = data[0];
+    const gCol = headers.indexOf('元請名');
+    const cCol = headers.indexOf('会社');
+    if (gCol < 0 || cCol < 0) return;
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][gCol] || '').trim() !== fromName) continue;
+      if (String(data[i][cCol] || '').trim() !== company) {
+        result.skippedOtherCompanies++;      // ★他社の行はそのまま残す
+        continue;
+      }
+      sheet.getRange(i + 1, gCol + 1).setValue(toName);
+      if (idx === 0) result.nippoUpdated++; else result.archiveUpdated++;
+    }
+  });
+  // 現場マスタ（会社の列が無いので、日報側で他社が使っていない元請のときだけ触る）
+  if (result.skippedOtherCompanies === 0) {
+    const jobSite = ss.getSheetByName(JOBSITE_SHEET);
+    if (jobSite) {
+      const data = jobSite.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][0] || '').trim() === fromName) {
+          jobSite.getRange(i + 1, 1).setValue(toName);
+          result.jobsiteUpdated++;
+        }
+      }
+    }
+  } else {
+    result.masterAction = 'jobsite_skipped_shared';
+  }
+  // 元請マスタ（(名前, 会社) の組で判断する）
+  const genbaSheet = ss.getSheetByName(GENBA_MASTER_SHEET);
+  if (genbaSheet) {
+    const data = genbaSheet.getDataRange().getValues();
+    let fromRow = -1;
+    let toExists = false;
+    for (let i = 1; i < data.length; i++) {
+      const n = String(data[i][0] || '').trim();
+      const c = String(data[i][1] || '').trim();
+      if (c && c !== company) continue;                 // 他社の登録は見ない
+      if (n === fromName && fromRow < 0) fromRow = i;
+      if (n === toName) toExists = true;
+    }
+    if (fromRow >= 0) {
+      if (toExists) {
+        genbaSheet.deleteRow(fromRow + 1);
+        if (result.masterAction === 'none') result.masterAction = 'deleted_duplicate';
+      } else {
+        genbaSheet.getRange(fromRow + 1, 1).setValue(toName);
+        if (result.masterAction === 'none') result.masterAction = 'renamed';
+      }
+    } else if (result.masterAction === 'none') {
       result.masterAction = 'from_not_found';
     }
   }

@@ -2604,6 +2604,8 @@ async function submitNippo(){
     const _ls=document.getElementById('s-location-select');if(_ls)_ls.value='';
     const _li=document.getElementById('s-location');if(_li){_li.value='';_li.style.display='none';}
     const _lse=document.getElementById('s-location-search');if(_lse)_lse.value='';
+    const _gse=document.getElementById('s-genba-search');if(_gse)_gse.value='';
+    populateGenbaSelect('s');
     const _lsim=document.getElementById('s-loc-similar');if(_lsim){_lsim.style.display='none';_lsim.innerHTML='';}
     document.getElementById('s-jobno-hint').style.display='none';
     document.getElementById('s-jobno-div-wrap').style.display='none';
@@ -2880,24 +2882,57 @@ function genbaVariantGroups(list) {
                inMaster: !!x.inMaster, canon: genbaCanon(x.name) };
     })
     .filter(function (x) { return x.canon; });
-  var near = function (a, b) {
-    if (a.canon === b.canon) return true;
-    var s = a.canon, l = b.canon;
-    if (s.length > l.length) { s = b.canon; l = a.canon; }
-    return s.length >= 3 && l.indexOf(s) >= 0;
-  };
-  // A〜B・B〜C なら A・B・C をひとつの組にする
+  // ★Codexレビュー（2026-08-31）: 以前は「片方が丸ごと含まれる」だけでも
+  //   数珠つなぎにまとめていた。それだと
+  //   「大阪電設」「大阪電設工業」「電設工業」が1組になる
+  //   （最初と最後は似ていないのに、真ん中が橋渡しをしてしまう）。
+  //   取り消せない統一の候補にこれを並べるのは危ない。
+  //   → **芯が完全に同じ物だけ**を1つの組にする（HSJ／ＨＳＪ／株式会社HSJ）。
+  //     「片方が丸ごと含まれる」は数珠つなぎにせず、**2つずつの組**にする
+  //     （グローライズ ⊂ グローライズ自社／ハイテックス ⊂ ハイテックス（北九州））。
   var parent = items.map(function (_, i) { return i; });
   var find = function (i) { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
   for (var i = 0; i < items.length; i++) {
     for (var j = i + 1; j < items.length; j++) {
-      if (near(items[i], items[j])) { var a = find(i), b = find(j); if (a !== b) parent[a] = b; }
+      if (items[i].canon === items[j].canon) {
+        var a = find(i), b = find(j);
+        if (a !== b) parent[a] = b;
+      }
     }
   }
   var byRoot = {};
   items.forEach(function (it, i) { var r = find(i); (byRoot[r] || (byRoot[r] = [])).push(it); });
   var groups = [];
-  Object.keys(byRoot).forEach(function (r) { if (byRoot[r].length >= 2) groups.push(byRoot[r]); });
+  Object.keys(byRoot).forEach(function (r) {
+    if (byRoot[r].length >= 2) {
+      groups.push(byRoot[r]);
+    }
+  });
+  // 「片方が丸ごと含まれる」ぶんは**2つずつの組**にする（数珠つなぎにしない）。
+  // 完全一致でまとまった組は、その代表（先頭＝残す候補）1つだけで代表させる。
+  // こうしないと HSJ／ＨＳＪ／株式会社HSJ の3つそれぞれと HSJ-KNSI で
+  // 中身がほぼ同じ組が3つ並ぶ。逆に代表を除外してしまうと
+  // HSJ-KNSI が候補から丸ごと落ちる（実データで確認した）。
+  var reps = [];
+  var repSeen = {};
+  items.forEach(function (it, i) {
+    var r = find(i);
+    if (byRoot[r].length >= 2) {
+      if (!repSeen[r]) { repSeen[r] = true; reps.push(byRoot[r][0]); }
+    } else {
+      reps.push(it);
+    }
+  });
+  for (var p = 0; p < reps.length; p++) {
+    for (var q = p + 1; q < reps.length; q++) {
+      var A = reps[p], B = reps[q];
+      if (A.canon === B.canon) continue;                 // 完全一致は上で処理済み
+      var sh = A.canon, lo = B.canon;
+      if (sh.length > lo.length) { sh = B.canon; lo = A.canon; }
+      if (sh.length < 3 || lo.indexOf(sh) < 0) continue;
+      groups.push([A, B]);
+    }
+  }
   // 組の中は「残すべき候補」を先頭に（マスタ登録済み → 件数が多い → 名前順）
   groups.forEach(function (g) {
     g.sort(function (a, b) {
@@ -5764,16 +5799,20 @@ function renderGenbaFix(){
     html+='<div style="color:#666;padding:4px 0">似ている元請は見つかりませんでした。</div>';
   }else{
     gfixGroups.forEach((g,gi)=>{
-      html+='<div style="background:#fff;border:1px solid #BFDBFE;border-radius:8px;padding:10px;margin-bottom:8px">';
-      html+='<div style="font-size:12px;color:#666;margin-bottom:6px">残す名前を選んでください</div>';
-      html+=`<select data-gfixkeep="${gi}" style="margin-bottom:8px">`;
+      html+=`<div data-gfixgroup="${gi}" style="background:#fff;border:1px solid #BFDBFE;border-radius:8px;padding:10px;margin-bottom:8px">`;
+      html+='<div style="font-size:12px;color:#666;margin-bottom:6px">\u2705 <b>残す名前</b>（この名前にそろえます）</div>';
+      html+=`<select data-gfixkeep="${gi}" onchange="gfixMarkKeep(${gi})" style="margin-bottom:8px">`;
       g.forEach((x,xi)=>{html+=`<option value="${xi}">${esc(x.name)}（${x.count}件）</option>`;});
       html+='</select>';
       g.forEach((x,xi)=>{
         html+='<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #F1F5F9">';
         html+=`<div style="flex:1"><b>${esc(x.name)}</b> <span style="color:#666;font-size:12px">${x.count}件`
              +(x.last?`・最終 ${esc(x.last)}`:'')+`</span><br>${tag(x)}</div>`;
-        html+=`<button class="btn btn-secondary btn-sm" data-gfixmerge="${gi}" data-gfixidx="${xi}">\u2192 これに統一</button>`;
+        // ★Codexレビュー（2026-08-31）: 以前は「→ これに統一」と書いてあったが、
+        //   実際に消えるのは**押した行の方**。取り消せない操作で向きが逆に読めるのは危ない。
+        //   文言を「この名前をやめる」に直し、残す行のボタンは押せなくする。
+        html+=`<button class="btn btn-secondary btn-sm" data-gfixmerge="${gi}" data-gfixidx="${xi}" `
+             +`title="上で選んだ「残す名前」にそろえます">この名前をやめる</button>`;
         html+='</div>';
       });
       html+='</div>';
@@ -5791,11 +5830,32 @@ function renderGenbaFix(){
     });
   }
   box.innerHTML=html;
+  // 「残す名前」の初期値に合わせてボタンの状態を整える
+  gfixGroups.forEach((_,gi)=>gfixMarkKeep(gi));
 }
 
 // 「〇〇 を 残す名前 に統一する」
+// 「残す名前」に選ばれている行のボタンは押せなくする（押すと自分自身を消すことになるため）。
+function gfixMarkKeep(gi){
+  const box=document.querySelector(`[data-gfixgroup="${gi}"]`);
+  if(!box)return;
+  const sel=box.querySelector(`[data-gfixkeep="${gi}"]`);
+  const keepIdx=sel?Number(sel.value):0;
+  box.querySelectorAll('[data-gfixmerge]').forEach(b=>{
+    const isKeep=Number(b.getAttribute('data-gfixidx'))===keepIdx;
+    b.disabled=isKeep;
+    b.textContent=isKeep?'\u2705 これを残す':'この名前をやめる';
+    b.style.opacity=isKeep?'0.5':'';
+    b.style.cursor=isKeep?'default':'';
+  });
+}
+
 async function gfixMerge(gi,xi){
   if(gfixBusy){alert('前の処理がまだ終わっていません。少し待ってください。');return;}
+  // ★Codexレビュー[P1]（2026-08-31）: 古い画面から実行させない。
+  //   通信できずキャッシュを出しているだけのときは、他の人が既に直した後かもしれず、
+  //   逆向きに統一して直した内容を巻き戻す事故が起きる。登録・編集と同じ扱いにする。
+  if(!dataLoadOk){alert('最新データを読み込めていないため実行できません。「更新」を押してから、もう一度お試しください。');return;}
   const g=gfixGroups[gi];
   if(!g)return;
   const sel=document.querySelector(`[data-gfixkeep="${gi}"]`);
@@ -5803,18 +5863,33 @@ async function gfixMerge(gi,xi){
   const from=g[xi];
   if(!keep||!from)return;
   if(keep.name===from.name){alert('「残す名前」と同じです。別の名前を選んでください。');return;}
-  const msg='元請名を統一します。\n\n'
-    +'「'+from.name+'」（'+from.count+'件）\n'
+  // ★Codexレビュー[P1]: 会社をまたいで書き換わらないようにする。
+  //   実データで「不動産」はGRHDに21件、「オリエンス」は和信カインドに114件あった。
+  //   グローライズの画面で「1件」と見て実行すると、他社の行まで書き換わっていた。
+  //   → 会社を必ず送る。会社が決まっていない「全社」表示では実行させない。
+  // ★Codexレビュー[P2]: 押した時点の会社を握って離さない。
+  //   通信中に会社を切り替えられると、後始末が別会社に対して走る。
+  const targetCompany=currentCompany;
+  if(!targetCompany||targetCompany==='全社'){
+    alert('会社を選んでから実行してください。\n（「全社」のままだと、他の会社の同じ名前まで書き換わってしまいます）');
+    return;
+  }
+  const msg='元請名をそろえます。\n\n'
+    +'やめる名前：「'+from.name+'」（'+from.count+'件）\n'
     +'  ↓\n'
-    +'「'+keep.name+'」\n\n'
-    +'予定・アーカイブ・現場マスタ・元請マスタを全部まとめて書き換えます。\n'
+    +'残す名前　：「'+keep.name+'」\n\n'
+    +'対象は '+targetCompany+' のぶんだけです（他の会社の同じ名前は触りません）。\n'
+    +'予定・アーカイブ・現場マスタ・元請マスタをまとめて書き換えます。\n'
     +'★この操作は取り消せません。よろしいですか？';
   if(!confirm(msg))return;
   gfixBusy=true;
   try{
     setLoading&&setLoading(true);
+    // ★会社を限定する新しい入口だけを呼ぶ。GASが古いままなら
+    //   「不明なaction」で失敗する＝何も壊さずに止まる（安全側）。
     const res=await fetch(getGasUrl(),{method:'POST',
-      body:JSON.stringify({action:'merge_genba',from:from.name,to:keep.name,updatedBy:getUsername()}),
+      body:JSON.stringify({action:'merge_genba_company',from:from.name,to:keep.name,
+                           company:targetCompany,updatedBy:getUsername()}),
       headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'){
@@ -5823,12 +5898,13 @@ async function gfixMerge(gi,xi){
       // ★残す名前が元請マスタに無いままだと、統一してもプルダウンに出てこない。
       //   GAS側は「消す方」がマスタに載っている時しか改名してくれないので、
       //   どちらも未登録だった場合はここで登録まで済ませる。
-      if(!keep.inMaster&&currentCompany!=='全社'
+      if(!keep.inMaster
          &&confirm('「'+keep.name+'」はまだ元請マスタに登録されていません。\n'
                   +'今のうちに登録しますか？\n（登録すると次からプルダウンの上の方に出ます）')){
         try{
+          // ★押した時点の会社へ登録する（通信中に切り替えられても巻き込まれない）
           const r2=await fetch(getGasUrl(),{method:'POST',
-            body:JSON.stringify({action:'add_genba',name:keep.name,company:currentCompany}),
+            body:JSON.stringify({action:'add_genba',name:keep.name,company:targetCompany}),
             headers:{'Content-Type':'text/plain'}});
           const j2=await r2.json();
           if(j2.status!=='ok')alert('登録でエラー: '+(j2.message||'不明'));
@@ -5843,15 +5919,18 @@ async function gfixMerge(gi,xi){
 // 「元請マスタに登録する」
 async function gfixAdd(ui){
   if(gfixBusy){alert('前の処理がまだ終わっていません。少し待ってください。');return;}
+  if(!dataLoadOk){alert('最新データを読み込めていないため実行できません。「更新」を押してから、もう一度お試しください。');return;}
   const u=gfixUnreg[ui];
   if(!u)return;
-  if(currentCompany==='全社'){alert('会社を選んでから登録してください');return;}
-  if(!confirm('「'+u.name+'」を '+currentCompany+' の元請マスタに登録しますか？'))return;
+  // ★押した時点の会社を握って離さない（通信中に切り替えられても別会社へ登録しない）
+  const targetCompany=currentCompany;
+  if(!targetCompany||targetCompany==='全社'){alert('会社を選んでから登録してください');return;}
+  if(!confirm('「'+u.name+'」を '+targetCompany+' の元請マスタに登録しますか？'))return;
   gfixBusy=true;
   try{
     setLoading&&setLoading(true);
     const res=await fetch(getGasUrl(),{method:'POST',
-      body:JSON.stringify({action:'add_genba',name:u.name,company:currentCompany}),
+      body:JSON.stringify({action:'add_genba',name:u.name,company:targetCompany}),
       headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'){alert('\u2713 登録しました');await loadData();}

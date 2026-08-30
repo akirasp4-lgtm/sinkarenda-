@@ -44,6 +44,9 @@ function stage(file) {
   const escs = cut(src, 'function esc(', "function escAttr(str){return esc(str).replace(/\"/g,'&quot;').replace(/'/g,'&#39;');}", file);
   const render = cut(src, 'function renderGenbaFix(){', '\n}', file);
   const populate = cut(src, 'function populateGenbaSelect(p){', '\n}', file);
+  // renderGenbaFix の最後で呼ぶので一緒に取り込む。
+  // 偽DOMでは querySelector が null を返すのですぐ戻る＝描いた中身には影響しない。
+  const markKeep = cut(src, 'function gfixMarkKeep(gi){', '\n}', file);
 
   const store = {
     'gfix-body': { innerHTML: '' },
@@ -79,6 +82,7 @@ function stage(file) {
     rule,
     'let gfixGroups=[],gfixUnreg=[],gfixBusy=false;',
     render,
+    markKeep,
     populate,
     'globalThis.__render=renderGenbaFix;globalThis.__pop=populateGenbaSelect;',
     'globalThis.__esc=esc;globalThis.__escAttr=escAttr;',
