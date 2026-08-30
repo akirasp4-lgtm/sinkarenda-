@@ -134,6 +134,15 @@ export default {
     //   ★問題が無い日は text を空文字で返す。Bot側は空なら送らない。
     //     毎日必ず届く通知は読まれなくなる（利用者判断 2026-08-29）。
     if (url.pathname === '/api/alerts') {
+      // ★Codexレビュー[P1]（2026-08-30）: ここは無認証で公開されていた。
+      //   実際に curl で叩くと **氏名と現場名がそのまま取れた**
+      //   （例:「・江頭 … きんでん東 ELLEGARDEN柏の葉 と …」）。
+      //   ALERT_KEY を設定すると、その値を持つリクエストだけ通す。
+      //   ★未設定の間は通す＝設定前に朝の通知を止めてしまわないため。
+      //     設定したら、ボット側の .env にも同じ値を入れること。
+      if (env.ALERT_KEY && request.headers.get('X-Alert-Key') !== env.ALERT_KEY) {
+        return json({ status: 'error', message: '認証が必要です' }, 401);
+      }
       try {
         const company = (url.searchParams.get('company') || '全社').trim() || '全社';
         // date 未指定なら「明日」（毎朝、翌日の段取りを確認するため）
@@ -336,8 +345,22 @@ export default {
   //     :45         … cleanupPresSyncLog
   async scheduled(event, env, ctx) {
     // 予定の取り込みは毎回・最優先。ここだけは他の仕事と同居させない。
-    ctx.waitUntil(syncAll(env));
+    //
+    // ★Codexレビュー[P1]（2026-08-30）: 以前は `ctx.waitUntil(syncAll(env))` と
+    //   投げっぱなしにしていた。syncAll は失敗しても例外を投げず `{ok:false}` を
+    //   返すだけなので、**Cloudflareの画面ではCronが「成功」のまま緑になる。**
+    //   今回7時間半止まったのに、Cron Events を見ても異常に見えなかった。
+    //   → 業務として失敗したら **例外を投げて赤くする**。
+    //   ★ロック待ちのスキップ（skipped）は正常。これは失敗にしない。
+    ctx.waitUntil((async () => {
+      const r = await syncAll(env);
+      if (r && r.ok === false) {
+        // ここで throw するとCloudflare側にエラーとして記録される
+        throw new Error('予定の取り込みに失敗: ' + String((r && r.message) || ''));
+      }
+    })());
 
+    // 掃除と社長予定は「落ちても予定の取り込みに影響させない」ので分けたまま。
     const min = new Date(event.scheduledTime || Date.now()).getUTCMinutes();
     if (min === 0 || min === 30) {
       ctx.waitUntil(syncPresident(env));

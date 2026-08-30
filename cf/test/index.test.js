@@ -557,3 +557,91 @@ describe('GET /api/alerts', () => {
     expect(j.status).toBe('error');
   });
 });
+
+
+// ============================================================
+// 本番障害の再発防止（2026-08-30）
+//
+// 起きたこと: 5分ごとのCronが Exceeded CPU Limit で毎回落ち、
+//   取り込みが7時間半止まり、毎朝6時のアラートが運用初日に0通。
+//   しかも Cloudflare の画面ではCronが「成功」に見えていた。
+// ============================================================
+
+describe('★Cronは1回1仕事にする（CPU上限で落ちないため）', () => {
+  function runScheduled(minuteUtc) {
+    const ran = [];
+    const env = { DB: makeMockDB({ snapshot: null }).db };
+    const ctx = { waitUntil: (p) => { ran.push(p); return p; } };
+    const event = { scheduledTime: Date.UTC(2026, 7, 30, 5, minuteUtc, 0) };
+    worker.scheduled(event, env, ctx);
+    return ran.length;
+  }
+
+  it('★毎回やるのは「予定の取り込み」だけ（他は別の回に回す）', () => {
+    // :05 :10 :20 … は取り込みだけ＝1つ
+    [5, 10, 20, 25, 35, 40, 50, 55].forEach((m) => {
+      expect(runScheduled(m)).toBe(1);
+    });
+  });
+
+  it('掃除・社長予定は決まった分にだけ回す（同時に4つ走らせない）', () => {
+    expect(runScheduled(0)).toBe(2);    // 取り込み + 社長予定
+    expect(runScheduled(30)).toBe(2);   // 取り込み + 社長予定
+    expect(runScheduled(15)).toBe(2);   // 取り込み + 掃除
+    expect(runScheduled(45)).toBe(2);   // 取り込み + 掃除
+  });
+
+  it('★どの回でも3つ以上は同時に走らせない（これが障害の原因だった）', () => {
+    for (let m = 0; m < 60; m += 5) {
+      expect(runScheduled(m)).toBeLessThanOrEqual(2);
+    }
+  });
+});
+
+describe('★取り込みの失敗をCloudflareにも失敗として見せる', () => {
+  it('取り込みが失敗したらCronの処理が例外になる（画面が緑のままにならない）', async () => {
+    const promises = [];
+    const env = { DB: makeMockDB({ snapshot: null }).db, GAS_URL: 'https://gas.test/exec' };
+    const ctx = { waitUntil: (p) => { promises.push(p); return p; } };
+    // GASが壊れた応答を返す＝取り込みは失敗する
+    const orig = globalThis.fetch;
+    globalThis.fetch = async () => new Response('{"status":"ok"}', { status: 200 });
+    try {
+      worker.scheduled({ scheduledTime: Date.UTC(2026, 7, 30, 5, 5, 0) }, env, ctx);
+      await expect(promises[0]).rejects.toThrow(/取り込みに失敗/);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+});
+
+describe('★/api/alerts の鍵（氏名・現場名が誰でも取れる状態だった）', () => {
+  const alertsReq = (headers) =>
+    new Request('https://worker.test/api/alerts?company=' + encodeURIComponent('グローライズ'),
+      { headers: headers || {} });
+
+  it('鍵が未設定なら今までどおり通る（設定前に朝の通知を止めない）', async () => {
+    const env = { DB: makeMockDB({ snapshot: null }).db };
+    const res = await worker.fetch(alertsReq(), env, {});
+    expect(res.status).not.toBe(401);
+  });
+
+  it('★鍵を設定したら、鍵の無いリクエストは弾く', async () => {
+    const env = { DB: makeMockDB({ snapshot: null }).db, ALERT_KEY: 'secret123' };
+    const res = await worker.fetch(alertsReq(), env, {});
+    expect(res.status).toBe(401);
+    expect((await res.json()).message).toContain('認証');
+  });
+
+  it('★間違った鍵も弾く', async () => {
+    const env = { DB: makeMockDB({ snapshot: null }).db, ALERT_KEY: 'secret123' };
+    const res = await worker.fetch(alertsReq({ 'X-Alert-Key': 'wrong' }), env, {});
+    expect(res.status).toBe(401);
+  });
+
+  it('正しい鍵なら通る', async () => {
+    const env = { DB: makeMockDB({ snapshot: null }).db, ALERT_KEY: 'secret123' };
+    const res = await worker.fetch(alertsReq({ 'X-Alert-Key': 'secret123' }), env, {});
+    expect(res.status).not.toBe(401);
+  });
+});
