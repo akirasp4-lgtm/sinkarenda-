@@ -373,7 +373,9 @@ describe('人員不足 — いつもより人が少ない現場', () => {
     expect(a.shortStaff).toHaveLength(1);
     expect(a.shortStaff[0]).toMatchObject({ genba: 'きんでん西', loc: 'SB心斎橋', usual: 4, count: 2 });
     expect(hasProblem(a)).toBe(true);
-    expect(formatAlertsText(a)).toContain('いつもより人が少ない現場');
+    // ★2026-08-31 Phase 2（社長指示 §3）: 実績ベースは参考判定。断定しない文言にした。
+    expect(formatAlertsText(a)).toContain('いつもより人が少ない可能性があります');
+    expect(formatAlertsText(a)).toContain('（参考）');
     expect(formatAlertsText(a)).toContain('いつも4人 → 2人');
   });
 
@@ -604,7 +606,7 @@ describe('人員不足 — レビュー指摘の穴を塞ぐ', () => {
     const a = buildAlerts(payload(rows), opt);
     expect(a.shortStaff).toHaveLength(12);
     const t = formatAlertsText(a);
-    expect(t).toContain('いつもより人が少ない現場 12件');
+    expect(t).toContain('いつもより人が少ない可能性があります 12件（参考）');
     expect(t).toContain('・ほか 2件');
   });
 

@@ -3264,7 +3264,12 @@ function qualSafe(list) {
 //     同じ人・同じ日に2件以上 → 250件（「現場＋安全会議」「現場＋事務所」など正常が大半）
 //     出退勤の時間が重なる     → 217件（08:00-17:00の定型なのでほぼ全部が該当）
 //     人工の合計が1.0超        → 189件（人工は給料の数字。全行が1で時間の意味を持たない）
-//     同じ日に別々の現場系      →  47件（うち今日以降12件）★物理的に不可能＝これだけが本物
+//     同じ日に別々の現場系      →  47件（うち今日以降12件）★物理的に両立しない＝まず見てほしい分
+// ★2026-08-31 Phase 2（社長指示 §6 で作り直し）:
+//   「250件を検知しない仕様にはしないでください。検知を消すのではなく、
+//     検知した上で通知レベルを変えること。『47件が本物』と断定する実装・表示にしないこと」
+//   → 拾うのは広く（countsForOverlap）、強さで分ける（conflictSeverity）。
+//     high はあくまで「まず見てほしい順」であって、info が偽という意味ではない。
 //   毎日200件出る警告は誰も読まない。読まれる数まで絞るのが目的。
 //
 // ★このブロックは index.html と admin.html に同じ物が入っている。片方だけ直さないこと
@@ -3303,7 +3308,8 @@ function jobKey(n) {
   return String((n && n.genba) || '').trim() + CONFLICT_SEP + String((n && n.loc) || '').trim();
 }
 
-// 重複として数えない行をここで落とす
+// 重複として数えない行をここで落とす（従来の「現場系だけ」の厳しい方）
+// ★この関数は今も「高優先かどうか」の材料に使う。意味を変えないこと。
 function countsForConflict(n) {
   if (!n || n.isGhost) return false;      // 夜勤の翌日ぶんの影は実体ではない
   if (n.yotei || n.yasumi) return false;  // 「予定」「休み」は現場に立っていない
@@ -3312,11 +3318,52 @@ function countsForConflict(n) {
   return true;
 }
 
+// ★2026-08-31 Phase 2: 検知そのものは広く取る。
+//   社長指示 §6「250件を検知しない仕様にはしないでください。
+//   検知を消すのではなく、検知した上で通知レベルを変えること」
+//   現場系でない行（事務所・現調・移動・その他）も、いったん拾う。
+//   拾ったうえで conflictSeverity が強さを決める。
+function countsForOverlap(n) {
+  if (!n || n.isGhost) return false;
+  if (n.yotei || n.yasumi) return false;  // 「予定」「休み」は現場に立っていない
+  if (!n.date || !n.name) return false;
+  return true;
+}
+
+// 時刻が両方そろっているか。時間が分からない予定は「両立するか判断できない」。
+function hasWorkTime(j) {
+  return !!(j && String(j.start || '').trim() && String(j.end || '').trim());
+}
+
+// ★重複の強さを決める（社長指示 §6 の3段階）。
+//   high  … 同じ日に別々の「現場作業」。物理的に両立しない
+//   check … 現場作業を含むが片方は別業務／時刻が入っていない＝判断材料が足りない
+//   info  … 現場作業を含まない（会議＋社内予定など）。運用上両立しうる
+//
+//   ⚠️「これが本物」と断定しないこと。high は「まず見てほしい順」であって
+//     info が偽とは限らない。表示も断定にしない。
+function conflictSeverity(jobs) {
+  var list = jobs || [];
+  var siteJobs = list.filter(function (j) { return j && j.isSite; });
+  var sites = {};
+  siteJobs.forEach(function (j) { sites[j.genba + CONFLICT_SEP + j.loc] = true; });
+  if (siteJobs.length >= 2 && Object.keys(sites).length >= 2) return 'high';
+  if (siteJobs.length >= 1) return 'check';
+  if (!list.every(hasWorkTime)) return 'check';   // 時刻が無い＝判断できない
+  return 'info';
+}
+
+var CONFLICT_SEVERITY_ORDER = { high: 3, check: 2, info: 1 };
+
 function findConflicts(nippos, opts) {
   var from = (opts && opts.from) || '';
+  // ★既定は 'high'。既存の呼び出し（カレンダーのバナー・保存時の確認）の
+  //   出方を変えないため。全部ほしいときだけ 'info' を渡す。
+  var minSev = (opts && opts.minSeverity) || 'high';
+  var minRank = CONFLICT_SEVERITY_ORDER[minSev] || 3;
   var map = new Map();
   (nippos || []).forEach(function (n) {
-    if (!countsForConflict(n)) return;
+    if (!countsForOverlap(n)) return;
     if (from && String(n.date) < from) return;
     // 会社を混ぜない。和信カインドの「元」とラーテルの「元」は別人
     var key = [String(n.date), rosterKey(n.company),
@@ -3327,7 +3374,11 @@ function findConflicts(nippos, opts) {
     if (!jobs.has(jk)) {
       jobs.set(jk, {
         genba: String(n.genba || ''), loc: String(n.loc || ''),
-        butai: String(n.butai || ''), ids: []
+        butai: String(n.butai || ''), ids: [],
+        // ★2026-08-31 Phase 2: 強さを決めるための材料
+        workType: String(n.workType || ''),
+        isSite: countsForConflict(n),
+        start: String(n.start || ''), end: String(n.end || '')
       });
     }
     if (n.id) jobs.get(jk).ids.push(n.id);
@@ -3338,9 +3389,14 @@ function findConflicts(nippos, opts) {
     var p = key.split(CONFLICT_SEP);
     // roster は会社名そのものではなく「同じ名簿のまとまり」。
     // グローライズとGRミツマはどちらも 'GR' になる
+    var list = Array.from(jobs.values());
+    var sev = conflictSeverity(list);
+    // ★検知はした。ここで落とすのは「今回の呼び出しが求める強さ」に届かない分だけ。
+    if ((CONFLICT_SEVERITY_ORDER[sev] || 0) < minRank) return;
     out.push({
       date: p[0], roster: p[1], name: p[2], bucket: p[3],
-      jobs: Array.from(jobs.values())
+      severity: sev,
+      jobs: list
     });
   });
   out.sort(function (a, b) {

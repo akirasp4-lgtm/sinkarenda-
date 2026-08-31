@@ -160,7 +160,12 @@ export default {
           problem: hasProblem(a), text: formatAlertsText(a),
           counts: {
             重複: a.conflicts.length, 責任者なし: a.noLead.length,
-            いつもより人が少ない: (a.shortStaff || []).length,
+            // ★2026-08-31 Phase 2（社長指示 §9）: 正式判定と参考判定を別の数字で出す。
+            //   足し合わせて1つの数にしない（どちらの根拠か分からなくなる）。
+            必要人数に足りない_正式: (a.shortOfficial || []).length,
+            資格の確認_正式: (a.qualShort || []).filter(q => q.status !== 'unknown').length,
+            資格が判定できない: (a.qualShort || []).filter(q => q.status === 'unknown').length,
+            いつもより人が少ない_参考: (a.shortStaff || []).length,
             資格まもなく切れる: a.quals.length, 拠点またぎ: a.moves.length,
             延期なのに人あり: a.stoppedWithPeople.length,
             現場: a.siteCount, 出る人: a.workingCount, 空き: a.freeCount, 名簿: a.rosterCount,

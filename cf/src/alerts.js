@@ -40,15 +40,49 @@ export function countsForConflict(n) {
   if (!isGenbaWork(n)) return false;
   return !!(String(n.date || '').trim() && String(n.name || '').trim());
 }
+
+// ★2026-08-31 Phase 2: 検知そのものは広く取る（社長指示 §6）。
+//   「250件を検知しない仕様にはしないでください。
+//     検知を消すのではなく、検知した上で通知レベルを変えること」
+export function countsForOverlap(n) {
+  if (!n || n.isGhost || n.yotei || n.yasumi) return false;
+  return !!(String(n.date || '').trim() && String(n.name || '').trim());
+}
+
+function hasWorkTime(j) {
+  return !!(j && String(j.start || '').trim() && String(j.end || '').trim());
+}
+
+// 重複の強さ（画面と同じ規則。片方だけ直さないこと）
+//   high  … 同じ日に別々の「現場作業」。物理的に両立しない
+//   check … 現場作業を含むが片方は別業務／時刻が入っていない＝判断材料が足りない
+//   info  … 現場作業を含まない（会議＋社内予定など）。運用上両立しうる
+// ⚠️「これが本物」と断定しないこと。high は「まず見てほしい順」。
+export function conflictSeverity(jobs) {
+  const list = jobs || [];
+  const siteJobs = list.filter(j => j && j.isSite);
+  const sites = {};
+  siteJobs.forEach(j => { sites[j.genba + SEP + j.loc] = true; });
+  if (siteJobs.length >= 2 && Object.keys(sites).length >= 2) return 'high';
+  if (siteJobs.length >= 1) return 'check';
+  if (!list.every(hasWorkTime)) return 'check';
+  return 'info';
+}
+
+export const CONFLICT_SEVERITY_ORDER = { high: 3, check: 2, info: 1 };
+
 function jobKey(n) {
   return String((n && n.genba) || '').trim() + SEP + String((n && n.loc) || '').trim();
 }
 
 export function findConflicts(nippos, opts) {
   const from = (opts && opts.from) || '';
+  // ★既定は 'high'。既存の呼び出しの出方を変えないため。
+  const minSev = (opts && opts.minSeverity) || 'high';
+  const minRank = CONFLICT_SEVERITY_ORDER[minSev] || 3;
   const map = new Map();
   (nippos || []).forEach(n => {
-    if (!countsForConflict(n)) return;
+    if (!countsForOverlap(n)) return;
     if (from && String(n.date) < from) return;
     const bucket = n.yakin ? 'night' : 'day';
     const key = [String(n.date), rosterKey(n.company), String(n.name).trim(), bucket].join(SEP);
@@ -59,7 +93,11 @@ export function findConflicts(nippos, opts) {
     //   cf/test/alerts.test.js が両方を同じデータで動かして JSON を突き合わせる。
     if (!jobs.has(jk)) jobs.set(jk, {
       genba: String(n.genba || ''), loc: String(n.loc || ''),
-      butai: String(n.butai || ''), ids: []
+      butai: String(n.butai || ''), ids: [],
+      // ★2026-08-31 Phase 2: 強さを決めるための材料。画面と同じ並び・同じ形。
+      workType: String(n.workType || ''),
+      isSite: countsForConflict(n),
+      start: String(n.start || ''), end: String(n.end || '')
     });
     if (n.id) jobs.get(jk).ids.push(n.id);
   });
@@ -67,7 +105,10 @@ export function findConflicts(nippos, opts) {
   map.forEach((jobs, key) => {
     if (jobs.size < 2) return;
     const p = key.split(SEP);
-    out.push({ date: p[0], roster: p[1], name: p[2], bucket: p[3], jobs: Array.from(jobs.values()) });
+    const list = Array.from(jobs.values());
+    const sev = conflictSeverity(list);
+    if ((CONFLICT_SEVERITY_ORDER[sev] || 0) < minRank) return;
+    out.push({ date: p[0], roster: p[1], name: p[2], bucket: p[3], severity: sev, jobs: list });
   });
   out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1
     : a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -102,6 +143,104 @@ const SHORT_MIN_GAP = 2;     // かつ何人以上少なかったら
 //   （着工期10人・終盤3人の現場で、終盤の3人が正常でも古い10人に引かれて鳴り続ける）。
 //   判定日より前の直近この日数だけを見る。値は未来日を除いたバックテストで決めた。
 const SHORT_WINDOW_DAYS = 90;
+// ===== 人員不足の正式判定（2026-08-31 Phase 2 / 社長指示 §3）===========
+// 「第1優先: 案件ごとの必要人数と、実際に配置されている人数を比較する。
+//   第2優先: 過去実績との比較。ただし『参考値』であり、断定しない」
+//
+// ★必要人数が登録されている現場は、正式判定だけを出す。
+//   同じ現場を「正式」と「参考」で二重に出さない（どちらを信じるか分からなくなる）。
+//
+// ⚠️ 正直に書いておく限界（勝手に埋めないこと・社長指示 §0）:
+//   ・その日1人も入っていない現場は判定しない。現場マスタに「いつからいつまで
+//     動く現場か」の欄が無いので、休みの日と人が付いていない日を区別できない。
+//     全部出すと223現場ぶん毎朝鳴って、誰も読まなくなる。
+//   ・昼勤と夜勤を分けない。必要人数の欄は現場に1つしかなく、交替制を表せない。
+//     分けると「昼2＋夜2で必要4」の現場が、両方とも不足と誤報する。
+//   ・必要人数が未登録の現場は、今までどおり実績ベースの参考判定に回る。
+
+// 現場マスタから「必要人数・必要資格」を引く索引。鍵は 元請名＋現場名。
+export function siteNeedIndex(jobsites) {
+  const out = {};
+  (jobsites || []).forEach(j => {
+    if (!j) return;
+    const k = String(j.genba || '').trim() + SEP + String(j.loc || '').trim();
+    const n = Number(j.needCount);
+    out[k] = {
+      needCount: (j.needCount == null || !isFinite(n) || n <= 0) ? null : Math.floor(n),
+      needQuals: Array.isArray(j.needQuals) ? j.needQuals.filter(q => String(q || '').trim() !== '') : [],
+      needExp: String(j.needExp || '').trim(),
+      status: String(j.status || '').trim()
+    };
+  });
+  return out;
+}
+
+// ===== 資格不足の正式判定（2026-08-31 Phase 2 / 社長指示 §4）===========
+// 「資格不足 / 期限切れ / 期限間近 / 資格情報が未登録 を別状態として扱う」
+//
+// ★「誰も持っていない」と「そもそも資格情報が入っていない」を絶対に混ぜないこと。
+//   資格マスタに1行でも載っているのは62人中22人（2026-08-31 実測）。
+//   混ぜると、資格をまだ入力していないだけの人が「資格不足」と断定される。
+//   社長指示 §0「不明な資格・経験を勝手に補完しない」。
+export const QUAL_NEED_LABEL = {
+  ok: '有効な資格を持つ人がいる',
+  soon: '期限が近い',
+  expired: '期限が切れている',
+  missing: '誰も持っていない',
+  unknown: '資格情報が未登録で判定できない'
+};
+
+// 氏名 -> その人の資格の行。★会社をまたいで混ぜない（同姓が実在する）。
+export function qualsByPerson(qualifications, company) {
+  const out = {};
+  (qualifications || []).forEach(q => {
+    if (!q) return;
+    const n = String(q.name || '').trim();
+    if (!n) return;
+    if (company && company !== '全社'
+        && rosterKey(String(q.company || '')) !== rosterKey(company)) return;
+    (out[n] || (out[n] = [])).push(q);
+  });
+  return out;
+}
+
+// 1つの現場について、必要資格ごとの状態を返す。
+//   holders  … 有効な資格を持っている人
+//   soon     … 期限が近い人 / expired … 切れている人
+//   noRecord … 資格マスタに1行も無い人（この人がいる限り「不足」と断定しない）
+export function siteQualCheck(needQuals, names, byPerson, today) {
+  const out = [];
+  (needQuals || []).forEach(raw => {
+    const need = String(raw || '').trim();
+    if (!need) return;
+    const holders = [], soon = [], expired = [], unreadable = [], noRecord = [];
+    (names || []).forEach(n => {
+      const list = byPerson[n] || [];
+      if (!list.length) { noRecord.push(n); return; }
+      list.forEach(x => {
+        if (String(x.qual || '').trim() !== need) return;
+        const st = qualStatus(x.expires, today);
+        if (st === 'ok') holders.push(n);
+        else if (st === 'soon') soon.push(n);
+        else if (st === 'expired') expired.push(n);
+        else unreadable.push(n);           // 期限欄が日付として読めない
+      });
+    });
+    let status, why = '';
+    if (holders.length) status = 'ok';
+    else if (soon.length) status = 'soon';
+    else if (expired.length) status = 'expired';
+    else if (unreadable.length) { status = 'unknown'; why = '有効期限が読めません'; }
+    else if (noRecord.length) { status = 'unknown'; why = '資格情報が未登録の人がいます'; }
+    else status = 'missing';               // 全員ぶん登録があり、誰も持っていない
+    out.push({
+      qual: need, status, why,
+      holders: holders, soon: soon, expired: expired, noRecord: noRecord
+    });
+  });
+  return out;
+}
+
 export function qualValidYmd(s) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
   if (!m) return false;
@@ -150,6 +289,12 @@ export function toRecords(payload) {
       company: String(get(r, '会社') || '').trim(),
       kyoten: String(get(r, '拠点') || '').trim(),
       workType: String(get(r, '作業区分') || '').trim(),
+      // ★2026-08-31 Phase 2: 重複の強さを決めるのに時刻が要る。
+      //   時刻が入っていない予定は「両立するか判断できない」＝要確認へ落とす。
+      //   ここに書かないと、画面は時刻を持っているのにWorkerだけ持たず、
+      //   同じデータで判定が食い違う（alerts.test.js が突き合わせている）。
+      start: String(get(r, '出勤') || '').trim(),
+      end: String(get(r, '退勤') || '').trim(),
       butai: String(get(r, '部隊') || '').trim(),
       yakin: mode === '夜勤',
       yotei: mode === '予定',
@@ -290,7 +435,52 @@ export function buildAlerts(payload, { date, today, company } = {}) {
     (todayCount[k] || (todayCount[k] = { genba: r.genba, loc: r.loc, yakin: !!r.yakin, names: new Set() }))
       .names.add(r.name);
   });
+  // ★2026-08-31 Phase 2（社長指示 §3）: 必要人数が登録されている現場は
+  //   正式判定へ回し、参考判定（実績ベース）からは外す。二重に出さない。
+  const needIx = siteNeedIndex((payload && payload.jobsites) || []);
+  const hasNeed = k => {
+    const t = todayCount[k];
+    const nd = t && needIx[t.genba + SEP + t.loc];
+    return !!(nd && nd.needCount != null);
+  };
+
+  // 正式判定は現場ごと（昼夜を分けない。必要人数の欄が現場に1つしかないため）
+  const officialSite = {};
+  day.filter(isSiteWork).forEach(r => {
+    const k = r.genba + SEP + r.loc;
+    const nd = needIx[k];
+    if (!nd || nd.needCount == null) return;
+    (officialSite[k] || (officialSite[k] = {
+      genba: r.genba, loc: r.loc, need: nd.needCount, needQuals: nd.needQuals, names: new Set()
+    })).names.add(r.name);
+  });
+  const shortOfficial = Object.keys(officialSite).map(k => {
+    const s = officialSite[k];
+    const n = s.names.size;
+    if (n >= s.need) return null;
+    return { genba: s.genba, loc: s.loc, need: s.need, count: n, gap: s.need - n };
+  }).filter(Boolean)
+    .sort((a, b) => b.gap - a.gap || (a.loc < b.loc ? -1 : 1));
+
+  // 必要資格の照合（正式判定）。状態は ok/soon/expired/missing/unknown。
+  const qualIndex = qualsByPerson((payload && payload.qualifications) || [], company);
+  const qualShort = [];
+  Object.keys(officialSite).forEach(k => {
+    const s = officialSite[k];
+    if (!s.needQuals || !s.needQuals.length) return;
+    const names = Array.from(s.names);
+    siteQualCheck(s.needQuals, names, qualIndex, today || date).forEach(c => {
+      if (c.status === 'ok') return;
+      qualShort.push({ genba: s.genba, loc: s.loc, ...c });
+    });
+  });
+  // 困る順（誰も持っていない → 切れている → 期限間近 → 判定不可）
+  const QS_ORDER = { missing: 0, expired: 1, soon: 2, unknown: 3 };
+  qualShort.sort((a, b) => (QS_ORDER[a.status] - QS_ORDER[b.status])
+    || (a.loc < b.loc ? -1 : a.loc > b.loc ? 1 : 0));
+
   const shortStaff = Object.keys(todayCount).map(k => {
+    if (hasNeed(k)) return null;                // 正式判定に回した現場は参考から外す
     const u = usual[k];
     if (!u) return null;                        // 実績が浅い現場は判定しない
     const t = todayCount[k];
@@ -343,8 +533,12 @@ export function buildAlerts(payload, { date, today, company } = {}) {
   //   切れている物・読めない物は、管理画面の「空き確認」に出続けるのでそちらで見る。
   const outNames = new Set(working.map(r => r.name));
   const seenQ = {};
-  const quals = ((payload && payload.qualifications) || [])
-    .filter(q => outNames.has(String((q && q.name) || '').trim()))
+  // ★2026-08-31 会社境界の抜けを塞いだ（社長指示 §0「他社のデータを巻き込まない」）。
+  //   氏名だけで引いていたので、和信カインドの同姓の人の資格が
+  //   グローライズの通知に混ざり得た。会社で先に絞る。
+  const quals = Object.keys(qualIndex)
+    .filter(n => outNames.has(n))
+    .reduce((acc, n) => acc.concat(qualIndex[n]), [])
     .map(q => ({ name: q.name, qual: q.qual, expires: q.expires, status: qualStatus(q.expires, today || date) }))
     // ★Codexレビュー[P2]（2026-08-29）: 「60日以内」だけだと、その人が出る日は
     //   最大60日ぶん毎朝同じ警告が出る。コメントの「新しく起きた事だけ」と食い違う。
@@ -400,7 +594,9 @@ export function buildAlerts(payload, { date, today, company } = {}) {
     sites: siteList, siteCount: siteList.length,
     workingCount: new Set(working.map(r => r.name)).size,
     unconfirmed, unconfirmedWithPeople, stoppedWithPeople, stoppedAll, quals, moves,
-    shortStaff
+    shortStaff,
+    // ★2026-08-31 Phase 2: 正式判定（社長指示 §3 §4 §9）
+    shortOfficial, qualShort
   };
 }
 
@@ -408,7 +604,9 @@ export function buildAlerts(payload, { date, today, company } = {}) {
 export function hasProblem(a) {
   return !!(a && (a.conflicts.length || a.noLead.length || a.stoppedWithPeople.length
     || a.unconfirmedWithPeople.length || a.quals.length || a.moves.length
-    || (a.shortStaff && a.shortStaff.length)));
+    || (a.shortStaff && a.shortStaff.length)
+    || (a.shortOfficial && a.shortOfficial.length)
+    || (a.qualShort && a.qualShort.length)));
 }
 
 const WD = ['日', '月', '火', '水', '木', '金', '土'];
@@ -433,9 +631,43 @@ export function formatAlertsText(a) {
     });
     if (a.conflicts.length > 10) L.push('・ほか ' + (a.conflicts.length - 10) + '件');
   }
+  // ★2026-08-31 Phase 2（社長指示 §9）: 正式判定を、参考判定より前に・別の見出しで出す。
+  //   「必要人数」という決まった数字と比べた結果なので、言い切ってよい。
+  if (a.shortOfficial && a.shortOfficial.length) {
+    L.push('');
+    L.push('■ 必要人数に足りていません ' + a.shortOfficial.length + '件');
+    a.shortOfficial.slice(0, 10).forEach(s => L.push('・' + (s.genba ? s.genba + ' ' : '') + s.loc
+      + '  必要' + s.need + '人 → ' + s.count + '人（' + s.gap + '人不足）'));
+    if (a.shortOfficial.length > 10) L.push('・ほか ' + (a.shortOfficial.length - 10) + '件');
+  }
+  // ★2026-08-31 Phase 2（社長指示 §9）: 資格を「正式判定」と「判定できない」に分ける。
+  //   混ぜると、資格をまだ入力していないだけの人が資格不足に見える。
+  //   資格マスタに1行でも載っているのは62人中22人しかいない（実測）。
+  const qsOfficial = (a.qualShort || []).filter(q => q.status !== 'unknown');
+  const qsUnknown = (a.qualShort || []).filter(q => q.status === 'unknown');
+  const qualWho = q => q.status === 'expired' ? '（' + q.expired.join('・') + 'さん）'
+    : q.status === 'soon' ? '（' + q.soon.join('・') + 'さん）'
+    : q.noRecord.length ? '（' + q.noRecord.join('・') + 'さん）'
+    : '';
+  if (qsOfficial.length) {
+    L.push('');
+    L.push('■ 現場に必要な資格が足りていません ' + qsOfficial.length + '件');
+    qsOfficial.slice(0, 10).forEach(q => L.push('・' + (q.genba ? q.genba + ' ' : '') + q.loc
+      + '  ' + q.qual + ' … ' + QUAL_NEED_LABEL[q.status] + qualWho(q)));
+    if (qsOfficial.length > 10) L.push('・ほか ' + (qsOfficial.length - 10) + '件');
+  }
+  if (qsUnknown.length) {
+    L.push('');
+    // ★断定しない。足りないのではなく「調べられない」。
+    L.push('■ 資格を確かめられませんでした ' + qsUnknown.length + '件（判定できません）');
+    qsUnknown.slice(0, 10).forEach(q => L.push('・' + (q.genba ? q.genba + ' ' : '') + q.loc
+      + '  ' + q.qual + ' … ' + (q.why || '資格情報が未登録です') + qualWho(q)));
+    if (qsUnknown.length > 10) L.push('・ほか ' + (qsUnknown.length - 10) + '件');
+  }
   if (a.shortStaff && a.shortStaff.length) {
     L.push('');
-    L.push('■ いつもより人が少ない現場 ' + a.shortStaff.length + '件');
+    // ★参考判定。断定しない書き方にすること（社長指示 §3）。
+    L.push('■ いつもより人が少ない可能性があります ' + a.shortStaff.length + '件（参考）');
     a.shortStaff.slice(0, 10).forEach(s => L.push('・' + (s.genba ? s.genba + ' ' : '') + s.loc
       + (s.yakin ? '（夜勤）' : '') + ' … いつも' + s.usual + '人 → ' + s.count + '人'));
     // ★Codexレビュー[P2]: 11件以上のとき、見出しの件数と本文の行数が合わなくなる
