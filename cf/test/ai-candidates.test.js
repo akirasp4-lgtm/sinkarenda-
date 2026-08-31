@@ -154,7 +154,7 @@ describe('renderAvailDay の描く順番', () => {
     const src = read(f);
 
     it(f + ': availSyncPicked は chip(free,true) より前に呼ぶ', () => {
-      const sync = src.indexOf('availSyncPicked(free)');
+      const sync = src.indexOf('availSyncPicked(freeAll)');
       const chip = src.indexOf('chip(free, true)');
       expect(sync).toBeGreaterThan(-1);
       expect(chip).toBeGreaterThan(-1);
@@ -162,8 +162,18 @@ describe('renderAvailDay の描く順番', () => {
     });
 
     it(f + ': availSyncPicked の呼び出しは1か所だけ（二重に同期しない）', () => {
-      const n = src.split('availSyncPicked(free)').length - 1;
+      // ★定義（function availSyncPicked(...)）も数えないよう、呼び出しだけ数える
+      const n = src.split('availSyncPicked(freeAll)').length - 1;
       expect(n).toBe(1);
+    });
+
+    // ★2026-08-31 Phase 3: 現場の必要資格で候補を絞るようになった。
+    //   絞った後の free を渡すと、「資格が分からない」欄から選んだ人が
+    //   次の描画で黙って消える。**絞る前の freeAll を渡すこと。**
+    it(f + ': availSyncPicked には絞る前の一覧を渡す（選んだ人が黙って消えない）', () => {
+      expect(src).toContain('availSyncPicked(freeAll)');
+      expect(src, '絞った後を渡している').not.toContain('availSyncPicked(free)');
+      expect(src).toContain('const freeAll = roster.filter(name => !state[name]);');
     });
 
     it(f + ': goToCalendarDate は renderList を自分で呼ばない（switchTabが呼ぶ）', () => {

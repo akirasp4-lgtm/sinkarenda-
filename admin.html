@@ -498,6 +498,14 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <input type="date" id="avail-day" onchange="renderAvailDay()" style="margin-bottom:0">
   <!-- ★2026-08-28 フェーズ3: 資格で絞る。資格マスタ（NASの資格者証一覧から取り込み）を使う。
        期限切れの資格は「持っていない」扱いにする＝現場に出せない人を空きに出さない -->
+  <!-- ★2026-08-31 Phase 3（社長指示 §7）: 現場を選ぶと、その現場に登録された
+       必要人数・必要資格・必要経験で候補を絞る。条件はプログラムが判定し、
+       AIは順位と理由だけ。選ばなければ今までどおりの動き。 -->
+  <label style="margin-top:10px">現場から条件を読む（任意）</label>
+  <select id="avail-site" onchange="renderAvailDay()" style="margin-bottom:0">
+    <option value="">現場を選ばない</option>
+  </select>
+  <div id="avail-site-need"></div>
   <label style="margin-top:10px">資格で絞る</label>
   <select id="avail-qual" onchange="renderAvailDay()" style="margin-bottom:0">
     <option value="">資格で絞らない</option>
@@ -2875,6 +2883,113 @@ function rankCandidates(names, nippos, genba) {
   return list;
 }
 // ===== PHASE5-PICK-RULE:END =====
+
+// ===== PHASE7-ASSIGN-RULE:BEGIN =====
+// 現場の条件（必要人数・必要資格・必要経験）で候補者を絞る（2026-08-31 Phase 3）。
+//
+// 社長指示 §7:
+//   「AI人員配置提案は、プログラム側で条件判定を行い、
+//     AIには順位付けと理由説明だけをさせる。氏名の記号化は維持する」
+//
+// ★ここは「条件判定」の側。AIは呼ばない。0円で動く。
+//   AIに渡すのは、ここで絞った後の候補を c1,c2,… に置き換えた物だけ。
+//
+// ★資格は「持っている／足りない／判定できない」の3つに分ける。
+//   §4 の毎朝アラートと同じ考え方。**資格情報が無いだけの人を候補から消さない。**
+//   消すと、資格をまだ入力していない40人（62人中）が永久に候補に出てこない。
+//
+// ★DOMに一切触らない純関数だけを置くこと。
+//   cf/test/phase7-assign.test.js がこの区間だけを取り出して vm で動かす。
+//   ★index.html と admin.html でこのブロックは1文字も違ってはいけない。
+
+// 現場マスタから、その現場の条件を引く。無ければ null。
+// ★見つからないときに空の条件を返さないこと。「条件が無い」と
+//   「条件が未登録」は同じだが、「現場が無い」は違う。
+function siteNeedOf(jobsites, genba, loc) {
+  var g = String(genba == null ? '' : genba).trim();
+  var l = String(loc == null ? '' : loc).trim();
+  if (!g) return null;
+  var list = jobsites || [];
+  for (var i = 0; i < list.length; i++) {
+    var j = list[i];
+    if (!j) continue;
+    if (String(j.genba || '').trim() !== g) continue;
+    if (String(j.loc || '').trim() !== l) continue;
+    var n = Number(j.needCount);
+    return {
+      genba: g, loc: l,
+      needCount: (j.needCount == null || j.needCount === '' || !isFinite(n) || n <= 0)
+        ? null : Math.floor(n),
+      needQuals: (function (q) {
+        if (Array.isArray(q)) {
+          return q.map(function (x) { return String(x || '').trim(); })
+                  .filter(function (x) { return x !== ''; });
+        }
+        return String(q == null ? '' : q).split(/[、,，]/)
+          .map(function (x) { return x.trim(); })
+          .filter(function (x) { return x !== ''; });
+      })(j.needQuals),
+      needExp: String(j.needExp || '').trim(),
+      address: String(j.address || '').trim(),
+      startAt: String(j.startAt || '').trim(),
+      endAt: String(j.endAt || '').trim(),
+      status: String(j.status || '').trim()
+    };
+  }
+  return null;
+}
+
+// その人の資格が1件でも登録されているか。
+// ★これが false の人を「資格を持っていない」と扱わないこと（判定できない、が正しい）。
+function hasAnyQualRecord(idx, company, name) {
+  var list = (idx || {})[qualKey(company, name)] || [];
+  return list.length > 0;
+}
+
+// 必要資格で名簿を3つに分ける。members は [{name, company}]。
+//   ok      … 必要資格を全部、その日使える状態で持っている
+//   ng      … 資格は登録されているが足りない（missing に足りない資格名）
+//   unknown … 資格が1件も登録されていない＝判定できない
+// ★必要資格が空なら全員 ok（条件が無いのだから誰も落とさない）。
+function screenByQuals(members, idx, needQuals, todayYmd) {
+  var need = (needQuals || []).map(function (q) { return String(q || '').trim(); })
+    .filter(function (q) { return q !== ''; });
+  var out = { ok: [], ng: [], unknown: [] };
+  (members || []).forEach(function (m) {
+    var name = String((m && m.name) || '').trim();
+    if (!name) return;
+    var company = (m && m.company) || '';
+    if (!need.length) { out.ok.push({ name: name, company: company, missing: [] }); return; }
+    if (!hasAnyQualRecord(idx, company, name)) {
+      out.unknown.push({ name: name, company: company, missing: need.slice() });
+      return;
+    }
+    var missing = need.filter(function (q) {
+      return !qualHeldBy(idx, company, name, q, todayYmd);
+    });
+    if (missing.length) out.ng.push({ name: name, company: company, missing: missing });
+    else out.ok.push({ name: name, company: company, missing: [] });
+  });
+  return out;
+}
+
+// 必要人数に対して、いま何人選べているか。
+// ★必要人数が未登録なら null を返す。0人必要と混ぜないこと。
+function assignProgress(needCount, pickedCount) {
+  var n = Number(needCount);
+  var p = Math.max(0, Number(pickedCount) || 0);
+  if (needCount == null || needCount === '' || !isFinite(n) || n <= 0) {
+    return { need: null, picked: p, rest: null, filled: false, label: '必要人数は未登録' };
+  }
+  var need = Math.floor(n);
+  var rest = need - p;
+  return {
+    need: need, picked: p, rest: rest > 0 ? rest : 0, filled: rest <= 0,
+    label: rest > 0 ? ('必要' + need + '人 / 選択' + p + '人 → あと' + rest + '人')
+      : ('必要' + need + '人 / 選択' + p + '人 → 足りています')
+  };
+}
+// ===== PHASE7-ASSIGN-RULE:END =====
 
 // ===== PHASE3-QUAL-RULE:BEGIN =====
 // 資格の判定（2026-08-28 フェーズ3の土台）。
@@ -5515,10 +5630,88 @@ function changeAvailWeek(delta){availWeekStart=new Date(availWeekStart.getFullYe
 //   本社ビューで見ていても、関東の現場に入っている人は「空き」ではない。
 // ★名簿は getActiveShokunin()（職人マスタの 有効=× を外した一覧）。
 // ============================================================
+// ★2026-08-31 Phase 3: 現場のプルダウン。
+//   会社の境界は companyNippos() で守る（現場マスタには会社の列が無いため、
+//   「その会社が実際に入っている現場」だけを出す）。
+//   条件が登録されている現場を上に出す。押せば効く物が先に見える。
+function populateAvailSiteSelect() {
+  const sel = document.getElementById('avail-site');
+  if (!sel) return;
+  const keep = sel.value;
+  const seen = {};
+  const last = {};
+  companyNippos().forEach(n => {
+    if (!n || n.isGhost || !n.genba || !n.loc) return;
+    const k = n.genba + '\u0001' + n.loc;
+    seen[k] = { genba: n.genba, loc: n.loc };
+    const dt = String(n.date || '');
+    if (!last[k] || dt > last[k]) last[k] = dt;
+  });
+  const rows = Object.keys(seen).map(k => {
+    const s = seen[k];
+    const nd = siteNeedOf(allJobsites, s.genba, s.loc);
+    const st = nd ? nd.status : '';
+    return {
+      key: k, genba: s.genba, loc: s.loc, last: last[k] || '',
+      done: st === '完工' || st === '中止',
+      has: !!(nd && (nd.needCount != null || nd.needQuals.length || nd.needExp)),
+      needCount: nd ? nd.needCount : null
+    };
+  }).filter(r => !r.done || r.key === keep);
+  rows.sort((a, b) => {
+    if (a.has !== b.has) return a.has ? -1 : 1;      // 条件が入っている現場を上に
+    if (a.last !== b.last) return a.last < b.last ? 1 : -1;
+    return a.loc < b.loc ? -1 : 1;
+  });
+  sel.innerHTML = '<option value="">現場を選ばない</option>'
+    + rows.map(r => '<option value="' + escAttr(r.key) + '"'
+      + (r.key === keep ? ' selected' : '') + '>'
+      + (r.has ? '👷 ' : '') + esc(r.genba) + ' / ' + esc(r.loc)
+      + (r.needCount != null ? '（' + r.needCount + '人）' : '')
+      + '</option>').join('');
+}
+
+// 選ばれている現場の条件。選んでいなければ null。
+function currentAvailSiteNeed() {
+  const sel = document.getElementById('avail-site');
+  const v = sel ? String(sel.value || '') : '';
+  if (!v) return null;
+  const p = v.split('\u0001');
+  return siteNeedOf(allJobsites, p[0], p.length > 1 ? p[1] : '');
+}
+
+// 条件の表示。★未登録は「未登録」とはっきり出す（勝手に埋めない・§0）。
+function renderAvailSiteNeed(need) {
+  const box = document.getElementById('avail-site-need');
+  if (!box) return;
+  if (!need) { box.innerHTML = ''; return; }
+  const noneMark = '<span style="color:#999">未登録</span>';
+  const line = (label, val) => '<div style="display:flex;gap:6px;font-size:12px;margin-top:2px">'
+    + '<span style="color:#666;width:64px;flex:none">' + label + '</span>'
+    + '<span>' + (val === '' || val == null ? noneMark : val) + '</span></div>';
+  box.innerHTML = '<div style="border:1px solid #BFDBFE;background:#F8FBFF;border-radius:8px;'
+    + 'padding:8px 10px;margin-top:6px">'
+    + '<div style="font-size:12px;font-weight:700;color:#1E3A8A">この現場の条件'
+    + '<span style="font-weight:400;color:#666">（現場管理で直せます）</span></div>'
+    + line('必要人数', need.needCount == null ? '' : need.needCount + ' 人')
+    + line('必要資格', need.needQuals.length ? need.needQuals.map(esc).join('、') : '')
+    + line('必要経験', esc(need.needExp))
+    + line('時間', need.startAt || need.endAt
+      ? esc(need.startAt || '？') + ' 〜 ' + esc(need.endAt || '？') : '')
+    + line('現場住所', esc(need.address))
+    + (need.needExp
+      ? '<div style="font-size:11px;color:#92400E;background:#FEF3C7;border-radius:5px;'
+        + 'padding:4px 6px;margin-top:6px">'
+        + '必要経験は文章なので自動では絞れません。目で確かめてください。</div>'
+      : '')
+    + '</div>';
+}
+
 function renderAvailDay() {
   const d = searchFilterValue('avail-day');
   const box = document.getElementById('avail-day-result');
   if (!box) return;
+  populateAvailSiteSelect();
   updateQualSelect();
   updateGenbaRankSelect();
   if (!d) { box.innerHTML = ''; return; }
@@ -5535,7 +5728,21 @@ function renderAvailDay() {
   const roster = wantQual
     ? rosterMembers.filter(m => qualHeldBy(qidx, m.company, m.name, wantQual, d)).map(m => m.name)
     : rosterAll;
-  const free = roster.filter(name => !state[name]);
+  // ★絞る前の「その日空いている人」。選択の保持はこちらで判定する（下の availSyncPicked）。
+  const freeAll = roster.filter(name => !state[name]);
+  let free = freeAll;
+  // ★2026-08-31 Phase 3: 現場を選んでいたら、その現場の必要資格で候補を分ける。
+  //   満たす／足りない／判定できない の3つ。**誰も画面から消さない。**
+  //   資格が1件も登録されていない人を「資格なし」で消すと、
+  //   まだ入力していない40人（62人中）が永久に候補へ出てこない（§0 §4）。
+  const siteNeed = currentAvailSiteNeed();
+  renderAvailSiteNeed(siteNeed);
+  let needSplit = null;
+  if (siteNeed && siteNeed.needQuals.length) {
+    const freeMembers = rosterMembers.filter(m => free.indexOf(m.name) >= 0);
+    needSplit = screenByQuals(freeMembers, qidx, siteNeed.needQuals, d || todayYmd());
+    free = needSplit.ok.map(x => x.name);
+  }
   const yasumi = roster.filter(name => state[name] === 'yasumi');
   const souko = roster.filter(name => state[name] === 'souko');
   const busy = roster.filter(name => state[name] === 'busy');
@@ -5578,16 +5785,52 @@ function renderAvailDay() {
   //   読んでチェック印を描くので、**描く前に**同期しておく必要がある。
   //   後ろで同期していたため、日付や会社を変えた直後に
   //   「チップには✓が付いているのにバーは0人」という食い違いが出ていた。
-  availSyncPicked(free);
+  // ★2026-08-31 Phase 3: 絞る前の一覧を渡すこと。
+  //   絞った後を渡すと、「資格が分からない」欄から選んだ人が次の描画で黙って消える。
+  //   選べるかどうかは「その日空いているか」で決まる。資格の分けは見せ方の問題。
+  availSyncPicked(freeAll);
   let html = '<div style="margin-top:12px">';
   if (wantQual) {
     html += '<div style="font-size:13px;color:#0C447C;background:#EAF2FB;border-radius:6px;padding:6px 10px;margin-bottom:8px">'
       + '「' + esc(wantQual) + '」を持っている ' + roster.length + ' 人 の中で見ています'
       + '<span style="color:#666">（有効期限が切れている人は外しています）</span></div>';
   }
-  html += '<div style="font-size:14px;font-weight:600;color:#1D9E75;margin-bottom:6px">空いている ' + free.length + ' 人</div>'
-    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">' + chip(free, true) + '</div>'
-    + '<div style="font-size:13px;color:#666;margin-bottom:4px">休み ' + yasumi.length + ' 人　倉庫 ' + souko.length + ' 人　出勤 ' + busy.length + ' 人</div>';
+  // ★2026-08-31 Phase 3: 必要人数に対して何人選べているか
+  if (siteNeed) {
+    const pg = assignProgress(siteNeed.needCount, availPicked.length);
+    html += '<div style="font-size:13px;font-weight:600;border-radius:6px;padding:6px 10px;'
+      + 'margin-bottom:8px;'
+      + (pg.need == null ? 'background:#EEE;color:#666'
+        : pg.filled ? 'background:#E7F6EF;color:#1D7A57' : 'background:#FEF3C7;color:#92400E')
+      + '">' + esc(pg.label) + '</div>';
+  }
+  if (needSplit) {
+    html += '<div style="font-size:13px;color:#0C447C;background:#EAF2FB;border-radius:6px;'
+      + 'padding:6px 10px;margin-bottom:8px">'
+      + 'この現場に必要な「' + siteNeed.needQuals.map(esc).join('、') + '」で分けています</div>';
+  }
+  html += '<div style="font-size:14px;font-weight:600;color:#1D9E75;margin-bottom:6px">空いている ' + free.length + ' 人'
+    + (needSplit ? '<span style="font-weight:400;font-size:12px;color:#666">（必要な資格を持っている人）</span>' : '')
+    + '</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">' + chip(free, true) + '</div>';
+  // ★判定できない人・足りない人も消さずに出す（§0 勝手に補完しない）
+  if (needSplit && needSplit.unknown.length) {
+    html += '<div style="font-size:13px;font-weight:600;color:#92400E;margin-bottom:6px">'
+      + '資格が分からない ' + needSplit.unknown.length + ' 人'
+      + '<span style="font-weight:400;font-size:12px;color:#666">'
+      + '（資格マスタに登録がありません。持っていないとは限りません）</span></div>'
+      + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">'
+      + chip(needSplit.unknown.map(x => x.name), true) + '</div>';
+  }
+  if (needSplit && needSplit.ng.length) {
+    html += '<div style="font-size:13px;color:#666;margin-bottom:12px">'
+      + '資格が足りない ' + needSplit.ng.length + ' 人：'
+      + needSplit.ng.slice(0, 12).map(x => esc(x.name)
+        + '<span style="color:#999;font-size:11px">（' + x.missing.map(esc).join('・') + 'なし）</span>').join('、')
+      + (needSplit.ng.length > 12 ? ' ほか' + (needSplit.ng.length - 12) + '人' : '')
+      + '</div>';
+  }
+  html += '<div style="font-size:13px;color:#666;margin-bottom:4px">休み ' + yasumi.length + ' 人　倉庫 ' + souko.length + ' 人　出勤 ' + busy.length + ' 人</div>';
   const released = releasedByStatus(d);
   if (released.length) {
     html += '<div style="font-size:14px;font-weight:600;color:#A32D2D;margin:12px 0 6px">'
@@ -6346,7 +6589,7 @@ async function runSummary(){
   btn.textContent='集計を更新';btn.disabled=false;
 }
 async function archiveOldData(){
-  if(!confirm('3ヶ月以上前のデータをアーカイブします。よろしいですか？'))return;
+  if(!confirm('3ヶ月以上前のデータをアーカイブします。\n\n★これは全社ぶんです。今見ている会社だけでなく、\n和信カインド・ラーテルなど他の会社の古い予定も一緒に移動します。\n（消えるのではなくアーカイブシートへ移ります）\n\nよろしいですか？'))return;
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'archive',months:3,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){alert(`${json.archived}件をアーカイブしました`);await refreshInBackground();}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
 }
