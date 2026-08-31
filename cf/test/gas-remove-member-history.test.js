@@ -176,3 +176,99 @@ describe('職人を消したら変更履歴が残る', () => {
     expect(flat).toContain('山田太郎');
   });
 });
+
+// ================================================================
+// ログイン調査（2026-08-31）で見つかった記録の抜け 2件。
+//
+// 予定の削除・職人の削除・現場の削除は全部
+// 「履歴が書けなければ処理を中止する」まで徹底しているのに、
+// 元請マスタの削除だけが1行も記録していなかった。
+// 請求単価は金額に直結するのに操作ログが無かった。
+// ================================================================
+
+describe('元請を消したら記録が残る（remove_genba）', () => {
+  let G2, sheets2;
+
+  beforeEach(() => {
+    const genba = makeSheet([['元請名', '会社', '読み'],
+      ['きんでん東', 'グローライズ', 'きんでんひがし'],
+      ['エクシオ', '和信カインド', 'えくしお']]);
+    const history = makeSheet([['日時', '操作', '旧ID', '新ID', '項目', '変更前', '変更後', '実行者']]);
+    const oplog = makeSheet([['日時', '操作', '対象', '内容', '実行者']]);
+    sheets2 = { genba, history, oplog };
+
+    const box = vm.createContext({
+      console, String, Number, Object, Array, Math, isFinite, JSON, Date, RegExp,
+      SpreadsheetApp: { flush: () => {}, getActiveSpreadsheet: () => ss },
+      PropertiesService: { getScriptProperties: () => ({ getProperty: () => null, setProperty: () => {} }) },
+      LockService: {
+        getScriptLock: () => fakeLock(), getUserLock: () => fakeLock(), getDocumentLock: () => fakeLock()
+      },
+      ContentService: {
+        MimeType: { JSON: 'json' },
+        createTextOutput: (t) => ({ setMimeType: () => ({ _t: t }), _t: t })
+      },
+      Utilities: { formatDate: () => '2026-08-31 14:00' }
+    });
+    box.globalThis = box;
+    const others = {};
+    const ss = {
+      getSheetByName: (n) => {
+        if (n === '元請マスタ') return genba;
+        if (n === '変更履歴') return history;
+        if (n === '操作ログ') return oplog;
+        if (!others[n]) others[n] = makeSheet([[]]);
+        return others[n];
+      },
+      insertSheet: (n) => { others[n] = makeSheet([[]]); return others[n]; }
+    };
+    vm.runInContext(CODE + ';globalThis.__g = { doPost };', box, { filename: 'gas.js' });
+    G2 = box.__g;
+  });
+
+  const post2 = (b) => JSON.parse(G2.doPost({ postData: { contents: JSON.stringify(b) } })._t);
+  const genbaNames = () => sheets2.genba._data.slice(1).map((r) => r[0]);
+  const hist2 = () => sheets2.history._data.slice(1);
+  const del2 = () => post2({
+    action: 'remove_genba', name: 'きんでん東', company: 'グローライズ', updatedBy: '事務員A'
+  });
+
+  it('消せる（今までどおり動く）', () => {
+    expect(del2().removed).toBe('きんでん東');
+    expect(genbaNames()).toEqual(['エクシオ']);
+  });
+
+  it('★変更履歴に残る（今まで0行だった）', () => {
+    del2();
+    const flat = hist2().map((r) => r.join('|')).join('\n');
+    expect(hist2().length).toBeGreaterThan(0);
+    expect(flat).toContain('remove_genba');
+    expect(flat).toContain('きんでん東');
+    expect(flat).toContain('グローライズ');
+    expect(flat).toContain('事務員A');
+  });
+
+  it('★履歴が書けなければ、1件も消さずにエラーを返す', () => {
+    sheets2.history._failWrite = true;
+    const r = del2();
+    expect(r.status).toBe('error');
+    expect(String(r.message)).toContain('変更履歴');
+    expect(genbaNames(), '★履歴が書けていないのに消えた').toEqual(['きんでん東', 'エクシオ']);
+  });
+
+  it('★他社の同名を巻き込まない', () => {
+    const r = post2({
+      action: 'remove_genba', name: 'エクシオ', company: 'グローライズ', updatedBy: '事務員A'
+    });
+    expect(r.removed).toBe(null);
+    expect(genbaNames()).toEqual(['きんでん東', 'エクシオ']);
+    expect(hist2().length, '消していないのに履歴を書いた').toBe(0);
+  });
+
+  it('操作ログにも残る', () => {
+    del2();
+    const flat = sheets2.oplog._data.slice(1).map((r) => r.join('|')).join('\n');
+    expect(flat).toContain('remove_genba');
+    expect(flat).toContain('きんでん東');
+  });
+});

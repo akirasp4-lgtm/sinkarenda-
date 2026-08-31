@@ -1189,14 +1189,21 @@ function doPost(e) {
       if (!genba) return error('元請名は必須です');
       const now = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
       const data = sheet.getDataRange().getValues();
+      // ★2026-08-31 請求単価は金額に直結するのに、操作ログを1行も残していなかった。
+      //   単価（日当）や売上の書き換えは記録しているので、ここもそろえる。
+      const target = genba + (loc ? '/' + loc : '');
       for (let i = 1; i < data.length; i++) {
         if (String(data[i][0]).trim() === genba && String(data[i][1]).trim() === loc) {
+          const before = data[i][2];
           sheet.getRange(i + 1, 3).setValue(rate);
           sheet.getRange(i + 1, 4).setValue(now);
+          logOperation_(ss, 'save_billing_rate', target,
+                        '請求単価 ' + before + ' → ' + rate, updatedBy);
           return ok({updated: true});
         }
       }
       sheet.appendRow([genba, loc, rate, now]);
+      logOperation_(ss, 'save_billing_rate', target, '請求単価を新規登録 ' + rate, updatedBy);
       return ok({added: true});
     }
 
@@ -1691,7 +1698,24 @@ function doPost(e) {
       const data = genbaSheet.getDataRange().getValues();
       for (let i = data.length - 1; i >= 1; i--) {
         if (String(data[i][0]).trim() === name && String(data[i][1] || '').trim() === company) {
+          // ★2026-08-31 ここだけ記録を1行も残していなかった。
+          //   予定の削除・職人の削除・現場の削除は全部
+          //   「履歴が書けなければ処理を中止する」まで徹底しているのに、
+          //   元請マスタの削除だけが抜けていた。同じ形にそろえる。
+          const target = name + '/' + company;
+          const yomi = String(data[i][2] || '').trim();
+          const entries = [
+            { oldId: target, field: '元請名', before: name, after: '（削除）' },
+            { oldId: target, field: '会社', before: company, after: '（削除）' }
+          ];
+          if (yomi) entries.push({ oldId: target, field: '読み', before: yomi, after: '（削除）' });
+          try {
+            logHistory_(ss, 'remove_genba', entries, updatedBy);
+          } catch (e) {
+            return error('変更履歴に残せなかったため、削除を中止しました: ' + e);
+          }
           genbaSheet.deleteRow(i + 1);
+          logOperation_(ss, 'remove_genba', target, '元請マスタから削除', updatedBy);
           return ok({removed: name});
         }
       }
