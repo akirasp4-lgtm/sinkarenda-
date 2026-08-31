@@ -3784,6 +3784,92 @@ async function loadHistory(){
   }
 }
 
+// ========== 案件ごとの必要人員条件（2026-08-31 Phase 1） ==========
+// 社長指示 §2「案件・現場ごとに必要人数/必要資格/必要経験/現場住所/開始・終了時間を持つ」
+// ★入力は任意。未入力は「未登録」。勝手な推測値で埋めない。
+
+// 必要資格の選択肢。資格マスタに実在する資格名だけを出す。
+// ★打ち込みにしない。105種類あり「高所作業車」と「高所作業認定」のように
+//   割れると永久に一致しない（元請名で起きた表記ゆれと同じ事故）。
+function qualOptionsHtml(){
+  const cnt={};
+  (allQuals||[]).forEach(q=>{
+    const n=String(q.qual||'').trim();
+    if(n)cnt[n]=(cnt[n]||0)+1;
+  });
+  return Object.keys(cnt)
+    .sort((a,b)=>cnt[b]-cnt[a]||a.localeCompare(b))
+    .map(n=>`<option value="${escAttr(n)}">${esc(n)}（${cnt[n]}人）</option>`)
+    .join('');
+}
+
+// いま選ばれている資格を読む／書く。名前はHTMLに直接埋めず data-* に持たせる
+// （引用符入りの名前で属性が壊れる事故を何度も起こしているため）。
+const NEEDQ_SEP='\u0001';
+function getNeedQuals(idx){
+  const box=document.getElementById('need-qual-tags-'+idx);
+  if(!box)return [];
+  return (box.dataset.quals||'').split(NEEDQ_SEP).filter(x=>x!=='');
+}
+function setNeedQuals(idx,list){
+  const box=document.getElementById('need-qual-tags-'+idx);
+  if(!box)return;
+  box.dataset.quals=list.join(NEEDQ_SEP);
+  box.innerHTML=list.length
+    ? list.map((q,i)=>`<span style="display:inline-flex;align-items:center;gap:4px;background:#E0E7FF;color:#1E3A8A;border-radius:999px;padding:2px 8px;font-size:12px">${esc(q)}<button onclick="removeNeedQual(${idx},${i})" style="border:0;background:none;color:#1E3A8A;cursor:pointer;font-size:13px;line-height:1;padding:0">×</button></span>`).join('')
+    : '<span style="font-size:11px;color:#999">未登録</span>';
+}
+function addNeedQual(idx,sel){
+  const v=sel.value;
+  sel.value='';
+  if(!v)return;
+  const list=getNeedQuals(idx);
+  if(list.indexOf(v)>=0)return;      // 同じ資格を二重に入れない
+  list.push(v);
+  setNeedQuals(idx,list);
+}
+function removeNeedQual(idx,i){
+  const list=getNeedQuals(idx);
+  list.splice(i,1);
+  setNeedQuals(idx,list);
+}
+
+async function saveSiteNeeds(idx,genba,loc){
+  const msg=document.getElementById('need-msg-'+idx);
+  const val=id=>{const e=document.getElementById(id+'-'+idx);return e?e.value:'';};
+  const body={
+    action:'set_site_needs', genba, loc,
+    needCount: val('need-count'),           // 空文字なら「未登録」に戻る
+    needQuals: getNeedQuals(idx),
+    needExp:   val('need-exp'),
+    address:   val('need-addr'),
+    startAt:   val('need-start'),
+    endAt:     val('need-end'),
+    updatedBy: getUsername()
+  };
+  if(msg){msg.style.color='#666';msg.textContent='保存中…';}
+  try{
+    const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify(body),headers:{'Content-Type':'text/plain'}});
+    const json=await res.json();
+    if(json.status==='ok'){
+      if(msg){msg.style.color='#1D9E75';msg.textContent=json.changed?`✓ 保存しました（${json.changed}項目）`:'変更はありませんでした';}
+      // 手元の現場マスタも更新して、開き直さなくても値が残るようにする
+      const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
+      if(j){
+        const n=Number(body.needCount);
+        j.needCount=(body.needCount===''||!isFinite(n)||n<=0)?null:Math.floor(n);
+        j.needQuals=body.needQuals.slice();
+        j.needExp=body.needExp; j.address=body.address;
+        j.startAt=body.startAt; j.endAt=body.endAt;
+      }
+    }else{
+      if(msg){msg.style.color='#dc2626';msg.textContent='エラー: '+(json.message||'不明');}
+    }
+  }catch(e){
+    if(msg){msg.style.color='#dc2626';msg.textContent='エラー: '+e.message;}
+  }
+}
+
 async function setSiteStatus(genba,loc,el){
   const status=el.value;
   const prev=siteStatusOf_(genba,loc);
@@ -6404,6 +6490,15 @@ async function openJobNoFix(){
     const html=rows.map((r,idx)=>{
       const genba=String(r[0]||''),loc=String(r[1]||''),jobNo=String(r[2]||''),div=String(r[3]||''),revenue=Number(r[6]||0);
       const completed=String(r[8]||'').trim()!==''; // I列: 完了
+    // ★2026-08-31 Phase 1: 13〜18列目の必要人員条件。生の行から直接読む。
+    //   空欄は「未登録」。needCount は 0 にせず null にする（0人必要とは別物）。
+    const _nc=Number(String(r[12]||'').trim());
+    const needCount=(String(r[12]||'').trim()===''||!isFinite(_nc)||_nc<=0)?null:Math.floor(_nc);
+    const needQuals=String(r[13]||'').split(/[、,，]/).map(x=>x.trim()).filter(x=>x!=='');
+    const needExp=String(r[14]||'').trim();
+    const address=String(r[15]||'').trim();
+    const startAt=String(r[16]||'').trim();
+    const endAt=String(r[17]||'').trim();
       const ldK=leaderMap[genba+'|||'+loc];
       const ldName=ldK?ldK.name:'';
       const ldMember=ldName?allMembers.find(m=>m.name===ldName&&m.company==='グローライズ'):null;
@@ -6437,12 +6532,53 @@ async function openJobNoFix(){
           </select>
         </div>
         <div style="font-size:11px;color:#999;margin:-2px 0 6px">完工・中止にすると現場名プルダウンから外れます（工番・既存日報は不変）</div>
+        <!-- ★2026-08-31 Phase 1: 案件ごとの必要人員条件。
+             入力は任意。未入力は「未登録」と出す（勝手な推測値で埋めない）。 -->
+        <div style="border:1px solid #BFDBFE;background:#F8FBFF;border-radius:8px;padding:10px;margin:8px 0">
+          <div style="font-size:12px;font-weight:700;color:#1E3A8A;margin-bottom:6px">👷 人員条件 <span style="font-weight:400;color:#666">（入力は任意。空欄は「未登録」）</span></div>
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+            <label style="font-size:11px;color:#666;white-space:nowrap;margin:0;width:64px">必要人数:</label>
+            <input type="number" min="1" max="99" id="need-count-${idx}" value="${needCount == null ? '' : needCount}" placeholder="未登録" style="width:90px;margin:0;padding:5px 8px;font-size:13px">
+            <span style="font-size:11px;color:#666">人</span>
+          </div>
+          <div style="margin-bottom:6px">
+            <div style="display:flex;gap:6px;align-items:center">
+              <label style="font-size:11px;color:#666;white-space:nowrap;margin:0;width:64px">必要資格:</label>
+              <select id="need-qual-pick-${idx}" onchange="addNeedQual(${idx},this)" style="flex:1;margin:0;padding:5px 8px;font-size:13px">
+                <option value="">＋ 資格を選ぶ</option>
+                ${qualOptionsHtml()}
+              </select>
+            </div>
+            <div id="need-qual-tags-${idx}" data-quals="${escAttr((needQuals||[]).join('\u0001'))}" style="display:flex;flex-wrap:wrap;gap:4px;margin:6px 0 0 70px"></div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+            <label style="font-size:11px;color:#666;white-space:nowrap;margin:0;width:64px">必要経験:</label>
+            <input type="text" id="need-exp-${idx}" value="${escAttr(needExp||'')}" placeholder="未登録（例: 楽天案件経験）" style="flex:1;margin:0;padding:5px 8px;font-size:13px">
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+            <label style="font-size:11px;color:#666;white-space:nowrap;margin:0;width:64px">現場住所:</label>
+            <input type="text" id="need-addr-${idx}" value="${escAttr(address||'')}" placeholder="未登録" style="flex:1;margin:0;padding:5px 8px;font-size:13px">
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+            <label style="font-size:11px;color:#666;white-space:nowrap;margin:0;width:64px">時間:</label>
+            <input type="time" id="need-start-${idx}" value="${escAttr(startAt||'')}" style="width:110px;margin:0;padding:4px 6px;font-size:13px">
+            <span style="font-size:12px;color:#666">〜</span>
+            <input type="time" id="need-end-${idx}" value="${escAttr(endAt||'')}" style="width:110px;margin:0;padding:4px 6px;font-size:13px">
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn btn-sm" style="background:#1E3A8A;color:#fff" onclick="saveSiteNeeds(${idx},this.dataset.genba,this.dataset.loc)" data-genba="${esc(genba)}" data-loc="${esc(loc)}">人員条件を保存</button>
+            <span id="need-msg-${idx}" style="font-size:11px;color:#666"></span>
+          </div>
+        </div>
         <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end">
           <button class="btn btn-sm" style="background:#fff;color:#dc2626;border:1px solid #FCA5A5;font-size:11px;padding:4px 10px" onclick="deleteSiteFromJnfix(this.dataset.genba,this.dataset.loc)" data-genba="${esc(genba)}" data-loc="${esc(loc)}">🗑️ この現場を削除</button>
         </div>
       </div>`;
     }).join('');
     list.innerHTML=html;
+    // ★2026-08-31 Phase 1: 既に登録されている必要資格をタグとして描く。
+    //   HTMLに名前を直接埋めず data-quals から読み直す（引用符事故よけ）。
+    rows.forEach((r,idx)=>{ setNeedQuals(idx, getNeedQuals(idx)); });
     const counter=document.getElementById('jnfix-count');
     if(counter)counter.textContent=`全 ${rows.length} 件`;
   }catch(e){list.innerHTML='<div style="color:#c00">読み込みエラー：'+esc(e.message)+'</div>';}

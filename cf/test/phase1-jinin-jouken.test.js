@@ -198,3 +198,69 @@ describe('既存の仕組みを壊していない', () => {
     expect(CODE.slice(i, j)).not.toMatch(/\brate\s*:/);
   });
 });
+
+// ---------------------------------------------------------------- 入力画面
+describe('入力画面（管理画面の現場ごとの詳細）', () => {
+  const adm = readFileSync(join(here, '..', '..', 'admin.html'), 'utf8');
+
+  it('★必要資格は打ち込みではなく一覧から選ぶ', () => {
+    // 資格名は105種類あり、打ち込むと「高所作業車」と「高所作業認定」のように
+    // 割れて永久に一致しない（元請名で起きた表記ゆれと同じ事故）。
+    expect(adm).toContain('function qualOptionsHtml()');
+    // ★id の存在だけを見ると、<input>（打ち込み欄）に差し替えられても気づけない。
+    //   実際に守りを外して試したとき、これで素通りした。必ず <select> であることを見る。
+    expect(adm, '資格の欄が打ち込み欄になっている').toContain('<select id="need-qual-pick-');
+    // 選択肢は資格マスタの実在する資格名から作る
+    const i = adm.indexOf('function qualOptionsHtml()');
+    const body = adm.slice(i, adm.indexOf(String.fromCharCode(10) + '}', i));
+    expect(body).toContain('allQuals');
+    expect(body).toContain('q.qual');
+  });
+
+  it('★資格名をHTMLに直接埋めず data-* から読む（引用符事故よけ）', () => {
+    expect(adm).toContain('data-quals=');
+    expect(adm).toContain('box.dataset.quals');
+    // onclick に資格名そのものを埋めていないこと
+    expect(adm).not.toMatch(/onclick="removeNeedQual\('/);
+  });
+
+  it('★属性へ入れる値は escAttr を通す（esc は引用符を逃がさない）', () => {
+    // ★「人員条件」はJS側のコメントにも出てくる。入力欄そのものを起点にする。
+    const i = adm.indexOf('id="need-count-');
+    expect(i, '入力欄が見つからない').toBeGreaterThan(-1);
+    const body = adm.slice(i, i + 3000);
+    // ★正規表現にしない。'escAttr(' の丸括弧がグループ開始と解釈されて壊れる。
+    //   素直な文字列一致で足りる。
+    ['needExp', 'address', 'startAt', 'endAt'].forEach((k) => {
+      expect(body, k + ' が escAttr を通っていない').toContain('escAttr(' + k);
+    });
+  });
+
+  it('6項目すべての入力欄がある', () => {
+    ['need-count-', 'need-qual-pick-', 'need-exp-', 'need-addr-', 'need-start-', 'need-end-']
+      .forEach((id) => expect(adm, id + ' が無い').toContain('id="' + id));
+  });
+
+  it('★未入力は「未登録」と出す（勝手な推測値で埋めない）', () => {
+    expect(adm).toContain('placeholder="未登録"');
+    expect(adm).toContain("'<span style=\"font-size:11px;color:#999\">未登録</span>'");
+  });
+
+  it('★保存は set_site_needs を呼ぶ', () => {
+    const i = adm.indexOf('async function saveSiteNeeds');
+    const body = adm.slice(i, adm.indexOf(String.fromCharCode(10) + '}', i));
+    expect(body).toContain("action:'set_site_needs'");
+    expect(body).toContain('updatedBy: getUsername()');
+  });
+
+  it('同じ資格を二重に入れない', () => {
+    const i = adm.indexOf('function addNeedQual');
+    expect(adm.slice(i, adm.indexOf(String.fromCharCode(10) + '}', i))).toContain('indexOf(v)>=0');
+  });
+
+  it('★入力を必須にしていない（既存運用を止めない）', () => {
+    const i = adm.indexOf('人員条件');
+    const body = adm.slice(i, i + 3000);
+    expect(body).not.toContain('required');
+  });
+});

@@ -575,6 +575,7 @@ function isAdminDailyMutation_(action) {
       || action === 'cleanup_orphan_jobnos'
       || action === 'merge_genba'
       || action === 'merge_genba_company'
+      || action === 'set_site_needs'
       || action === 'merge_loc'
       || action === 'reassign_jobno';
 }
@@ -1292,6 +1293,75 @@ function doPost(e) {
       const hData = hSheet.getDataRange().getValues();
       const hBody = hData.length > 1 ? hData.slice(1) : [];
       return ok({ rows: sortHistoryRows_(hBody, Number(body.limit) || HISTORY_MAX_ROWS) });
+    }
+
+    // ★2026-08-31 Phase 1: 案件ごとの「必要人員条件」を保存する。
+    //   社長指示 §2「案件・現場ごとに 必要人数/必要資格/必要経験/現場住所/
+    //   開始時間/終了時間 を持てるようにする」
+    //
+    //   ★空欄を送れば「未登録」に戻せる。消せないと入力ミスが直せない。
+    //   ★推測で埋めない。送られてこなかった項目は触らない（undefined は素通り）。
+    if (action === 'set_site_needs') {
+      const jobSiteSheet = getOrCreateJobSiteSheet_(ss);
+      const genba = String(body.genba || '').trim();
+      const loc = String(body.loc || '').trim();
+      if (!genba) return error('元請名は必須です');
+
+      // 受け取った値を整える。画面と窓口で同じ関数を使う＝ズレない。
+      const want = {};
+      if (body.needCount !== undefined) want[13] = normalizeNeedCount_(body.needCount);
+      if (body.needQuals !== undefined) {
+        const arr = Array.isArray(body.needQuals)
+          ? body.needQuals.map(x => String(x || '').trim()).filter(x => x !== '')
+          : normalizeNeedQuals_(body.needQuals);
+        want[14] = arr.join(SITE_NEED_SEP);
+      }
+      if (body.needExp !== undefined) want[15] = String(body.needExp || '').trim();
+      if (body.address !== undefined) want[16] = String(body.address || '').trim();
+      if (body.startAt !== undefined) want[17] = normalizeNeedTime_(body.startAt);
+      if (body.endAt !== undefined) want[18] = normalizeNeedTime_(body.endAt);
+      if (Object.keys(want).length === 0) return error('保存する項目がありません');
+
+      const LABEL = {13: '必要人数', 14: '必要資格', 15: '必要経験',
+                     16: '現場住所', 17: '開始時間', 18: '終了時間'};
+
+      const data = jobSiteSheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][0]).trim() !== genba || String(data[i][1]).trim() !== loc) continue;
+
+        // ★変更履歴を先に作る（削除・編集と同じ順序。書けなければ原本を触らない）
+        const diffs = [];
+        Object.keys(want).forEach(col => {
+          const c = Number(col);
+          const before = String(data[i][c - 1] == null ? '' : data[i][c - 1]).trim();
+          const after = want[c] === null ? '' : String(want[c]);
+          if (before !== after) {
+            diffs.push({
+              oldId: '', newId: '',
+              field: LABEL[c] + ': ' + genba + '/' + loc,
+              before: before === '' ? '(未登録)' : before,
+              after: after === '' ? '(未登録)' : after
+            });
+          }
+        });
+        if (diffs.length === 0) return ok({updated: genba + '/' + loc, changed: 0});
+
+        // ★履歴が書けなければ1セルも触らずに止める（社長指示「変更履歴を維持」）
+        try {
+          logHistory_(ss, 'site_needs', diffs, updatedBy);
+        } catch (e) {
+          return error('変更履歴を記録できなかったため、保存を中止しました（現場マスタはそのままです）: ' + e);
+        }
+
+        Object.keys(want).forEach(col => {
+          const c = Number(col);
+          jobSiteSheet.getRange(i + 1, c).setValue(want[c] === null ? '' : want[c]);
+        });
+        logOperation_(ss, 'set_site_needs', genba + '/' + loc,
+          diffs.map(d => d.field.split(':')[0] + ' ' + d.before + '→' + d.after).join(' / '), updatedBy);
+        return ok({updated: genba + '/' + loc, changed: diffs.length});
+      }
+      return error('現場マスタに該当現場が見つかりません');
     }
 
     if (action === 'set_site_status') {
