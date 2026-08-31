@@ -1399,7 +1399,34 @@ function doPost(e) {
       const data = memberSheet.getDataRange().getValues();
       for (let i = data.length - 1; i >= 1; i--) {
         if (String(data[i][0]).trim() === name && String(data[i][1]).trim() === company) {
+          // ★2026-08-31 変更履歴が1行も残っていなかった穴を塞いだ（社長指示 §0・必須仕様⑦）。
+          //   事業部・部隊・有効・単価の変更は全部記録しているのに、
+          //   一番取り返しがつかない「消す」だけが無記録だった。
+          //   誰がいつ誰を消したのか、後から誰にも分からない状態だった。
+          //
+          //   ★消す前に書く。書けなければ1行も消さずにエラーを返す
+          //     （削除・編集・人員条件の保存と同じ順序。履歴が命綱なので先に確保する）。
+          //   ★単価（日当）は書かない。変更履歴は画面から読めるので、
+          //     窓口から外した日当が履歴経由で出てしまう。
+          const r = data[i];
+          const target = name + '/' + company;
+          const entries = [
+            { oldId: target, field: '氏名', before: name, after: '（削除）' },
+            { oldId: target, field: '会社', before: company, after: '（削除）' }
+          ];
+          const div = String(r[2] || '').trim();
+          const butai = String(r[4] || '').trim();
+          const active = String(r[5] || '').trim();
+          if (div) entries.push({ oldId: target, field: '事業部', before: div, after: '（削除）' });
+          if (butai) entries.push({ oldId: target, field: '既定部隊', before: butai, after: '（削除）' });
+          if (active) entries.push({ oldId: target, field: '有効', before: active, after: '（削除）' });
+          try {
+            logHistory_(ss, 'remove_member', entries, updatedBy);
+          } catch (e) {
+            return error('変更履歴に残せなかったため、削除を中止しました: ' + e);
+          }
           memberSheet.deleteRow(i + 1);
+          logOperation_(ss, 'remove_member', target, '職人マスタから削除', updatedBy);
           return ok({removed: name});
         }
       }
