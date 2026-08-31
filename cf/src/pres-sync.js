@@ -46,15 +46,22 @@ async function writeLog(env, { rows, ok, message, payloadHash = null }) {
  * GASの pres_list をPOSTで叩く。失敗時は例外を投げる（呼び出し側で捕捉する）。
  * ★PINはbodyに入れる。URLには絶対に載せない。
  */
-async function fetchPresList(gasUrl, pin, cacheBuster) {
+async function fetchPresList(gasUrl, pin, cacheBuster, calToken) {
   let last = null;
+  // ★2026-08-31 GASのパスワードを本文に入れる。
+  //   doPost は本文の k を見る（gas.js:722）。付けていなかったので、
+  //   設定を入れた瞬間に社長予定の取り込みが止まる状態だった。
+  //   ★未設定なら入れない（設定前に壊さないため）。
+  const k = String(calToken || '').trim();
   for (let i = 0; i < FETCH_TRIES; i++) {
     try {
+      const body = { action: 'pres_list', pin };
+      if (k) body.k = k;
       const res = await fetch(gasUrl + '?t=' + cacheBuster, {
         method: 'POST',
         // GASのdoPostは本文をそのまま読むため text/plain。既存の画面側(president.html)と同じ。
         headers: { 'Content-Type': 'text/plain' },
-        body: JSON.stringify({ action: 'pres_list', pin }),
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
       });
       if (!res.ok) { last = new Error('HTTP ' + res.status); continue; }
@@ -159,7 +166,7 @@ export async function syncPresident(env, opts = {}) {
 
     let raw;
     try {
-      raw = await fetchPresList(env.GAS_URL, pin, fetchStartedAt);
+      raw = await fetchPresList(env.GAS_URL, pin, fetchStartedAt, env.CAL_TOKEN);
     } catch (e) {
       const message = 'GASからの取得に失敗しました: ' + String((e && e.message) || e);
       await writeLog(env, { rows: 0, ok: 0, message });

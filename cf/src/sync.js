@@ -432,6 +432,14 @@ async function recentForceAcceptCount(env, now, windowMs) {
  *     これを「確実成功」として扱ってよい。「進行中のためスキップ」（GASへ一度も
  *     取得しに行っていない）にはこのフィールドを付けない＝区別できる。
  */
+// GASのパスワードをURLの後ろに付ける。未設定なら空文字＝今までどおり。
+// ★ここと pres-sync.js の2か所でしか使わないが、
+//   「付け忘れると取り込みが全滅する」ので、名前を付けて目立たせておく。
+export function gasKeyParam(env) {
+  const k = String((env && env.CAL_TOKEN) || '').trim();
+  return k ? ('&k=' + encodeURIComponent(k)) : '';
+}
+
 export async function syncAll(env, opts = {}) {
   const force = !!(opts && opts.force);
   let locked = false;
@@ -446,7 +454,13 @@ export async function syncAll(env, opts = {}) {
     // （完了した時刻ではなく、開始した時刻で比較することで、後から始まった
     // 取得の結果が常に先に始まった取得の結果より「新しい」と正しく判定できる）。
     const fetchStartedAt = Date.now();
-    const url = env.GAS_URL + '?compact=1&company=&t=' + fetchStartedAt;
+    // ★2026-08-31 GASのパスワードを付ける。
+    //   gas.js の calAuthOk_ は、設定 CAL_REQUIRE_TOKEN が '1' のとき
+    //   クエリの k を見る。ここに付けていなかったので、
+    //   **設定を入れた瞬間に5分ごとの取り込みが全滅する**状態だった。
+    //   ★秘密が未設定なら今までどおり付けない（設定前に壊さないため）。
+    const url = env.GAS_URL + '?compact=1&company=&t=' + fetchStartedAt
+      + gasKeyParam(env);
     // ★5回目レビュー修正6: FETCH_TIMEOUT_MSを60秒に延ばした分、リトライ回数は
     // 3→2に減らす（上のFETCH_TIMEOUT_MSのコメント参照。最悪でも60秒×2=120秒に収める）。
     const rawText = await fetchTextWithRetry(url, 2);

@@ -258,7 +258,21 @@ const VEHICLE_RES_HEADERS = [
   '予約ID','車両名','ナンバー','所有会社','使用者氏名','使用者LINE_ID',
   '開始日時','返却予定日時','実返却日時','行先','状態','備考','登録日時','更新日時'
 ];
-const VEHICLE_RES_TOKEN = '車両予約用トークン1234';
+// ★2026-08-31 ここに直書きしていたのを設定欄へ移した。
+//   このファイルは公開リポジトリに上がるので、書いた瞬間に公開される。
+//   CAL_TOKEN と同じ形にそろえる（設定欄＝スクリプトプロパティに置く）。
+//
+//   ⚠️ 今は「設定欄が空なら今までの値を使う」ようにしてある。
+//      設定欄に値を入れるまで、LINEボット側は今までどおり動く。
+//      値の入れ替えは C（直通路を閉じる）でまとめて行う。
+const VEHICLE_RES_TOKEN_FALLBACK = '車両予約用トークン1234';
+function vehicleResToken_() {
+  try {
+    var v = PropertiesService.getScriptProperties().getProperty('VEHICLE_RES_TOKEN');
+    if (v && String(v).trim()) return String(v).trim();
+  } catch (e) {}
+  return VEHICLE_RES_TOKEN_FALLBACK;
+}
 
 // ==============================================================
 // 全体認証（合言葉 k）— 2026-06-10 セキュリティ強化
@@ -1531,7 +1545,7 @@ function doPost(e) {
     // トークン認証。既存カレンダー機能とは独立した「車両予約」シートを操作。
     // ============================================================
     if (action === 'vehicle_res_add' || action === 'vehicle_res_update' || action === 'vehicle_res_delete' || action === 'vehicle_res_list') {
-      if (String(body.token || '') !== VEHICLE_RES_TOKEN) return error('認証失敗');
+      if (String(body.token || '') !== vehicleResToken_()) return error('認証失敗');
       const vehicleSheet = getOrCreateVehicleResSheet_(ss);
 
       if (action === 'vehicle_res_add') {
@@ -1639,7 +1653,7 @@ function doPost(e) {
     // LINEボット連携: 指定日（既定は今日）の倉庫作業者一覧を返す
     // body: { token, date (YYYY-MM-DD, 省略時は今日) }
     if (action === 'warehouse_today') {
-      if (String(body.token || '') !== VEHICLE_RES_TOKEN) return error('認証失敗');
+      if (String(body.token || '') !== vehicleResToken_()) return error('認証失敗');
       const tz = Session.getScriptTimeZone();
       const date = String(body.date || '').trim() || Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
       const sh = ss.getSheetByName(SHEET_NAME);
