@@ -13,17 +13,53 @@ function jstToday() {
   }).format(new Date());
 }
 
-// 画面（GitHub Pages）だけが正規の呼び出し元。/api/syncのOrigin検証・CORSの両方で使う。
-const ALLOWED_ORIGIN = 'https://akirasp4-lgtm.github.io';
+// 画面だけが正規の呼び出し元。/api/syncのOrigin検証・CORSの両方で使う。
+//
+// ★2026-08-31 引っ越しのため「複数」受け付けられるようにした。
+//   利用者の心配「今作ってる間に一時的に動けへんようになるのが困る」への答え。
+//   受け付け先を1つしか書けないと、新URLに書き換えた瞬間に古いURLが死ぬ。
+//   **両方を同時に受け付ける**ことで、「切り替えの瞬間」そのものを無くす。
+//
+//   引っ越しの手順:
+//     1. ここに新しいURLを足す（この時点では古いURLだけが使われている＝何も変わらない）
+//     2. 新しいURLで動くことを確かめる
+//     3. 社員に新しいURLを伝える。**この間、両方が使える**
+//     4. 全員が移り終わってから、古いURLをこの一覧から外す
+//
+//   ⚠️ 一覧は「完全一致」で見る。前方一致にしないこと
+//     （'https://akirasp4-lgtm.github.io.example.com' のような偽物が通る）。
+const ALLOWED_ORIGINS = [
+  'https://akirasp4-lgtm.github.io'    // 今のURL。引っ越しが済むまで外さない
+];
 
-const CORS = {
-  'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
-  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-  // ★修正2: 画面側が /api/sync の簡易認証ヘッダ(X-Sync-Key)を送れるよう許可する。
-  // ★コードレビュー（2026-08-30）: /api/alerts に鍵を要求するようにしたので、
-  //   ブラウザから呼ぶ場合に備えて X-Alert-Key も許可しておく。
-  'Access-Control-Allow-Headers': 'Content-Type, X-Sync-Key, X-Alert-Key'
-};
+// 昔の書き方を残しておく（他の場所から参照されていた場合に壊さないため）
+const ALLOWED_ORIGIN = ALLOWED_ORIGINS[0];
+
+// そのOriginが一覧にあるか。無ければ '' を返す。
+export function matchOrigin(origin) {
+  const o = String(origin || '');
+  return ALLOWED_ORIGINS.indexOf(o) >= 0 ? o : '';
+}
+
+// ★CORSの許可先は「送ってきたOriginをそのまま返す」形にする。
+//   一覧に複数あるとき、'Access-Control-Allow-Origin' に一覧を並べては書けない
+//   （仕様上1つだけ）。一覧にある物だけを、そのまま返す。
+//   一覧に無ければ先頭を返す（＝相手のブラウザが弾く。今までと同じ）。
+export function corsFor(request) {
+  const hit = matchOrigin(request && request.headers && request.headers.get('Origin'));
+  return {
+    'Access-Control-Allow-Origin': hit || ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    // ★修正2: 画面側が /api/sync の簡易認証ヘッダ(X-Sync-Key)を送れるよう許可する。
+    // ★コードレビュー（2026-08-30）: /api/alerts に鍵を要求するようにしたので、
+    //   ブラウザから呼ぶ場合に備えて X-Alert-Key も許可しておく。
+    'Access-Control-Allow-Headers': 'Content-Type, X-Sync-Key, X-Alert-Key',
+    // 受け付け先によって返事が変わるので、途中の機械にキャッシュさせない
+    'Vary': 'Origin'
+  };
+}
+
+const CORS = corsFor(null);
 
 // ★3回目レビュー修正5（/api/syncの認証）: SYNC_KEYは空でも設定しても、backend.jsonという
 // 公開ファイルに同じ値を置く構造上「秘密」にならない（前回レビューで指摘済み・現状維持）。
@@ -34,7 +70,7 @@ const CORS = {
 // 防げない。「連打による無料枠枯渇の緩和」であって、なりすまし防止ではないことを
 // 正直に書いておく。
 function isAllowedOrigin(request) {
-  return (request.headers.get('Origin') || '') === ALLOWED_ORIGIN;
+  return matchOrigin(request.headers.get('Origin')) !== '';
 }
 
 // ★修正5（レート制限）: Origin検証はcurl等の直接リクエストを防げないため、それでも
@@ -102,15 +138,26 @@ async function checkPresPin(request, env) {
   return { ok: true, body };
 }
 
-const json = (obj, status = 200) =>
+// 既定の返し方（fetch の外から使うとき用）。fetch の中では、
+// そのリクエストのOriginに合わせた物で上書きする（すぐ下）。
+const json = (obj, status = 200, headers = CORS) =>
   new Response(JSON.stringify(obj), {
-    status, headers: { 'Content-Type': 'application/json; charset=utf-8', ...CORS }
+    status, headers: { 'Content-Type': 'application/json; charset=utf-8', ...headers }
   });
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
+    // ★2026-08-31 返事のヘッダは「そのリクエストのOrigin」に合わせて作る。
+    //   引っ越し中は新旧2つを受け付けるので、固定では片方が弾かれる。
+    const cors = corsFor(request);
+    // ★このリクエスト専用の返し方。外側の json を隠す（呼び出し側は書き換えなくてよい）。
+    //   ⚠️ 外側の変数に入れてはいけない。Workerは同じ入れ物で複数の依頼を同時に扱うので、
+    //     入れ替えると別の依頼の返事に混ざる。
+    const json = (obj, status = 200) => new Response(JSON.stringify(obj), {
+      status, headers: { 'Content-Type': 'application/json; charset=utf-8', ...cors }
+    });
+    if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
 
     if (url.pathname === '/api/schedule') {
       try {
