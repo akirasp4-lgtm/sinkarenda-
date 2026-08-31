@@ -173,3 +173,64 @@ describe('★「これが本物」と断定していない', () => {
     expect(src).toContain('まず見てほしい順');
   });
 });
+
+// ================================================================
+// ★Codexレビュー#1【P1】（2026-08-31）
+//
+// 同じ現場の行が複数あるとき、**最初の1行だけ**を見て
+// 「現場作業かどうか」を決めていた。だから
+//     ① 移動     / 元請A・現場A
+//     ② 現場作業 / 元請A・現場A
+//     ③ 現場作業 / 元請B・現場B
+// の順で並んでいると、現場Aが「現場作業ではない」ままになり、
+// 別々の2現場の重なりが高優先から落ちて、画面の警告から消えていた。
+// **変更前は出ていた警告**なので、これは後退だった。
+// ================================================================
+describe('★Codexレビュー#1 同じ現場に別区分の行が先にあっても見落とさない', () => {
+  const move = (o) => n(Object.assign({ workType: '移動' }, o || {}));
+
+  it('移動の行が先にあっても、後の現場作業を拾って高優先にする', () => {
+    const rows = [
+      move({ id: '1', genba: '元請A', loc: '現場A' }),
+      n({ id: '2', genba: '元請A', loc: '現場A' }),
+      n({ id: '3', genba: '元請B', loc: '現場B' })
+    ];
+    const r = S.findConflicts(rows);          // 既定＝高優先だけ
+    expect(r, '★変更前は出ていた警告が消えた').toHaveLength(1);
+    expect(r[0].severity).toBe('high');
+  });
+
+  it('Workerでも同じ（画面と食い違わない）', () => {
+    const rows = [
+      move({ id: '1', genba: '元請A', loc: '現場A' }),
+      n({ id: '2', genba: '元請A', loc: '現場A' }),
+      n({ id: '3', genba: '元請B', loc: '現場B' })
+    ];
+    expect(JSON.stringify(W.findConflicts(rows)))
+      .toBe(JSON.stringify(S.findConflicts(rows)));
+  });
+
+  it('現場作業が先でも結果は同じ（並び順に左右されない）', () => {
+    const a = S.findConflicts([
+      move({ id: '1', genba: '元請A', loc: '現場A' }),
+      n({ id: '2', genba: '元請A', loc: '現場A' }),
+      n({ id: '3', genba: '元請B', loc: '現場B' })
+    ]);
+    const b = S.findConflicts([
+      n({ id: '2', genba: '元請A', loc: '現場A' }),
+      move({ id: '1', genba: '元請A', loc: '現場A' }),
+      n({ id: '3', genba: '元請B', loc: '現場B' })
+    ]);
+    expect(a.length).toBe(b.length);
+    expect(a[0].severity).toBe(b[0].severity);
+  });
+
+  it('移動だけの現場は、現場作業に格上げしない', () => {
+    const r = S.findConflicts([
+      move({ id: '1', genba: '元請A', loc: '現場A' }),
+      move({ id: '2', genba: '元請B', loc: '現場B' })
+    ], { minSeverity: 'info' });
+    expect(r).toHaveLength(1);
+    expect(r[0].severity, '移動どうしを高優先にしてはいけない').not.toBe('high');
+  });
+});

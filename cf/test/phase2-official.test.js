@@ -14,7 +14,7 @@
 //   ここを間違えると、40人が毎朝「資格不足」と名指しされる。
 import { describe, it, expect } from 'vitest';
 import {
-  buildAlerts, formatAlertsText, siteNeedIndex, siteQualCheck, qualsByPerson
+  buildAlerts, formatAlertsText, siteNeedIndex, siteQualCheck, qualsByPerson, qualPersonKey
 } from '../src/alerts.js';
 
 const H = ['ID', '作業日', '元請名', '現場名', '氏名', '役割', '会社', '拠点',
@@ -340,19 +340,36 @@ describe('部品：siteNeedIndex', () => {
 });
 
 describe('部品：qualsByPerson', () => {
+  const key = (name, company) => qualPersonKey({ name, company });
+
   it('会社で絞る', () => {
     const ix = qualsByPerson(
       [q('江頭', '玉掛け', '2030-01-01'), q('江頭', '高所', '2030-01-01', '和信カインド')],
       'グローライズ');
-    expect(ix['江頭']).toHaveLength(1);
-    expect(ix['江頭'][0].qual).toBe('玉掛け');
+    expect(ix[key('江頭', 'グローライズ')]).toHaveLength(1);
+    expect(ix[key('江頭', 'グローライズ')][0].qual).toBe('玉掛け');
   });
 
-  it('全社なら全部入れる', () => {
+  it('★全社でも、鍵が会社込みなので他社と混ざらない（Codexレビュー#8）', () => {
+    // /api/alerts は company を省くと「全社」で動く。
+    // 昔は氏名だけの鍵だったので、和信カインドの江頭さんの資格が
+    // グローライズの江頭さんの物として使えていた。
     const ix = qualsByPerson(
       [q('江頭', '玉掛け', '2030-01-01'), q('江頭', '高所', '2030-01-01', '和信カインド')],
       '全社');
-    expect(ix['江頭']).toHaveLength(2);
+    expect(ix[key('江頭', 'グローライズ')]).toHaveLength(1);
+    expect(ix[key('江頭', '和信カインド')]).toHaveLength(1);
+    expect(ix[key('江頭', 'グローライズ')][0].qual).toBe('玉掛け');
+    expect(ix[key('江頭', '和信カインド')][0].qual).toBe('高所');
+  });
+
+  it('★会社が空欄の行を落とさない（Codexレビュー#2）', () => {
+    // 会社の列が無い／セルが空の行は「どの会社か分からない」であって
+    // 「他社の行」ではない。落とすと期限のお知らせが黙って消える。
+    const ix = qualsByPerson([{ name: '江頭', qual: '玉掛け', expires: '', company: '' }],
+      'グローライズ');
+    expect(Object.keys(ix)).toHaveLength(1);
+    expect(ix[key('江頭', '')]).toHaveLength(1);
   });
 });
 
@@ -372,5 +389,108 @@ describe('部品：siteQualCheck', () => {
     expect(r).toHaveLength(2);
     expect(r[0].status).toBe('ok');
     expect(r[1].status).toBe('missing');
+  });
+});
+
+// ================================================================
+// Codexレビューで見つかった穴（2026-08-31）。同じ穴を二度と空けない。
+// ================================================================
+
+describe('★Codexレビュー#7【重大】期限のない資格を「読めない」にしない', () => {
+  // 資格284行のうち245行（86%）が期限なし＝ゴンドラ特別教育・足場の組立て等・
+  // 職長など、そもそも切れない資格。これを全部「判定できない」にしていた。
+  const jobs = { jobsites: [site({ needCount: 1, needQuals: ['職長・安全衛生責任者'] })] };
+  const one = [row({ 氏名: '江頭' })];
+
+  it('有効期限が空欄なら「持っている」（切れない資格）', () => {
+    const a = buildAlerts(payload(one, Object.assign({
+      qualifications: [q('江頭', '職長・安全衛生責任者', '')]
+    }, jobs)), opt);
+    expect(a.qualShort, '期限なしの資格を持っているのに何か言われた').toEqual([]);
+  });
+
+  it('期限の欄が無い（undefined）でも「持っている」', () => {
+    const a = buildAlerts(payload(one, Object.assign({
+      qualifications: [{ name: '江頭', qual: '職長・安全衛生責任者', company: 'グローライズ' }]
+    }, jobs)), opt);
+    expect(a.qualShort).toEqual([]);
+  });
+
+  it('部品でも同じ（siteQualCheck）', () => {
+    const ix = { '江頭': [{ name: '江頭', qual: '玉掛け', expires: '' }] };
+    expect(siteQualCheck(['玉掛け'], ['江頭'], ix, '2026-09-09')[0].status).toBe('ok');
+  });
+
+  it('★読めない値は今までどおり「持っている」に数えない（安全側）', () => {
+    const ix = { '江頭': [{ name: '江頭', qual: '玉掛け', expires: '未定' }] };
+    expect(siteQualCheck(['玉掛け'], ['江頭'], ix, '2026-09-09')[0].status).toBe('unknown');
+  });
+});
+
+describe('★Codexレビュー#4 必要資格だけでも資格の判定が動く', () => {
+  it('必要人数が未登録でも、必要資格が入っていれば照らす', () => {
+    const a = buildAlerts(payload(
+      [row({ 氏名: '江頭' })],
+      {
+        jobsites: [site({ needCount: null, needQuals: ['高所作業車'] })],
+        qualifications: [q('江頭', '玉掛け', '')]
+      }
+    ), opt);
+    expect(a.qualShort, '必要資格だけの現場が素通りした').toHaveLength(1);
+    expect(a.qualShort[0].status).toBe('missing');
+  });
+
+  it('その場合でも人数の判定はしない（人数は未登録なのだから）', () => {
+    const a = buildAlerts(payload(
+      [row({ 氏名: '江頭' })],
+      {
+        jobsites: [site({ needCount: null, needQuals: ['高所作業車'] })],
+        qualifications: [q('江頭', '玉掛け', '')]
+      }
+    ), opt);
+    expect(a.shortOfficial).toEqual([]);
+  });
+});
+
+describe('★Codexレビュー#5 資格情報が無い人がいたら、期限切れでも断定しない', () => {
+  it('Aが期限切れ・Bが資格情報なし → 「判定できない」', () => {
+    const a = buildAlerts(payload(
+      [row({ 氏名: '江頭' }), row({ 氏名: '河原' })],
+      {
+        jobsites: [site({ needCount: 2, needQuals: ['高所作業車'] })],
+        qualifications: [q('江頭', '高所作業車', '2024-01-01')]   // 河原は1行も無い
+      }
+    ), opt);
+    expect(a.qualShort[0].status, '期限切れで断定してしまった').toBe('unknown');
+    expect(a.qualShort[0].why).toContain('期限切れ');
+    expect(a.qualShort[0].noRecord).toEqual(['河原']);
+  });
+
+  it('全員ぶん登録があって誰も持っていなければ、今までどおり断定する', () => {
+    const a = buildAlerts(payload(
+      [row({ 氏名: '江頭' }), row({ 氏名: '河原' })],
+      {
+        jobsites: [site({ needCount: 2, needQuals: ['高所作業車'] })],
+        qualifications: [q('江頭', '高所作業車', '2024-01-01'), q('河原', '玉掛け', '')]
+      }
+    ), opt);
+    expect(a.qualShort[0].status).toBe('expired');
+  });
+});
+
+describe('★Codexレビュー#8 全社で見ても他社の同姓の資格を使わない', () => {
+  it('全社（company未指定）でも混ざらない', () => {
+    // /api/alerts は company を省くと「全社」で動く＝既定でこの穴が開いていた
+    const a = buildAlerts({
+      headers: H,
+      rows: [row({ 氏名: '江頭', 会社: 'グローライズ' })],
+      members: [{ name: '江頭', company: 'グローライズ', active: true },
+        { name: '江頭', company: '和信カインド', active: true }],
+      genbaMaster: [],
+      jobsites: [site({ needCount: 1, needQuals: ['高所作業車'] })],
+      qualifications: [q('江頭', '高所作業車', '', '和信カインド')]
+    }, { date: '2026-09-10', today: '2026-09-09', company: '全社' });
+    expect(a.qualShort, '他社の資格で足りている事にされた').toHaveLength(1);
+    expect(a.qualShort[0].status).toBe('unknown');
   });
 });

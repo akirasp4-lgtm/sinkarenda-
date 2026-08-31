@@ -91,14 +91,27 @@ export function findConflicts(nippos, opts) {
     const jk = jobKey(n);
     // ★画面(index.html)の作りと完全に同じ形にする。trim の有無・項目の並びまで合わせること。
     //   cf/test/alerts.test.js が両方を同じデータで動かして JSON を突き合わせる。
-    if (!jobs.has(jk)) jobs.set(jk, {
-      genba: String(n.genba || ''), loc: String(n.loc || ''),
-      butai: String(n.butai || ''), ids: [],
-      // ★2026-08-31 Phase 2: 強さを決めるための材料。画面と同じ並び・同じ形。
-      workType: String(n.workType || ''),
-      isSite: countsForConflict(n),
-      start: String(n.start || ''), end: String(n.end || '')
-    });
+    if (!jobs.has(jk)) {
+      jobs.set(jk, {
+        genba: String(n.genba || ''), loc: String(n.loc || ''),
+        butai: String(n.butai || ''), ids: [],
+        // ★2026-08-31 Phase 2: 強さを決めるための材料。画面と同じ並び・同じ形。
+        workType: String(n.workType || ''),
+        isSite: countsForConflict(n),
+        start: String(n.start || ''), end: String(n.end || '')
+      });
+    } else if (countsForConflict(n)) {
+        // ★2026-08-31 Codexレビュー#1【P1】: 最初の1行だけで決めていた。
+        //   同じ現場に「移動」の行が先にあると、その後の「現場作業」の行を
+        //   見ずに「現場作業ではない」と決めつけ、別々の2現場の重なりが
+        //   高優先から落ちて画面の警告から消えていた（変更前は出ていた）。
+        //   **1行でも現場作業があれば、その現場は現場作業として数える。**
+      const _j = jobs.get(jk);
+      _j.isSite = true;
+      _j.workType = String(n.workType || '');
+      if (!_j.start) _j.start = String(n.start || '');
+      if (!_j.end) _j.end = String(n.end || '');
+    }
     if (n.id) jobs.get(jk).ids.push(n.id);
   });
   const out = [];
@@ -190,16 +203,33 @@ export const QUAL_NEED_LABEL = {
   unknown: '資格情報が未登録で判定できない'
 };
 
-// 氏名 -> その人の資格の行。★会社をまたいで混ぜない（同姓が実在する）。
+// ★2026-08-31 Codexレビュー#8: 索引の鍵を「会社＋氏名」にする。
+//   氏名だけだと、全社で見たとき和信カインドの江頭さんの資格で
+//   グローライズの江頭さんが「有資格」になり得た。
+//   （/api/alerts は company を省くと '全社' で動く＝既定でこの穴が開いていた）
+export function qualPersonKey(who) {
+  const name = String((who && who.name) || who || '').trim();
+  const co = String((who && who.company) || '').trim();
+  return co ? (rosterKey(co) + SEP + name) : name;
+}
+
+// 会社＋氏名 -> その人の資格の行。★会社をまたいで混ぜない（同姓が実在する）。
 export function qualsByPerson(qualifications, company) {
   const out = {};
   (qualifications || []).forEach(q => {
     if (!q) return;
     const n = String(q.name || '').trim();
     if (!n) return;
-    if (company && company !== '全社'
-        && rosterKey(String(q.company || '')) !== rosterKey(company)) return;
-    (out[n] || (out[n] = [])).push(q);
+    // ★2026-08-31 Codexレビュー#2: 会社が空欄の行まで落としていた。
+    //   資格マスタに会社の列が無い／セルが空の行は「どの会社か分からない」であって
+    //   「他社の行」ではない。落とすと、その人の期限のお知らせが黙って消える。
+    //   （実データでは今0件。だが1行足された瞬間に消えるので、先に塞いでおく）
+    const co = String((q && q.company) || '').trim();
+    if (co && company && company !== '全社'
+        && rosterKey(co) !== rosterKey(company)) return;
+    // ★鍵は会社＋氏名（qualPersonKey と同じ作り方でそろえること）
+    const key = qualPersonKey({ name: n, company: co });
+    (out[key] || (out[key] = [])).push(q);
   });
   return out;
 }
@@ -210,28 +240,43 @@ export function qualsByPerson(qualifications, company) {
 //   noRecord … 資格マスタに1行も無い人（この人がいる限り「不足」と断定しない）
 export function siteQualCheck(needQuals, names, byPerson, today) {
   const out = [];
+  const idx = byPerson || {};          // ★#10: null を渡されても落ちない
   (needQuals || []).forEach(raw => {
     const need = String(raw || '').trim();
     if (!need) return;
     const holders = [], soon = [], expired = [], unreadable = [], noRecord = [];
-    (names || []).forEach(n => {
-      const list = byPerson[n] || [];
+    (names || []).forEach(who => {
+      // who は氏名の文字列でも {name, company} でもよい
+      const n = String((who && who.name) || who || '').trim();
+      if (!n) return;
+      const list = idx[qualPersonKey(who)] || [];
       if (!list.length) { noRecord.push(n); return; }
       list.forEach(x => {
         if (String(x.qual || '').trim() !== need) return;
         const st = qualStatus(x.expires, today);
-        if (st === 'ok') holders.push(n);
-        else if (st === 'soon') soon.push(n);
+        // ★2026-08-31 Codexレビュー#7【重大】: 'none'（期限のない資格）を
+        //   「読めない」に落としていた。資格284行のうち245行（86%）が期限なし
+        //   ＝ゴンドラ特別教育・足場の組立て等・職長など、切れない資格。
+        //   ほぼ全部を「判定できない」にしていた＝この機能が働いていなかった。
+        if (st === 'none' || st === 'ok') holders.push(n);
+        else if (st === 'soon') soon.push(n);   // 期限は近いが、今日は使える
         else if (st === 'expired') expired.push(n);
-        else unreadable.push(n);           // 期限欄が日付として読めない
+        else unreadable.push(n);                // 期限欄が日付として読めない
       });
     });
     let status, why = '';
     if (holders.length) status = 'ok';
-    else if (soon.length) status = 'soon';
-    else if (expired.length) status = 'expired';
+    else if (soon.length) status = 'soon';      // 今日使える人がいる＝足りてはいる
+    // ★2026-08-31 Codexレビュー#5: 期限切れの人が1人いるだけで
+    //   「足りていません」と断定していた。資格情報が無い人が同じ現場にいるなら、
+    //   その人が持っているかもしれない。**断定できない方を先に見る。**
+    else if (noRecord.length) {
+      status = 'unknown';
+      why = expired.length
+        ? '資格情報が未登録の人がいます（期限切れの人もいます）'
+        : '資格情報が未登録の人がいます';
+    } else if (expired.length) status = 'expired';
     else if (unreadable.length) { status = 'unknown'; why = '有効期限が読めません'; }
-    else if (noRecord.length) { status = 'unknown'; why = '資格情報が未登録の人がいます'; }
     else status = 'missing';               // 全員ぶん登録があり、誰も持っていない
     out.push({
       qual: need, status, why,
@@ -445,17 +490,36 @@ export function buildAlerts(payload, { date, today, company } = {}) {
   };
 
   // 正式判定は現場ごと（昼夜を分けない。必要人数の欄が現場に1つしかないため）
+  //
+  // ⚠️ 2026-08-31 Codexレビュー#3 の限界を正直に書いておく:
+  //   **現場マスタには会社の列が無い。** だから「和信カインドの〇〇現場」と
+  //   「グローライズの〇〇現場」が同じ名前だと、条件を取り違える。
+  //   実データでは、同じ（元請名＋現場名）が2社に出る組は **0件**（2026-08-31 実測）。
+  //   現場マスタの鍵の重複も0件。今は起きないが、起きたら誤判定になる。
+  //   直すには現場マスタに会社の列を足すしかない（Phase 5 で検討）。
+  //   ★ただし人の資格は会社込みで引く（下の {name, company}）ので、
+  //     資格の側では他社の同姓の人を使わない。
   const officialSite = {};
   day.filter(isSiteWork).forEach(r => {
     const k = r.genba + SEP + r.loc;
     const nd = needIx[k];
-    if (!nd || nd.needCount == null) return;
-    (officialSite[k] || (officialSite[k] = {
-      genba: r.genba, loc: r.loc, need: nd.needCount, needQuals: nd.needQuals, names: new Set()
-    })).names.add(r.name);
+    // ★2026-08-31 Codexレビュー#4: 「必要人数が無ければ何もしない」にしていたので、
+    //   必要資格だけ入れた現場が丸ごと素通りしていた。画面では別々に入れられる。
+    if (!nd) return;
+    if (nd.needCount == null && !(nd.needQuals && nd.needQuals.length)) return;
+    const cell = officialSite[k] || (officialSite[k] = {
+      genba: r.genba, loc: r.loc, need: nd.needCount, needQuals: nd.needQuals,
+      names: new Set(), people: [], seen: {}
+    });
+    cell.names.add(r.name);
+    // ★2026-08-31 Codexレビュー#8: 資格を引くのに会社が要る。
+    //   氏名だけだと、全社で見たとき他社の同姓の人の資格で「足りている」になる。
+    const pk = rosterKey(r.company) + SEP + r.name;
+    if (!cell.seen[pk]) { cell.seen[pk] = 1; cell.people.push({ name: r.name, company: r.company }); }
   });
   const shortOfficial = Object.keys(officialSite).map(k => {
     const s = officialSite[k];
+    if (s.need == null) return null;               // 人数は未登録＝人数の判定はしない
     const n = s.names.size;
     if (n >= s.need) return null;
     return { genba: s.genba, loc: s.loc, need: s.need, count: n, gap: s.need - n };
@@ -468,8 +532,7 @@ export function buildAlerts(payload, { date, today, company } = {}) {
   Object.keys(officialSite).forEach(k => {
     const s = officialSite[k];
     if (!s.needQuals || !s.needQuals.length) return;
-    const names = Array.from(s.names);
-    siteQualCheck(s.needQuals, names, qualIndex, today || date).forEach(c => {
+    siteQualCheck(s.needQuals, s.people, qualIndex, today || date).forEach(c => {
       if (c.status === 'ok') return;
       qualShort.push({ genba: s.genba, loc: s.loc, ...c });
     });
@@ -536,9 +599,18 @@ export function buildAlerts(payload, { date, today, company } = {}) {
   // ★2026-08-31 会社境界の抜けを塞いだ（社長指示 §0「他社のデータを巻き込まない」）。
   //   氏名だけで引いていたので、和信カインドの同姓の人の資格が
   //   グローライズの通知に混ざり得た。会社で先に絞る。
-  const quals = Object.keys(qualIndex)
-    .filter(n => outNames.has(n))
-    .reduce((acc, n) => acc.concat(qualIndex[n]), [])
+  // ★2026-08-31 索引の鍵は「会社＋氏名」。その日出る人を会社込みで引く。
+  //   （氏名だけで引くと、全社で見たとき他社の同姓の人の資格が混ざる）
+  const outPeople = [];
+  const seenOut = {};
+  working.forEach(r => {
+    const pk = qualPersonKey({ name: r.name, company: r.company });
+    if (seenOut[pk]) return;
+    seenOut[pk] = 1;
+    outPeople.push(pk);
+  });
+  const quals = outPeople
+    .reduce((acc, pk) => acc.concat(qualIndex[pk] || []), [])
     .map(q => ({ name: q.name, qual: q.qual, expires: q.expires, status: qualStatus(q.expires, today || date) }))
     // ★Codexレビュー[P2]（2026-08-29）: 「60日以内」だけだと、その人が出る日は
     //   最大60日ぶん毎朝同じ警告が出る。コメントの「新しく起きた事だけ」と食い違う。

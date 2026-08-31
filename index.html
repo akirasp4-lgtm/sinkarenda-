@@ -3495,6 +3495,17 @@ function findConflicts(nippos, opts) {
         isSite: countsForConflict(n),
         start: String(n.start || ''), end: String(n.end || '')
       });
+    } else if (countsForConflict(n)) {
+        // ★2026-08-31 Codexレビュー#1【P1】: 最初の1行だけで決めていた。
+        //   同じ現場に「移動」の行が先にあると、その後の「現場作業」の行を
+        //   見ずに「現場作業ではない」と決めつけ、別々の2現場の重なりが
+        //   高優先から落ちて画面の警告から消えていた（変更前は出ていた）。
+        //   **1行でも現場作業があれば、その現場は現場作業として数える。**
+      var _j = jobs.get(jk);
+      _j.isSite = true;
+      _j.workType = String(n.workType || '');
+      if (!_j.start) _j.start = String(n.start || '');
+      if (!_j.end) _j.end = String(n.end || '');
     }
     if (n.id) jobs.get(jk).ids.push(n.id);
   });
