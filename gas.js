@@ -171,6 +171,51 @@ function normalizeMemberActive_(v) {
 const SITE_STATUSES = ['見積中', '受注', '準備中', '施工中', '残工事', '完工', '延期', '中止'];
 const SITE_STATUS_DONE = ['完工', '中止'];
 
+// ============================================================
+// 案件ごとの「必要人員条件」— 2026-08-31 追加（Phase 1）
+//
+// 社長指示 §2:
+//   「案件・現場ごとに 必要人数 / 必要資格 / 必要経験 / 現場住所 /
+//     開始時間 / 終了時間 を持てるようにする」
+//   「既存223現場を一括で無理に入力する必要はない。空欄を許容し、
+//     空欄の場合は『条件未登録』として扱い、勝手な推測値で正式判定しないこと」
+//
+// ★この段階では「入れ物」だけ。これを使った判定（人員不足・資格不足・
+//   移動時間）は次の段階。ここで判定を変えてはいけない。
+//
+// ★必要資格は1セルに「、」区切りで入れる。別シートにはしない。
+//   1案件あたり2〜3個が現実で、縦持ちにするほどの量ではない。
+//   ⚠️ 値は資格マスタの「資格名」と1文字も違ってはいけない。
+//      画面は打ち込みではなく一覧から選ばせること（資格名は105種類あり、
+//      「高所作業車」と「高所作業認定」のように割れると永久に一致しない）。
+// ============================================================
+const SITE_NEED_SEP = '、';   // 必要資格の区切り
+
+// 必要人数: 空欄・0・数字でないものは「条件未登録」= null を返す。
+// ★0 を返してはいけない。「0人必要」と「未登録」は別物で、
+//   0を返すと Phase 2 の判定が「常に足りている」と誤って判断する。
+function normalizeNeedCount_(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (s === '') return null;
+  const n = Number(s);
+  if (!isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+
+// 必要資格: 「、」区切りの文字列 → 配列。空欄は空配列。
+// 読点は全角「、」半角「,」読点「,」のどれで打たれても拾う（人が打つ欄のため）。
+function normalizeNeedQuals_(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (s === '') return [];
+  return s.split(/[、,，]/).map(x => x.trim()).filter(x => x !== '');
+}
+
+// 時刻: HH:MM だけ通す。それ以外は空欄扱い（勝手に補わない）。
+function normalizeNeedTime_(v) {
+  const s = String(v == null ? '' : v).trim();
+  return /^([01]?\d|2[0-3]):[0-5]\d$/.test(s) ? s : '';
+}
+
 function isSiteStatusDone_(status) {
   return SITE_STATUS_DONE.indexOf(String(status || '').trim()) >= 0;
 }
@@ -1668,6 +1713,17 @@ function doGet(e) {
       completed: String(r[8] || '').trim() !== '',
       billingMethod: String(r[9] || '').trim() || '応援',
       kyoten: String(r[10] || '').trim(),   // ★2026-08-26 拠点。空なら画面側は会社の既定値を使う
+      // ★2026-08-31 Phase 1: 案件ごとの必要人員条件。
+      //   ⚠️ ここに書かないと、列を作っても画面には永久に届かない。
+      //      「書かないと黙って消える」で既に3回ハマっている（既定部隊・有効・取得場所）。
+      //   ★空欄は「条件未登録」。needCount は null、他は '' / [] で返す。
+      //     0 を返してはいけない（「0人必要」と「未登録」は別物）。
+      needCount: normalizeNeedCount_(r[12]),
+      needQuals: normalizeNeedQuals_(r[13]),
+      needExp: String(r[14] || '').trim(),
+      address: String(r[15] || '').trim(),
+      startAt: normalizeNeedTime_(r[16]),
+      endAt: normalizeNeedTime_(r[17]),
       // ★2026-08-27 フェーズ1: 未設定なら「完了」列から導く（既存184件は無書き換えで移行）
       status: normalizeSiteStatus_(r[11], r[8])
     })).filter(j => j.genba && (!filterByCompany || allowedGenba.has(j.genba))) : [];
@@ -1871,10 +1927,12 @@ function getOrCreateJobSiteSheet_(ss) {
   let sheet = ss.getSheetByName(JOBSITE_SHEET);
   if (!sheet) {
     sheet = ss.insertSheet(JOBSITE_SHEET);
-    sheet.appendRow(['元請名', '現場名', '工番', '事業部', '年度', '連番', '売上', '読み', '完了', '請求方式', '拠点', 'ステータス']);
+    sheet.appendRow(['元請名', '現場名', '工番', '事業部', '年度', '連番', '売上', '読み', '完了', '請求方式', '拠点', 'ステータス',
+      // ★2026-08-31 Phase 1: 案件ごとの必要人員条件
+      '必要人数', '必要資格', '必要経験', '現場住所', '開始時間', '終了時間']);
   } else {
-    ensureColumns_(sheet, 12);
-    const headers = sheet.getRange(1, 1, 1, 12).getValues()[0];
+    ensureColumns_(sheet, 18);
+    const headers = sheet.getRange(1, 1, 1, 18).getValues()[0];
     if (String(headers[6] || '').trim() !== '売上') sheet.getRange(1, 7).setValue('売上');
     if (String(headers[7] || '').trim() !== '読み') sheet.getRange(1, 8).setValue('読み');
     if (String(headers[8] || '').trim() !== '完了') sheet.getRange(1, 9).setValue('完了');
@@ -1883,6 +1941,13 @@ function getOrCreateJobSiteSheet_(ss) {
     if (String(headers[10] || '').trim() !== '拠点') sheet.getRange(1, 11).setValue('拠点');
     // ★2026-08-27 フェーズ1: 案件ステータス（8段階）
     if (String(headers[11] || '').trim() !== 'ステータス') sheet.getRange(1, 12).setValue('ステータス');
+    // ★2026-08-31 Phase 1: 案件ごとの必要人員条件（13〜18列目）。
+    //   ⛔ 途中に差し込んではいけない。ensureHeaders_ は位置で上書きするため、
+    //      既存データの列の意味が全部ずれる。必ず末尾に足すこと。
+    ['必要人数', '必要資格', '必要経験', '現場住所', '開始時間', '終了時間'].forEach((label, k) => {
+      const col = 13 + k;
+      if (String(headers[col - 1] || '').trim() !== label) sheet.getRange(1, col).setValue(label);
+    });
   }
   return sheet;
 }
