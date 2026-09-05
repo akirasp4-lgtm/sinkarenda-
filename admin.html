@@ -284,9 +284,121 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
 .install-banner .ib-text{flex:1;line-height:1.4}
 .install-banner button{background:#fff;color:#1D9E75;border:none;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}
 .install-banner .ib-close{background:transparent;color:#fff;padding:4px 8px}
+/* ===== 画面内メッセージ（警告ダイアログの置き換え・2026-09-05） =====
+   ブラウザ標準の警告ダイアログは画面全体を止めてしまい、OKを押すと文面が消える。
+   事務が「何が起きたか」を後から読み返せず、動作確認の自動操作もそこで固まるので、
+   画面の一番上に出す帯へ置き換えた。赤（エラー）と黄（警告）は閉じるまで残る。 */
+#app-msg{position:fixed;top:0;left:0;right:0;z-index:10000;display:none;flex-direction:column;gap:6px;padding:8px;pointer-events:none}
+#app-msg.show{display:flex}
+.app-msg-item{pointer-events:auto;display:flex;align-items:flex-start;gap:8px;width:100%;max-width:720px;margin:0 auto;box-sizing:border-box;padding:10px 12px;border-radius:10px;border:1px solid;font-size:13px;line-height:1.5;box-shadow:0 4px 12px rgba(0,0,0,0.25)}
+.app-msg-item .amx-time{flex:none;font-size:11px;font-weight:700;opacity:.75;padding-top:2px}
+.app-msg-item .amx-text{flex:1;white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text}
+.app-msg-item .amx-close{flex:none;background:transparent;border:none;color:inherit;font-size:16px;line-height:1;padding:2px 6px;cursor:pointer;opacity:.7}
+.app-msg-success{background:#EAF3DE;border-color:#7FB03F;color:#3B6D11}
+.app-msg-warn{background:#FFF6E5;border-color:#E0A800;color:#7A5B00}
+.app-msg-error{background:#FCEBEB;border-color:#E8384F;color:#A32D2D}
 </style>
 </head>
 <body>
+<!-- 画面内メッセージの置き場所。中身は showMessage が組み立てる -->
+<div id="app-msg" aria-live="polite"></div>
+<script>
+/* ===== 画面内メッセージ（2026-09-05） =====
+   ブラウザ標準の警告ダイアログをやめて、画面の上の帯に出す。
+
+   なぜ変えたか:
+     ・標準のダイアログはブラウザ全体を止めるので、動作確認の自動操作がそこで固まる。
+     ・OKを押すと文面が消えるため、事務がエラーの中身を後から確認できない。
+
+   使い方:
+     showMessage("保存しました");                 // 文面から色を判定する
+     showMessage("error", "保存エラー：…");       // 色を指定する（success / warn / error）
+
+   決めごと:
+     ・赤（エラー）と黄（警告）は自動で消さない。閉じる（✕）を押すまで残す。
+     ・緑（成功）だけ5秒で自動的に消える。
+     ・文面は要約せず原文のまま出す。textContent で入れるのでHTMLとしては解釈されない。 */
+var APP_MSG_AUTO_CLOSE_MS = 5000;   // 緑（成功）が自動で消えるまでの時間
+var APP_MSG_MAX_ITEMS = 5;          // 同時に出す上限。あふれたら古いものから消す
+
+// 文面から色を決める。エラー・失敗が最優先、次に完了・成功、残りは警告（黄）
+function guessMessageType(text){
+  var s = String(text == null ? "" : text);
+  if (/エラー|失敗|error|Error/.test(s)) return "error";
+  if (/^\s*[\u2713\u2714]|完了|しました|できました/.test(s)) return "success";
+  return "warn";
+}
+
+// 置き場所の div。無ければ作る（読み込み順が変わっても落ちないようにする）
+function appMsgBox(){
+  var box = document.getElementById("app-msg");
+  if (!box){
+    box = document.createElement("div");
+    box.id = "app-msg";
+    box.setAttribute("aria-live", "polite");
+    (document.body || document.documentElement).appendChild(box);
+  }
+  return box;
+}
+
+// 1件も無いときは帯そのものを隠す（画面の上を無駄に塞がない）
+function appMsgSync(){
+  var box = document.getElementById("app-msg");
+  if (box) box.className = box.children.length ? "show" : "";
+}
+
+function closeMessage(item){
+  if (item && item.parentNode) item.parentNode.removeChild(item);
+  appMsgSync();
+}
+
+function clearMessages(){
+  var box = document.getElementById("app-msg");
+  if (box) while (box.firstChild) box.removeChild(box.firstChild);
+  appMsgSync();
+}
+
+function showMessage(type, text){
+  var t = type, msg = text;
+  if (arguments.length < 2) { msg = type; t = null; }
+  if (t !== "success" && t !== "warn" && t !== "error") t = guessMessageType(msg);
+  var body = String(msg == null ? "" : msg);
+  try {
+    var box = appMsgBox();
+    // 同じ文面が既に出ていれば古い方を消してから出し直す（連打で画面が埋まらないように）
+    for (var i = box.children.length - 1; i >= 0; i--){
+      if (box.children[i].getAttribute("data-msg") === body) box.removeChild(box.children[i]);
+    }
+    var item = document.createElement("div");
+    item.className = "app-msg-item app-msg-" + t;
+    item.setAttribute("data-msg", body);
+    item.setAttribute("data-type", t);
+    var now = new Date();
+    var time = document.createElement("span");
+    time.className = "amx-time";
+    time.textContent = ("0" + now.getHours()).slice(-2) + ":" + ("0" + now.getMinutes()).slice(-2);
+    var span = document.createElement("span");
+    span.className = "amx-text";
+    span.textContent = body;   // 原文のまま。要約しない
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "amx-close";
+    btn.setAttribute("aria-label", "このメッセージを閉じる");
+    btn.textContent = "\u2715";
+    btn.onclick = function(){ closeMessage(item); };
+    item.appendChild(time); item.appendChild(span); item.appendChild(btn);
+    box.appendChild(item);
+    while (box.children.length > APP_MSG_MAX_ITEMS) box.removeChild(box.firstChild);
+    appMsgSync();
+    // 緑（成功）だけ自動で消す。黄・赤は閉じるまで残す
+    if (t === "success") setTimeout(function(){ closeMessage(item); }, APP_MSG_AUTO_CLOSE_MS);
+  } catch (e) {
+    // 画面に出せなかったときも、文面は必ずどこかに残す
+    try { console.error("[showMessage] " + t + ": " + body, e); } catch (e2) {}
+  }
+}
+</script>
+
 
 <!-- ===== PINロック画面 ===== -->
 <div id="pin-screen">
@@ -1842,7 +1954,7 @@ async function shareGroup(g){
   const text=lines.join('\n');
   try{
     if(navigator.share){await navigator.share({title:'予定',text});hapticTap();}
-    else{await navigator.clipboard.writeText(text);alert('クリップボードにコピーしました');}
+    else{await navigator.clipboard.writeText(text);showMessage('クリップボードにコピーしました');}
   }catch(e){}
 }
 function shareFromDetail(){
@@ -2030,7 +2142,7 @@ function openUsernameModal(){
 }
 function confirmUsername(){
   const v=document.getElementById('username-select').value;
-  if(!v){alert('名前を選択してください');return;}
+  if(!v){showMessage('名前を選択してください');return;}
   currentUsername=v;
   try{localStorage.setItem('admin-username',v);}catch(e){}
   updateUsernameDisplay();
@@ -4085,13 +4197,13 @@ async function setSiteStatus(genba,loc,el){
   try{
     const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'set_site_status',genba,loc,status,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status!=='ok'){alert('エラー：'+(json.message||'不明'));el.value=prev;return;}
+    if(json.status!=='ok'){showMessage('エラー：'+(json.message||'不明'));el.value=prev;return;}
     const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
     if(j){j.status=status;j.completed=!!json.completed;}
     showAlert(`「${loc||genba}」を「${status}」にしました`,'ok');
     await refreshInBackground();
     if(typeof renderDoneManager==='function')renderDoneManager();
-  }catch(e){alert('エラー：'+e.message);el.value=prev;}
+  }catch(e){showMessage('エラー：'+e.message);el.value=prev;}
   finally{el.disabled=false;}
 }
 
@@ -5021,16 +5133,16 @@ function editFromDetail(){
   let g=detailGroups[idx];
   // ★レビュー修正ラウンド1・Critical C-1: 判定・alertはモーダルを閉じる前に行う
   // （閉じてから出すとs-alertは入力タブの中にあり、カレンダー画面では見えない
-  // ため気づかれない。alert()なら画面によらず必ず見える）。
+  // ため気づかれない。画面上の帯（showMessage）なら画面によらず必ず見える）。
   if(g&&g.isGhost){
     const orig=findOriginalGroup(g.originalId);
     if(orig){
-      if(isGroupPending(orig)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+      if(isGroupPending(orig)){showMessage('この予定はまだ送信中です。送信が終わってから編集してください');return;}
       closeEventDetail();
       openEditModal(0,[orig]);return;
     }
   }
-  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+  if(isGroupPending(g)){showMessage('この予定はまだ送信中です。送信が終わってから編集してください');return;}
   closeEventDetail();
   openEditModal(idx,detailGroups);
 }
@@ -5052,15 +5164,15 @@ async function deleteFromDetail(){
   // 無いため、削除リクエストは0件削除でも成功扱いになり、後で再送されると
   // 「消したはずの予定」が復活する（レビュアー実測）。確認ダイアログの前に
   // 弾く（弾かれるのに確認だけ出す不自然なUXを避ける）。
-  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから削除してください');return;}
+  if(isGroupPending(g)){showMessage('この予定はまだ送信中です。送信が終わってから削除してください');return;}
   if(!confirm('この日報を削除しますか？'))return;
   setLoading(true);
   try{
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'delete',ids:[...new Set(g.ids)],updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'){closeEventDetail();document.getElementById('cal-day-modal').classList.remove('active');removeLocalByIds([...new Set(g.ids)]);refreshInBackground();}
-    else alert('削除エラー：'+json.message);
-  }catch(e){alert('削除エラー：'+e.message);}
+    else showMessage('削除エラー：'+json.message);
+  }catch(e){showMessage('削除エラー：'+e.message);}
   setLoading(false);
 }
 function calGoToInput(){document.getElementById('cal-day-modal').classList.remove('active');switchTab('input');if(calSelectedDate)document.getElementById('s-date').value=calSelectedDate;}
@@ -5096,12 +5208,12 @@ function calOpenEdit(idx){
   if(g.isGhost){
     const orig=findOriginalGroup(g.originalId);
     if(orig){
-      if(isGroupPending(orig)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+      if(isGroupPending(orig)){showMessage('この予定はまだ送信中です。送信が終わってから編集してください');return;}
       document.getElementById('cal-day-modal').classList.remove('active');
       openEditModal(0,[orig]);return;
     }
   }
-  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+  if(isGroupPending(g)){showMessage('この予定はまだ送信中です。送信が終わってから編集してください');return;}
   document.getElementById('cal-day-modal').classList.remove('active');
   openEditModal(idx,groups);
 }
@@ -5109,12 +5221,12 @@ async function calDeleteGroup(idx){
   let g=getCalDayGroups()[idx];if(!g)return;
   if(g.isGhost){const orig=findOriginalGroup(g.originalId);if(orig)g=orig;}
   // ★レビュー修正ラウンド1・Critical C-1: deleteFromDetailと同じ理由。
-  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから削除してください');return;}
+  if(isGroupPending(g)){showMessage('この予定はまだ送信中です。送信が終わってから削除してください');return;}
   if(!confirm('この日報を削除しますか？'))return;
   setLoading(true);
   try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'delete',ids:[...new Set(g.ids)],updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){document.getElementById('cal-day-modal').classList.remove('active');removeLocalByIds([...new Set(g.ids)]);refreshInBackground();}
-    else alert('削除エラー：'+json.message);}catch(e){alert('削除エラー：'+e.message);}
+    else showMessage('削除エラー：'+json.message);}catch(e){showMessage('削除エラー：'+e.message);}
   setLoading(false);
 }
 
@@ -5131,7 +5243,7 @@ function openEditModal(idx,groupsOverride){
   // ★レビュー修正ラウンド2・Critical C-1: 単一編集の入口（詳細画面の編集・
   // 現場管理タブの編集ボタン）を一元的に塞ぐ。取りこぼしても最終的にsaveEdit側の
   // ガードで止まるが、ここで止めれば編集モーダルすら開かないぶん体験が良い。
-  if(isGroupPending(g)){alert('この予定はまだ送信中です。送信が終わってから編集してください');return;}
+  if(isGroupPending(g)){showMessage('この予定はまだ送信中です。送信が終わってから編集してください');return;}
   bulkEditMode=false;
   editIds=[...new Set(g.ids)];editDate=g.date;
   window._editIds=editIds;window._editDates=[editDate];
@@ -5182,29 +5294,29 @@ async function saveEdit(){
   // 必ずここを通る）。取りこぼしを防ぐ唯一の場所として、ここで最終的に塞ぐ
   // （openEditModal/openBulkEditModal側にも早期ガードを入れて開かせない
   // ようにするが、それらは利便性のためであり、正しさの根拠はここにある）。
-  if(isGroupPending({ids:editIds})){alert('チェックした（または開いた）予定の中に、まだ送信中のものが含まれています。送信が終わってから保存してください');return;}
+  if(isGroupPending({ids:editIds})){showMessage('チェックした（または開いた）予定の中に、まだ送信中のものが含まれています。送信が終わってから保存してください');return;}
   const genba=getGenbaValue('e');const loc=document.getElementById('e-location').value.trim();
   const start=document.getElementById('e-start').value;const end=document.getElementById('e-end').value;
   const kosu=1.0;const memo=document.getElementById('e-memo').value;
   const leader=document.getElementById('e-leader').value;const mode=modeState.e;
   const yasumi=mode==='yasumi';const yakin=mode==='yakin';const souko=mode==='souko';const yotei=mode==='yotei';
   const _eWtVal=(document.getElementById('e-work-type')||{}).value||'';
-  if(!_eWtVal){alert('作業区分を選択してください');return;}
-  if(!yasumi && !souko && !genba){alert('元請名は必須です（休み・倉庫モード時は不要）');return;}
+  if(!_eWtVal){showMessage('作業区分を選択してください');return;}
+  if(!yasumi && !souko && !genba){showMessage('元請名は必須です（休み・倉庫モード時は不要）');return;}
   // 倉庫モードのとき、倉庫作業タスクが1つ以上選ばれているか（メモ欄に格納）
   if(souko){
     const tasks=parseSoukoTasks(memo);
     if(tasks.length===0){
-      alert('倉庫作業を1つ以上選んでください');
+      showMessage('倉庫作業を1つ以上選んでください');
       const err=document.getElementById('e-souko-tasks-error');
       if(err)err.style.display='';
       return;
     }
   }
-  if(!leader){alert('責任者を選択してください');return;}
-  if(!getUsername()){alert('編集者の名前が未設定です。事務タブの「操作者名」から名前を設定してください');openUsernameModal();return;}
+  if(!leader){showMessage('責任者を選択してください');return;}
+  if(!getUsername()){showMessage('編集者の名前が未設定です。事務タブの「操作者名」から名前を設定してください');openUsernameModal();return;}
   if(!yasumi){
-    if(!yakin&&start&&end&&start>=end){alert('退勤時刻が出勤時刻以下です。時間を確認してください');return;}
+    if(!yakin&&start&&end&&start>=end){showMessage('退勤時刻が出勤時刻以下です。時間を確認してください');return;}
   }
   const _butai=readButai('e');
   const members=[{name:leader,role:'代表',butai:_butai}];const shokunin=getShokunin();
@@ -5220,7 +5332,7 @@ async function saveEdit(){
     dates=editDates;
   }else{
     const editedDate=document.getElementById('e-date').value;
-    if(!editedDate){alert('作業日が空です');return;}
+    if(!editedDate){showMessage('作業日が空です');return;}
     dates=[editedDate];
   }
   const excludeIds=new Set(editIds||[]);
@@ -5267,7 +5379,7 @@ async function saveEdit(){
   btn.textContent='保存中...';btn.disabled=true;
   try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update',ids:editIds,rows}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){closeEditModal();bulkEditMode=false;removeLocalByIds(editIds);addLocalRows(rows);renderGmList();refreshCalDayIfOpen();refreshInBackground(renderGmList);}
-    else alert('保存エラー：'+json.message);}catch(e){alert('保存エラー：'+e.message);}
+    else showMessage('保存エラー：'+json.message);}catch(e){showMessage('保存エラー：'+e.message);}
   btn.textContent='保存する';btn.disabled=false;
 }
 
@@ -5461,7 +5573,7 @@ function openBulkEditModal(){
   const targets=checked.map(c=>groups[Number(c.dataset.idx)]).filter(Boolean);if(targets.length===0)return;
   // ★レビュー修正ラウンド2・Critical C-1: 一括編集はopenEditModalを経由しない
   // 別経路（機械的な洗い出しで判明）。ここにも同じガードが要る。
-  if(targets.some(isGroupPending)){alert('チェックした中に、まだ送信中の予定が含まれています。送信が終わってから編集してください');return;}
+  if(targets.some(isGroupPending)){showMessage('チェックした中に、まだ送信中の予定が含まれています。送信が終わってから編集してください');return;}
   bulkEditMode=true;editIds=[...new Set(targets.flatMap(g=>g.ids))];editDates=[...new Set(targets.map(g=>g.date))];
   window._editIds=editIds;window._editDates=editDates;
   // 一括編集時は作業日フィールドを非表示（複数日まとめて単一日付に変えるのは UI として複雑なので未対応）
@@ -5493,11 +5605,11 @@ async function deleteGmChecked(){
   // どのモードもrenderGmList経由でこのボタンを共有する）はfilteredNippos()ベースで
   // 未送信を除外していないため、未送信の日も普通にチェック対象へ出てくる。
   // チェックした中に未送信が1件でも含まれていたら、確認ダイアログの前に弾く。
-  if(targets.some(isGroupPending)){alert('チェックした中に、まだ送信中の予定が含まれています。送信が終わってから削除してください');return;}
+  if(targets.some(isGroupPending)){showMessage('チェックした中に、まだ送信中の予定が含まれています。送信が終わってから削除してください');return;}
   if(!confirm(`${targets.map(g=>formatDate(g.date)).join('、')}\nを削除しますか？`))return;
   const ids=[...new Set(targets.flatMap(g=>g.ids))];setLoading(true);
   try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'delete',ids,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();if(json.status==='ok'){removeLocalByIds(ids);renderGmList();refreshInBackground(renderGmList);}else alert('削除エラー：'+json.message);}catch(e){alert('削除エラー：'+e.message);}
+    const json=await res.json();if(json.status==='ok'){removeLocalByIds(ids);renderGmList();refreshInBackground(renderGmList);}else showMessage('削除エラー：'+json.message);}catch(e){showMessage('削除エラー：'+e.message);}
   setLoading(false);
 }
 
@@ -5704,13 +5816,13 @@ async function onBillingMethodChange(el){
   try{
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update_site_billing_method',genba,loc,method,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status!=='ok'){alert('方式の保存に失敗：'+(json.message||''));renderBillingTable();return;}
+    if(json.status!=='ok'){showMessage('方式の保存に失敗：'+(json.message||''));renderBillingTable();return;}
     const j=(allJobsites||[]).find(x=>x.genba===genba&&x.loc===loc);
     if(j)j.billingMethod=method; else (allJobsites=allJobsites||[]).push({genba,loc,billingMethod:method});
     // ★2026-08-24修正4: D1切替後に他画面が古いbillingMethodを読まないよう、裏でsyncしておく
     // （レビュー指摘: この経路だけ同期が抜けていた）。
     refreshInBackground();
-  }catch(e){console.error(e);alert('方式の保存に失敗しました（通信エラー）');renderBillingTable();return;}
+  }catch(e){console.error(e);showMessage('方式の保存に失敗しました（通信エラー）');renderBillingTable();return;}
   renderBillingTable();
 }
 
@@ -5733,7 +5845,7 @@ function updateBillingTotal(){
 async function exportBillingXlsx(){
   const genba=document.getElementById('bill-genba').value;
   const month=document.getElementById('bill-month').value;
-  if(!genba||!month){alert('元請と月を選んでください');return;}
+  if(!genba||!month){showMessage('元請と月を選んでください');return;}
   const btn=document.getElementById('bill-export-btn');
   btn.disabled=true;btn.textContent='出力中...';
   try{
@@ -5756,7 +5868,7 @@ async function exportBillingXlsx(){
     // 3) xlsx生成リクエスト
     const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'generate_billing_calc_xlsx',genba,month,lines}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status!=='ok'){alert('出力エラー：'+json.message);return;}
+    if(json.status!=='ok'){showMessage('出力エラー：'+json.message);return;}
     // 4) base64 を Blob 化してダウンロード
     const bin=atob(json.base64);
     const bytes=new Uint8Array(bin.length);
@@ -5768,7 +5880,7 @@ async function exportBillingXlsx(){
     // 5) 保存済み単価をローカルにも反映（元請×現場）
     for(const key of Object.keys(billingDirty)){const[g,l]=key.split('|||');const hit=billingRates.find(r=>r.genba===g&&r.loc===l);if(hit)hit.rate=Number(billingDirty[key]);else billingRates.push({genba:g,loc:l,rate:Number(billingDirty[key])});}
     billingDirty={};
-  }catch(e){alert('出力エラー：'+e.message);}
+  }catch(e){showMessage('出力エラー：'+e.message);}
   finally{btn.disabled=false;btn.textContent='Excelで出力（関数入り）';}
 }
 
@@ -6231,7 +6343,7 @@ function availToInput(){
   //   押せてしまう。**押した瞬間にも条件が変わっていないか確かめる。**
   if(availPickKey()!==availPickedKey){
     availPicked=[];availPickedKey='';renderAvailDay();
-    alert('日付か会社が変わったので、選び直してください。');
+    showMessage('日付か会社が変わったので、選び直してください。');
     return;
   }
   const d=(document.getElementById('avail-day')||{}).value||'';
@@ -6243,7 +6355,7 @@ function availToInput(){
   //   **ちょうど1件でなければ進めない。**黙って先頭を採らない。
   const ambiguous=picked.filter(n=>shokunin.filter(x=>x===n).length!==1);
   if(ambiguous.length){
-    alert('同じ名前の人が名簿に複数います（'+ambiguous.join('、')
+    showMessage('同じ名前の人が名簿に複数います（'+ambiguous.join('、')
       +'）。どちらか分からないので、この画面からは作れません。'
       +'日報入力から手で選んでください。');
     return;
@@ -6594,7 +6706,7 @@ function renderPeriodKakunin(){
 function pkExportXlsx(){
   const f=(document.getElementById('pk-from')||{}).value||'';
   const t=(document.getElementById('pk-to')||{}).value||'';
-  if(!f||!t){alert('開始日と終了日を選んでください');return;}
+  if(!f||!t){showMessage('開始日と終了日を選んでください');return;}
   const a=document.getElementById('csv-date-from'),b=document.getElementById('csv-date-to');
   if(a)a.value=f;if(b)b.value=t;
   downloadPeriodKakuninXlsx();
@@ -6653,7 +6765,7 @@ async function summarizeThenView(){
     const json=await res.json();
     if(json.status!=='ok')throw new Error(json.message||'集計に失敗しました');
   }catch(e){
-    alert('集計エラー：'+e.message);
+    showMessage('集計エラー：'+e.message);
     btn.disabled=false;btn.textContent='集計を更新して見る';return;
   }
   btn.disabled=false;btn.textContent='集計を更新して見る';
@@ -6690,7 +6802,7 @@ async function downloadSheetXlsx(){
   const sheetName=document.getElementById('csv-sheet').value;const btn=document.getElementById('csv-btn');btn.textContent='生成中...';btn.disabled=true;
   const dateFrom=(document.getElementById('csv-date-from')||{}).value||'';
   const dateTo=(document.getElementById('csv-date-to')||{}).value||'';
-  if(dateFrom && dateTo && dateFrom > dateTo){alert('開始日が終了日より後です');btn.textContent='Excelでダウンロード';btn.disabled=false;return;}
+  if(dateFrom && dateTo && dateFrom > dateTo){showMessage('開始日が終了日より後です');btn.textContent='Excelでダウンロード';btn.disabled=false;return;}
   const reqBody={action:'export_sheet_xlsx',sheet:sheetName};
   if(dateFrom)reqBody.dateFrom=dateFrom;
   if(dateTo)reqBody.dateTo=dateTo;
@@ -6698,7 +6810,7 @@ async function downloadSheetXlsx(){
     const json=await res.json();
     if(json.status==='ok'&&json.base64){
       _downloadBase64Xlsx(json.base64,json.filename||`${sheetName}.xlsx`);
-    }else alert('エラー：'+(json.message||'不明'));}catch(e){alert('エラー：'+e.message);}
+    }else showMessage('エラー：'+(json.message||'不明'));}catch(e){showMessage('エラー：'+e.message);}
   btn.textContent='Excelでダウンロード';btn.disabled=false;
 }
 
@@ -6721,8 +6833,8 @@ async function downloadPeriodKakuninXlsx(){
   const btn=document.getElementById('period-kakunin-xlsx-btn');
   const dateFrom=(document.getElementById('csv-date-from')||{}).value||'';
   const dateTo=(document.getElementById('csv-date-to')||{}).value||'';
-  if(!dateFrom||!dateTo){alert('期間指定のxlsxは開始日と終了日の両方を指定してください');return;}
-  if(dateFrom>dateTo){alert('開始日が終了日より後です');return;}
+  if(!dateFrom||!dateTo){showMessage('期間指定のxlsxは開始日と終了日の両方を指定してください');return;}
+  if(dateFrom>dateTo){showMessage('開始日が終了日より後です');return;}
   btn.textContent='生成中...';btn.disabled=true;
   const reqBody={action:'export_period_kakunin_xlsx',dateFrom,dateTo};
   if(currentCompany&&currentCompany!=='全社')reqBody.company=currentCompany;
@@ -6731,21 +6843,21 @@ async function downloadPeriodKakuninXlsx(){
     const json=await res.json();
     if(json.status==='ok'&&json.base64){
       _downloadBase64Xlsx(json.base64,json.filename||'期間集計.xlsx');
-    }else alert('エラー：'+(json.message||'不明'));
-  }catch(e){alert('エラー：'+e.message);}
+    }else showMessage('エラー：'+(json.message||'不明'));
+  }catch(e){showMessage('エラー：'+e.message);}
   btn.textContent='期間指定でExcel出力';btn.disabled=false;
 }
 
 async function runSummary(){
   const btn=document.getElementById('summary-btn');btn.textContent='集計中...';btn.disabled=true;
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'summarize'}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();if(json.status==='ok')alert('集計シートを更新しました！');else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+    const json=await res.json();if(json.status==='ok')showMessage('集計シートを更新しました！');else showMessage('エラー：'+json.message);}catch(e){showMessage('エラー：'+e.message);}
   btn.textContent='集計を更新';btn.disabled=false;
 }
 async function archiveOldData(){
   if(!confirm('3ヶ月以上前のデータをアーカイブします。\n\n★これは全社ぶんです。今見ている会社だけでなく、\n和信カインド・ラーテルなど他の会社の古い予定も一緒に移動します。\n（消えるのではなくアーカイブシートへ移ります）\n\nよろしいですか？'))return;
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'archive',months:3,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();if(json.status==='ok'){alert(`${json.archived}件をアーカイブしました`);await refreshInBackground();}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+    const json=await res.json();if(json.status==='ok'){showMessage(`${json.archived}件をアーカイブしました`);await refreshInBackground();}else showMessage('エラー：'+json.message);}catch(e){showMessage('エラー：'+e.message);}
 }
 
 // ===== 工番クリーンアップ =====
@@ -6756,10 +6868,10 @@ async function runJobNoCleanup(){
     const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'cleanup_orphan_jobnos',updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'){
-      alert(`✓ ${json.cleaned}件の工番・事業部をクリアしました`);
+      showMessage(`✓ ${json.cleaned}件の工番・事業部をクリアしました`);
       await refreshInBackground();
-    }else alert('エラー: '+json.message);
-  }catch(e){alert('エラー: '+e.message);}
+    }else showMessage('エラー: '+json.message);
+  }catch(e){showMessage('エラー: '+e.message);}
   finally{setLoading(false);}
 }
 
@@ -6796,19 +6908,19 @@ function updateMergePreview(){
 async function runMergeGenba(){
   const from=document.getElementById('merge-from').value;
   const to=document.getElementById('merge-to').value;
-  if(!from||!to){alert('「統合する元請」と「残す元請」両方を選んでください');return;}
-  if(from===to){alert('同じ元請名です');return;}
+  if(!from||!to){showMessage('「統合する元請」と「残す元請」両方を選んでください');return;}
+  if(from===to){showMessage('同じ元請名です');return;}
   if(!confirm(`本当に統合しますか？\n\n「${from}」→「${to}」\n\nこの操作は取り消せません。`))return;
   try{
     setLoading(true);
     const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'merge_genba',from,to,updatedBy:getUsername()}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'){
-      alert(`✓ マージ完了\n\n日報更新: ${json.nippoUpdated||0}件\nアーカイブ更新: ${json.archiveUpdated||0}件\n現場マスタ更新: ${json.jobsiteUpdated||0}件\n元請マスタ: ${json.masterAction||'-'}`);
+      showMessage(`✓ マージ完了\n\n日報更新: ${json.nippoUpdated||0}件\nアーカイブ更新: ${json.archiveUpdated||0}件\n現場マスタ更新: ${json.jobsiteUpdated||0}件\n元請マスタ: ${json.masterAction||'-'}`);
       document.getElementById('merge-genba-modal').classList.remove('active');
       await refreshInBackground();
-    }else alert('エラー: '+json.message);
-  }catch(e){alert('エラー: '+e.message);}
+    }else showMessage('エラー: '+json.message);
+  }catch(e){showMessage('エラー: '+e.message);}
   finally{setLoading(false);}
 }
 
@@ -6910,11 +7022,11 @@ async function runMergeLocChoice(keep){
     const json=await res.json();
     if(json.status==='ok'){
       const masterMsg={deleted_duplicate:'統合元行を削除',renamed:'統合元行を改名',to_only:'統合先のみ存在',none:'操作なし'}[json.masterAction]||json.masterAction;
-      alert(`✓ マージ完了\n\n日報更新: ${json.nippoUpdated||0}件\nアーカイブ更新: ${json.archiveUpdated||0}件\n現場マスタ: ${masterMsg}${json.toJobNo?`\n統一された工番: ${json.toJobNo}`:''}`);
+      showMessage(`✓ マージ完了\n\n日報更新: ${json.nippoUpdated||0}件\nアーカイブ更新: ${json.archiveUpdated||0}件\n現場マスタ: ${masterMsg}${json.toJobNo?`\n統一された工番: ${json.toJobNo}`:''}`);
       document.getElementById('merge-loc-modal').classList.remove('active');
       await refreshInBackground();
-    }else alert('エラー: '+json.message);
-  }catch(e){alert('エラー: '+e.message);}
+    }else showMessage('エラー: '+json.message);
+  }catch(e){showMessage('エラー: '+e.message);}
   finally{setLoading(false);}
 }
 
@@ -7059,8 +7171,8 @@ async function saveSiteRevenue(idx,genba,loc){
     const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_site_revenue',genba,loc,revenue}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'){showAlert('売上を保存しました（'+(json.jobNo||'')+'）','ok');}
-    else alert('エラー：'+json.message);
-  }catch(e){alert('エラー：'+e.message);}
+    else showMessage('エラー：'+json.message);
+  }catch(e){showMessage('エラー：'+e.message);}
 }
 
 // ★Codexレビュー[P2]#7: toggleJnfixCompleted は削除した。
@@ -7085,8 +7197,8 @@ async function deleteSiteFromJnfix(genba,loc){
       showAlert(`✓ 「${loc||genba}」を削除しました（工番 ${json.oldJobNo||'-'}）`,'ok');
       await refreshInBackground();
       await openJobNoFix(); // モーダルを再読み込み
-    }else alert('エラー: '+(json.message||'不明'));
-  }catch(e){alert('エラー: '+e.message);}
+    }else showMessage('エラー: '+(json.message||'不明'));
+  }catch(e){showMessage('エラー: '+e.message);}
   finally{setLoading(false);}
 }
 
@@ -7099,12 +7211,12 @@ async function saveJobNoFix(idx,genba,loc){
     const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'reassign_jobno',genba,loc,newDivision:newDiv}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'){
-      if(json.message){alert(json.message);return;}
-      alert(`更新完了\n旧: ${json.oldJobNo}\n新: ${json.newJobNo}\n日報: ${json.updatedRows}行 / アーカイブ: ${json.archivedUpdated||0}行`);
+      if(json.message){showMessage(json.message);return;}
+      showMessage(`更新完了\n旧: ${json.oldJobNo}\n新: ${json.newJobNo}\n日報: ${json.updatedRows}行 / アーカイブ: ${json.archivedUpdated||0}行`);
       await refreshInBackground();
       await openJobNoFix();
-    }else alert('エラー：'+json.message);
-  }catch(e){alert('エラー：'+e.message);}
+    }else showMessage('エラー：'+json.message);
+  }catch(e){showMessage('エラー：'+e.message);}
 }
 
 // ===== 元請セレクト =====
@@ -7216,18 +7328,18 @@ function gfixMarkKeep(gi){
 }
 
 async function gfixMerge(gi,xi){
-  if(gfixBusy){alert('前の処理がまだ終わっていません。少し待ってください。');return;}
+  if(gfixBusy){showMessage('前の処理がまだ終わっていません。少し待ってください。');return;}
   // ★Codexレビュー[P1]（2026-08-31）: 古い画面から実行させない。
   //   通信できずキャッシュを出しているだけのときは、他の人が既に直した後かもしれず、
   //   逆向きに統一して直した内容を巻き戻す事故が起きる。登録・編集と同じ扱いにする。
-  if(!dataLoadOk){alert('最新データを読み込めていないため実行できません。「更新」を押してから、もう一度お試しください。');return;}
+  if(!dataLoadOk){showMessage('最新データを読み込めていないため実行できません。「更新」を押してから、もう一度お試しください。');return;}
   const g=gfixGroups[gi];
   if(!g)return;
   const sel=document.querySelector(`[data-gfixkeep="${gi}"]`);
   const keep=g[sel?Number(sel.value):0];
   const from=g[xi];
   if(!keep||!from)return;
-  if(keep.name===from.name){alert('「残す名前」と同じです。別の名前を選んでください。');return;}
+  if(keep.name===from.name){showMessage('「残す名前」と同じです。別の名前を選んでください。');return;}
   // ★Codexレビュー[P1]: 会社をまたいで書き換わらないようにする。
   //   実データで「不動産」はGRHDに21件、「オリエンス」は和信カインドに114件あった。
   //   グローライズの画面で「1件」と見て実行すると、他社の行まで書き換わっていた。
@@ -7236,7 +7348,7 @@ async function gfixMerge(gi,xi){
   //   通信中に会社を切り替えられると、後始末が別会社に対して走る。
   const targetCompany=currentCompany;
   if(!targetCompany||targetCompany==='全社'){
-    alert('会社を選んでから実行してください。\n（「全社」のままだと、他の会社の同じ名前まで書き換わってしまいます）');
+    showMessage('会社を選んでから実行してください。\n（「全社」のままだと、他の会社の同じ名前まで書き換わってしまいます）');
     return;
   }
   const msg='元請名をそろえます。\n\n'
@@ -7258,7 +7370,7 @@ async function gfixMerge(gi,xi){
       headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
     if(json.status==='ok'){
-      alert('\u2713 統一しました\n\n予定: '+(json.nippoUpdated||0)+'件\nアーカイブ: '+(json.archiveUpdated||0)
+      showMessage('\u2713 統一しました\n\n予定: '+(json.nippoUpdated||0)+'件\nアーカイブ: '+(json.archiveUpdated||0)
         +'件\n現場マスタ: '+(json.jobsiteUpdated||0)+'件');
       // ★残す名前が元請マスタに無いままだと、統一してもプルダウンに出てこない。
       //   GAS側は「消す方」がマスタに載っている時しか改名してくれないので、
@@ -7272,24 +7384,24 @@ async function gfixMerge(gi,xi){
             body:JSON.stringify({action:'add_genba',name:keep.name,company:targetCompany}),
             headers:{'Content-Type':'text/plain'}});
           const j2=await r2.json();
-          if(j2.status!=='ok')alert('登録でエラー: '+(j2.message||'不明'));
-        }catch(e2){alert('登録でエラー: '+e2.message);}
+          if(j2.status!=='ok')showMessage('登録でエラー: '+(j2.message||'不明'));
+        }catch(e2){showMessage('登録でエラー: '+e2.message);}
       }
       await loadData();
-    }else alert('エラー: '+(json.message||'不明なエラー'));
-  }catch(e){alert('エラー: '+e.message);}
+    }else showMessage('エラー: '+(json.message||'不明なエラー'));
+  }catch(e){showMessage('エラー: '+e.message);}
   finally{gfixBusy=false;setLoading&&setLoading(false);}
 }
 
 // 「元請マスタに登録する」
 async function gfixAdd(ui){
-  if(gfixBusy){alert('前の処理がまだ終わっていません。少し待ってください。');return;}
-  if(!dataLoadOk){alert('最新データを読み込めていないため実行できません。「更新」を押してから、もう一度お試しください。');return;}
+  if(gfixBusy){showMessage('前の処理がまだ終わっていません。少し待ってください。');return;}
+  if(!dataLoadOk){showMessage('最新データを読み込めていないため実行できません。「更新」を押してから、もう一度お試しください。');return;}
   const u=gfixUnreg[ui];
   if(!u)return;
   // ★押した時点の会社を握って離さない（通信中に切り替えられても別会社へ登録しない）
   const targetCompany=currentCompany;
-  if(!targetCompany||targetCompany==='全社'){alert('会社を選んでから登録してください');return;}
+  if(!targetCompany||targetCompany==='全社'){showMessage('会社を選んでから登録してください');return;}
   if(!confirm('「'+u.name+'」を '+targetCompany+' の元請マスタに登録しますか？'))return;
   gfixBusy=true;
   try{
@@ -7298,9 +7410,9 @@ async function gfixAdd(ui){
       body:JSON.stringify({action:'add_genba',name:u.name,company:targetCompany}),
       headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status==='ok'){alert('\u2713 登録しました');await loadData();}
-    else alert('エラー: '+json.message);
-  }catch(e){alert('エラー: '+e.message);}
+    if(json.status==='ok'){showMessage('\u2713 登録しました');await loadData();}
+    else showMessage('エラー: '+json.message);
+  }catch(e){showMessage('エラー: '+e.message);}
   finally{gfixBusy=false;setLoading&&setLoading(false);}
 }
 
@@ -7415,7 +7527,7 @@ async function loadSettingsMembers(){
 }
 
 async function openSettings(){
-  if(currentCompany==='全社'){alert('会社を選択してから管理してください');return;}
+  if(currentCompany==='全社'){showMessage('会社を選択してから管理してください');return;}
   document.getElementById('settings-modal').classList.add('active');
   document.getElementById('settings-company-name').textContent=currentCompany;
   const list=document.getElementById('shokunin-list');
@@ -7507,16 +7619,16 @@ async function addShokunin(){
       // ★修正5: D1切替後に他画面が古い職人マスタを読まないよう、裏でsyncしておく
       // （同名の3重登録が実在した原因＝この経路が同期を挟んでいなかったこと）。
       refreshInBackground();
-    }else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+    }else showMessage('エラー：'+json.message);}catch(e){showMessage('エラー：'+e.message);}
 }
 async function removeShokunin(i,company){
   const _co=company||currentCompany;
   const name=getShokunin()[i];if(!confirm(name+'を削除しますか？'))return;
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'remove_member',name,company:_co}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status==='ok'&&json.removed===null){alert('この職人が見つかりませんでした（会社が違う可能性）。画面を更新してからもう一度お試しください。');return;}
+    if(json.status==='ok'&&json.removed===null){showMessage('この職人が見つかりませんでした（会社が違う可能性）。画面を更新してからもう一度お試しください。');return;}
     if(json.status==='ok'){allMembers=allMembers.filter(m=>!(m.name===name&&m.company===_co));if(settingsMembers)settingsMembers=settingsMembers.filter(m=>!(m.name===name&&m.company===currentCompany));renderSettings();initMemberUI();refreshInBackground();}
-    else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+    else showMessage('エラー：'+json.message);}catch(e){showMessage('エラー：'+e.message);}
 }
 // ★2026-08-27 フェーズ1: 既定部隊を保存する。
 //   保存後は settingsMembers（職人管理の自前キャッシュ）と allMembers の両方を
@@ -7525,27 +7637,27 @@ async function updateMemberButai(name,company,butai){
   try{
     const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_butai',name,company,butai}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status!=='ok'){alert('エラー：'+(json.message||'不明'));renderSettings();return;}
+    if(json.status!=='ok'){showMessage('エラー：'+(json.message||'不明'));renderSettings();return;}
     const sm=settingsMembers&&settingsMembers.find(m=>m.name===name&&m.company===company);
     if(sm)sm.butai=butai;
     const am=(allMembers||[]).find(m=>m.name===name&&m.company===company);
     if(am)am.butai=butai;
     renderSettings();
     refreshInBackground();
-  }catch(e){alert('エラー：'+e.message);renderSettings();}
+  }catch(e){showMessage('エラー：'+e.message);renderSettings();}
 }
 // 有効/無効。★削除ではない。過去の予定はそのまま残り、空き人員のリストに出なくなるだけ。
 async function updateMemberActive(name,company,active){
   try{
     const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_active',name,company,active}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();
-    if(json.status!=='ok'){alert('エラー：'+(json.message||'不明'));renderSettings();return;}
+    if(json.status!=='ok'){showMessage('エラー：'+(json.message||'不明'));renderSettings();return;}
     const sm=settingsMembers&&settingsMembers.find(m=>m.name===name&&m.company===company);
     if(sm)sm.active=active;
     const am=(allMembers||[]).find(m=>m.name===name&&m.company===company);
     if(am)am.active=active;
     refreshInBackground();
-  }catch(e){alert('エラー：'+e.message);renderSettings();}
+  }catch(e){showMessage('エラー：'+e.message);renderSettings();}
 }
 async function updateMemberDivision(name,division,company){
   const _co=company||currentCompany;
@@ -7556,16 +7668,16 @@ async function updateMemberDivision(name,division,company){
       // ★2026-08-24修正4: D1切替後に他画面が古いdivisionを読まないよう、裏でsyncしておく
       // （レビュー指摘: この経路だけ同期が抜けていた）。
       refreshInBackground();
-    }else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+    }else showMessage('エラー：'+json.message);}catch(e){showMessage('エラー：'+e.message);}
 }
 async function updateMemberRate(name,rateStr){
   const rate=Number(rateStr||0);
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'update_member_rate',name,company:_co,rate}),headers:{'Content-Type':'text/plain'}});
-    const json=await res.json();if(json.status==='ok'){const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.rate=rate;const sm=settingsMembers&&settingsMembers.find(x=>x.name===name&&x.company===currentCompany);if(sm)sm.rate=rate;}else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+    const json=await res.json();if(json.status==='ok'){const m=allMembers.find(x=>x.name===name&&x.company===currentCompany);if(m)m.rate=rate;const sm=settingsMembers&&settingsMembers.find(x=>x.name===name&&x.company===currentCompany);if(sm)sm.rate=rate;}else showMessage('エラー：'+json.message);}catch(e){showMessage('エラー：'+e.message);}
 }
 
 // ===== 元請管理 =====
-function openGenbaSettings(){if(currentCompany==='全社'){alert('会社を選択してから管理してください');return;}renderGenbaSettings();document.getElementById('genba-settings-modal').classList.add('active');}
+function openGenbaSettings(){if(currentCompany==='全社'){showMessage('会社を選択してから管理してください');return;}renderGenbaSettings();document.getElementById('genba-settings-modal').classList.add('active');}
 function closeGenbaSettings(){document.getElementById('genba-settings-modal').classList.remove('active');initGenbaSelects();genbaSettingsOpenedForSelect=null;}
 function renderGenbaSettings(){
   document.getElementById('genba-settings-company-name').textContent=currentCompany;
@@ -7585,14 +7697,14 @@ async function addGenbaMaster(){
       if(genbaSettingsOpenedForSelect){const sel=document.getElementById(genbaSettingsOpenedForSelect);if(sel)sel.value=v;const prefix=genbaSettingsOpenedForSelect==='s-genba-select'?'s':genbaSettingsOpenedForSelect==='e-genba-select'?'e':null;if(prefix)onGenbaSelect(prefix);genbaSettingsOpenedForSelect=null;}
       // ★修正5: D1切替後に他画面が古い元請マスタを読まないよう、裏でsyncしておく
       refreshInBackground();
-    }else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+    }else showMessage('エラー：'+json.message);}catch(e){showMessage('エラー：'+e.message);}
 }
 async function removeGenbaMaster(i){
   const list=allGenbaMaster.filter(g=>g.company===currentCompany||!g.company);const g=list[i];if(!g)return;
   if(!confirm(g.name+'を削除しますか？'))return;const delCompany=g.company||'';
   try{const res=await fetch(GAS_URL,{method:'POST',body:JSON.stringify({action:'remove_genba',name:g.name,company:delCompany}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){allGenbaMaster=allGenbaMaster.filter(x=>!(x.name===g.name&&(x.company||'')===delCompany));renderGenbaSettings();initGenbaSelects();refreshInBackground();}
-    else alert('エラー：'+json.message);}catch(e){alert('エラー：'+e.message);}
+    else showMessage('エラー：'+json.message);}catch(e){showMessage('エラー：'+e.message);}
 }
 </script>
 </body>
