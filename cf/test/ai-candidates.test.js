@@ -180,8 +180,12 @@ describe('renderAvailDay の描く順番', () => {
       const i = src.indexOf('function goToCalendarDate');
       // ★コメントに「renderList()」と書いてあるだけで落ちないよう、
       //   コメント行を落としてから中身を見る。
+      // ★2026-09-05: 行を分けるのは /\r?\n/ で。'\n' だけで分けると、
+      //   Windowsのチェックアウト（改行がCRLF）では行末に \r が残る。
+      //   /\/\/.*$/ の「.」は \r に当たらないのでコメントが1文字も消えず、
+      //   コメントの中の「renderList()」を拾ってこのテストが必ず落ちていた。
       const body = src.slice(i, src.indexOf('\n}', i))
-        .split('\n').map(function (L) { return L.replace(/\/\/.*$/, ''); }).join('\n');
+        .split(/\r?\n/).map(function (L) { return L.replace(/\/\/.*$/, ''); }).join('\n');
       expect(body).toContain("switchTab('list')");
       expect(body).not.toContain('renderList()');
     });
