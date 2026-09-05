@@ -4451,11 +4451,15 @@ function inheritYakinFlags(ids,name){
 //   { 氏名: { mode:''|'夜勤'|'日勤', teate:''|'対象'|'対象外', seikyu:''|'対象'|'対象外' } }
 //   mode が空なら現場全体の🌙夜勤トグルに従う。teate/seikyu が空なら自動判定。
 let editYakinOverrides={};
+// 編集画面を開いた時点のグループの夜勤フラグ。保存時に「利用者が🌙を切り替えたか」を見る。
+let editOrigGroupYakin=false;
 
 // 編集モーダルを開いたときに、保存済みの値をこの箱へ読み戻す。
 // 読み戻さないと、モーダルを開いて保存し直しただけで設定が消える。
 function loadEditYakinOverrides(g){
   editYakinOverrides={};
+  editYakinTouched={};   // ★開き直したら「触った」印は消す
+  editOrigGroupYakin=!!g.yakin;
   const groupYakin=!!g.yakin;
   (g.members||[]).forEach(m=>{
     const self=!!m.yakinSelf;
@@ -4477,9 +4481,27 @@ function currentEditMemberNames(){
   return names;
 }
 
+// ★2026-09-05 Codexレビュー[P1]#3 の修正:
+//   一括編集は代表1日ぶんの設定でパネルを作り、それを**全日へ配って**いた。
+//   9/1は「対象外」・9/2は「自動」の人を2日まとめて時刻だけ直すと、
+//   触ってもいない夜勤設定が片方に揃えられて、日ごとの例外が黙って消えていた。
+//   → **利用者が実際に触った欄だけ**を全日へ適用し、触っていない欄は
+//     その日の元の行の値をそのまま残す。
+let editYakinTouched={};
+
 function setEditYakinOverride(name,field,value){
   if(!editYakinOverrides[name])editYakinOverrides[name]={mode:'',teate:'',seikyu:''};
   editYakinOverrides[name][field]=value;
+  if(!editYakinTouched[name])editYakinTouched[name]={};
+  editYakinTouched[name][field]=true;
+}
+
+// 画面の選択欄から呼ばれる入口。氏名ではなく**並び順の番号**で引く。
+// 氏名を onchange の文字列へ埋め込むと引用符で壊れるため（2026-09-04の検品で発覚）。
+function setEditYakinOverrideAt(i,field,value){
+  const name=currentEditMemberNames()[i];
+  if(!name)return;
+  setEditYakinOverride(name,field,value);
 }
 
 function renderEditYakinPanel(){
@@ -4489,14 +4511,24 @@ function renderEditYakinPanel(){
   const names=currentEditMemberNames();
   if(names.length===0){panel.style.display='none';wrap.innerHTML='';return;}
   panel.style.display='block';
+  // ★2026-09-04 検品で見つけた不具合(1) 見た目:
+  //   このアプリは先頭のCSSで select を全部 width:100% にしている。
+  //   width:auto;margin:0 を付けないと選択欄が横いっぱいに広がり、1人で3行ぶん縦に伸びる。
+  //   案件ステータス・部隊の選択欄も同じ書き方で回避している。
+  const SELST='width:auto;margin:0;font-size:12px;padding:4px 6px;border:1px solid #C7D0EA;border-radius:6px;background:#fff';
+  // ★不具合(2) 氏名の埋め込み:
+  //   氏名を onchange の文字列に直接埋め込んでいたが、JSの "\'" は ' そのものなので
+  //   置換が無意味で、アポストロフィを含む名前でその行が壊れた。
+  //   名前を埋め込むのをやめ、**並び順の番号で引く**形にした。引用符の心配が消える。
   const sel=(name,field,opts)=>{
     const cur=(editYakinOverrides[name]||{})[field]||'';
-    const o=opts.map(([v,label])=>`<option value="${v}"${v===cur?' selected':''}>${label}</option>`).join('');
-    return `<select onchange="setEditYakinOverride('${String(name).replace(/'/g,"\'")}','${field}',this.value)" style="font-size:12px;padding:4px 6px;border:1px solid #C7D0EA;border-radius:6px;background:#fff">${o}</select>`;
+    const i=names.indexOf(name);
+    const o=opts.map(([v,label])=>`<option value="${v}"${v===cur?' selected':''}>${esc(label)}</option>`).join('');
+    return `<select onchange="setEditYakinOverrideAt(${i},'${field}',this.value)" style="${SELST}">${o}</select>`;
   };
   wrap.innerHTML=names.map(name=>`
-    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 0;border-top:1px solid #DDE3F2">
-      <span style="min-width:76px;font-weight:700;font-size:13px;color:#2B3A67">${name}</span>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 0;border-top:1px solid #DDE3F2">
+      <span style="min-width:72px;font-weight:700;font-size:13px;color:#2B3A67">${esc(name)}</span>
       <span style="font-size:11px;color:#4A5878">勤務</span>${sel(name,'mode',[['','現場に合わせる'],['夜勤','夜勤'],['日勤','日勤']])}
       <span style="font-size:11px;color:#4A5878">手当</span>${sel(name,'teate',[['','自動'],['対象','対象'],['対象外','対象外']])}
       <span style="font-size:11px;color:#4A5878">請求</span>${sel(name,'seikyu',[['','自動'],['対象','対象'],['対象外','対象外']])}
@@ -4507,16 +4539,22 @@ function renderEditYakinPanel(){
 //   パネル（e-yakin-panel）は編集モーダルを開いた時点で保存済みの値を読み戻しているので、
 //   その人の行がパネルにあればパネルの値が正（＝「自動」に戻す操作もちゃんと保存される）。
 //   編集中に新しく足した人だけ、元の行から引き継ぐ。
-function resolveMemberYakin(name,groupYakin){
-  const ov=editYakinOverrides[name];
-  if(ov){
-    return {
-      yakin: ov.mode==='夜勤'?true:ov.mode==='日勤'?false:!!groupYakin,
-      teate: ov.teate||'', seikyu: ov.seikyu||''
-    };
+function resolveMemberYakin(name,groupYakin,date){
+  // その人・その日の元の行（無ければその人の元の行）。日ごとの値を潰さないため日付で探す。
+  const src=(allNippos||[]).find(n=>!n.isGhost&&(editIds||[]).includes(n.id)&&n.name===name&&n.date===date)
+         || (allNippos||[]).find(n=>!n.isGhost&&(editIds||[]).includes(n.id)&&n.name===name);
+  const t=editYakinTouched[name]||{};
+  const ov=editYakinOverrides[name]||{};
+  const pick=(field)=> t[field] ? (ov[field]||'') : (src?String((field==='teate'?src.yakinTeate:src.yakinSeikyu)||''):'');
+  let yakin;
+  if(t.mode){
+    yakin = ov.mode==='夜勤'?true: ov.mode==='日勤'?false: !!groupYakin;
+  }else{
+    // 触っていないなら、利用者が🌙夜勤そのものを切り替えたときだけ全員へ適用する
+    const switched=(!!groupYakin)!==(!!editOrigGroupYakin);
+    yakin = switched ? !!groupYakin : (src?!!src.yakin:!!groupYakin);
   }
-  const inh=inheritYakinFlags(editIds,name);
-  return {yakin:!!groupYakin,teate:inh.yakinTeate,seikyu:inh.yakinSeikyu};
+  return {yakin:yakin, teate:pick('teate'), seikyu:pick('seikyu')};
 }
 
 function groupNippos(nippos){
@@ -5225,7 +5263,7 @@ async function saveEdit(){
   }
   const rows=[];
   // ★2026-09-03 夜勤は作業員ごとに解決する（現場全体は夜勤でもAさんだけ日勤、が有りうる）
-  dates.forEach(date=>{const newId=uuid();members.forEach(m=>{const _y=resolveMemberYakin(m.name,yakin);rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:yasumi?0:kosu,memo,yakin:_y.yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company),butai:resolveEditButai(date),yakinTeate:_y.teate,yakinSeikyu:_y.seikyu});});});
+  dates.forEach(date=>{const newId=uuid();members.forEach(m=>{const _y=resolveMemberYakin(m.name,yakin,date);rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:yasumi?0:kosu,memo,yakin:_y.yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company),butai:resolveEditButai(date),yakinTeate:_y.teate,yakinSeikyu:_y.seikyu});});});
   btn.textContent='保存中...';btn.disabled=true;
   try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update',ids:editIds,rows}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){closeEditModal();bulkEditMode=false;removeLocalByIds(editIds);addLocalRows(rows);renderGmList();refreshCalDayIfOpen();refreshInBackground(renderGmList);}

@@ -2510,6 +2510,20 @@ function yakinNeedsCheck_(rec) {
 
 // ========== 集計機能 ==========
 
+// 集計の1工程を、名前と所要秒数つきで実行する。
+// 失敗したら「どの工程か」を付けて投げ直す（画面にもその文言が出る）。
+function runSummaryStep_(label, fn) {
+  const t0 = new Date().getTime();
+  try {
+    fn();
+    Logger.log('集計OK: ' + label + ' ' + ((new Date().getTime() - t0) / 1000).toFixed(1) + '秒');
+  } catch (e) {
+    const sec = ((new Date().getTime() - t0) / 1000).toFixed(1);
+    Logger.log('集計NG: ' + label + ' ' + sec + '秒 ' + (e && e.message ? e.message : e));
+    throw new Error('「' + label + '」で失敗しました（' + sec + '秒）: ' + (e && e.message ? e.message : e));
+  }
+}
+
 function generateSummary_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const tz = Session.getScriptTimeZone();
@@ -2561,18 +2575,22 @@ function generateSummary_() {
     snapshotLock.releaseLock();
   }
 
-  generateCompanySummary_(ss, mainRecords);
-  generateMonthSummary_(ss, mainRecords);
-  generateBillingSummary_(ss, mainRecords);
-  generateBillingFilterSheet_(ss, mainRecords);
-  // ★2026-09-03 作業者日別明細は請求系と同じ「現在のデータ」を見る（アーカイブは含めない）
-  generateWorkerDetailSheet_(ss, mainRecords);
-
+  // ★2026-09-05 どの工程で落ちたか分かるようにした。
+  //   これが無かったせいで、本番で集計が落ちたときに画面には
+  //   「集計エラー：Failed to fetch」としか出ず、実行ログにも何も残らず、
+  //   どのシートの処理で死んだのかを外から推測するしかなかった。
+  //   工程名と所要秒数を必ず残し、例外は工程名を付けて投げ直す。
   const allRecords = [...mainRecords, ...archiveRecords];
-  generateKakuninTable_(ss, allRecords);
-  // ★2026-09-03 夜勤確認表は月別確認表と同じ母集団・同じ月の窓で作る（並べて突き合わせるため）
-  generateNightKakuninTable_(ss, allRecords);
-  generateDivisionAllocation_(ss, allRecords);
+  runSummaryStep_('会社別集計',            () => generateCompanySummary_(ss, mainRecords));
+  runSummaryStep_('月別集計',              () => generateMonthSummary_(ss, mainRecords));
+  runSummaryStep_('元請別請求集計',        () => generateBillingSummary_(ss, mainRecords));
+  runSummaryStep_('元請別請求集計_フィルタ用', () => generateBillingFilterSheet_(ss, mainRecords));
+  // 作業者日別明細は請求系と同じ「現在のデータ」を見る（アーカイブは含めない）
+  runSummaryStep_('作業者日別明細',        () => generateWorkerDetailSheet_(ss, mainRecords));
+  runSummaryStep_('月別確認表',            () => generateKakuninTable_(ss, allRecords));
+  // 夜勤確認表は月別確認表と同じ母集団・同じ月の窓で作る（並べて突き合わせるため）
+  runSummaryStep_('夜勤確認表',            () => generateNightKakuninTable_(ss, allRecords));
+  runSummaryStep_('事業部別按分',          () => generateDivisionAllocation_(ss, allRecords));
 
   // 孤立現場の削除は保存処理と競合するため、管理画面の手動操作だけで行う。
 }
@@ -3371,18 +3389,21 @@ function generateBillingFilterSheet_(ss, records) {
   //   日勤人工／夜勤人工がそのまま出る。
   //   夜勤請求列は「元請へ夜勤応援として請求するか」。空欄＝自動判定なので、
   //   その区分のレコードが全部対象なら ○、一部だけなら 一部 と出す。
-  const CLASSES = [
-    { label: '日勤', isNight: false },
-    { label: '夜勤', isNight: true }
+  // ★2026-09-05 Codexレビュー[P1]#4 の修正:
+  //   当初は勤務区分だけで行を分け、夜勤請求は ○ / 一部 / 空 の表示だけにしていた。
+  //   すると「一部」の行の合計に請求対象外の日が混ざり、**請求人工を機械で拾えない**
+  //   （依頼の目的そのものが達成できない）。
+  //   → 請求対象かどうかでも行を分ける。これで「勤務区分=夜勤 かつ 夜勤請求=○」で
+  //     絞って合計を足せば、元請へ請求する夜勤応援の人工がそのまま出る。
+  //     「一部」という中途半端な値は出さない。
+  const VARIANTS = [
+    { label: '日勤', isNight: false, billed: false },
+    { label: '日勤', isNight: false, billed: true },
+    { label: '夜勤', isNight: true,  billed: false },
+    { label: '夜勤', isNight: true,  billed: true }
   ];
   function inClass_(r, isNight) {
     return isNight ? (r.yakin === '夜勤') : (r.yakin !== '夜勤');
-  }
-  function seikyuMark_(recs) {
-    if (!recs.length) return '';
-    const on = recs.filter(r => yakinSeikyuOn_(r)).length;
-    if (on === 0) return '';
-    return on === recs.length ? '○' : '一部';
   }
 
   // ヘッダー行
@@ -3414,9 +3435,16 @@ function generateBillingFilterSheet_(ss, records) {
 
     // 1人・1日・1区分ぶんの按分人工。日勤行・夜勤行・合計行のすべてがこれを使う
     // （別々に書くと片方だけ直されて合計が合わなくなる）
-    function kosuOf_(lr, name, dateStr, isNight) {
+    //   wantBilled を渡すと「請求対象の行か / 対象外の行か」で振り分ける。
+    //   ★1人・1日・1区分ぶんの人工は必ずどちらか片方にだけ入る（二重計上しない）。
+    //     同じ日・同じ現場・同じ区分に請求可否の違う行が混ざったら、1つでも対象なら対象側へ寄せる。
+    function kosuOf_(lr, name, dateStr, isNight, wantBilled) {
       const dayRecs = lr.filter(r => r.name === name && r.date === dateStr && inClass_(r, isNight));
       if (!dayRecs.length) return 0;
+      if (wantBilled !== undefined) {
+        const billed = dayRecs.some(r => yakinSeikyuOn_(r));
+        if (billed !== wantBilled) return 0;
+      }
       const dn = isNight ? 'N' : 'D';
       const sCnt = (sitesByPDN[name + '|' + dateStr + '|' + dn] || new Set()).size || 1;
       return 1 / sCnt;
@@ -3434,22 +3462,20 @@ function generateBillingFilterSheet_(ss, records) {
 
         // 各人の行（日勤・夜勤で別行。その区分の実働が無ければ行を出さない）
         activeNames.forEach(name => {
-          CLASSES.forEach(cls => {
-            const clsRecs = lr.filter(r => r.name === name && inClass_(r, cls.isNight));
-            if (clsRecs.length === 0) return;
-            const row = [monthLabel, genba, loc, name, cls.label, seikyuMark_(clsRecs)];
+          VARIANTS.forEach(v => {
+            const row = [monthLabel, genba, loc, name, v.label, v.billed ? '○' : ''];
             let rowTotal = 0;
             for (let d = 1; d <= 31; d++) {
               if (d > daysInMonth) { row.push(''); continue; }
               const dateStr = year + '-' + String(mon).padStart(2, '0') + '-' + String(d).padStart(2, '0');
-              const k = kosuOf_(lr, name, dateStr, cls.isNight);
+              const k = kosuOf_(lr, name, dateStr, v.isNight, v.billed);
               row.push(k);
               rowTotal += k;
             }
-            if (rowTotal === 0) return;   // その月に実働が無い区分の行は出さない
+            if (rowTotal === 0) return;   // その月に実働が無い組み合わせの行は出さない
             row.push(rowTotal);
             rows.push(row);
-            if (cls.isNight) nightRowIndices.push(rows.length);
+            if (v.isNight) nightRowIndices.push(rows.length);
           });
         });
 
@@ -3461,6 +3487,7 @@ function generateBillingFilterSheet_(ss, records) {
           const dateStr = year + '-' + String(mon).padStart(2, '0') + '-' + String(d).padStart(2, '0');
           let daySum = 0;
           activeNames.forEach(name => {
+            // 合計行は請求可否を問わない（改修前と同じ数字＝既存の請求運用を壊さない）
             daySum += kosuOf_(lr, name, dateStr, false);
             daySum += kosuOf_(lr, name, dateStr, true);
           });
@@ -3590,16 +3617,33 @@ function generateWorkerDetailSheet_(ss, records) {
     return;
   }
 
+  // ★2026-09-05 出勤・退勤が「1899/12/30 08:00」と出ていた件の修正:
+  //   "08:00" という文字列を書き込むと、スプレッドシートが勝手に時刻値へ変換してしまう。
+  //   **書き込む前に**テキスト書式を指定しないと防げない（後から指定しても値は戻らない）。
+  //   日付・予定IDも同じ理由でテキストにする。
+  sheet.getRange(2, 1, out.length - 1, 1).setNumberFormat('@');       // 日付
+  sheet.getRange(2, 10, out.length - 1, 1).setNumberFormat('@');      // 予定ID
+  sheet.getRange(2, 13, out.length - 1, 2).setNumberFormat('@');      // 出勤・退勤
+
   sheet.getRange(1, 1, out.length, W).setValues(out);
 
   // 1行目の注意書き
   sheet.getRange(1, 1, 1, W).merge().setBackground('#FFF9C4').setFontSize(9).setWrap(true);
-  // ヘッダー行
-  sheet.getRange(2, 1, 1, W).setFontWeight('bold').setBackground('#E8F4FD').setHorizontalAlignment('center');
-  // 要確認の行は赤く塗る（見落とし防止）
-  checkRowIdx.forEach(r => { sheet.getRange(r, 1, 1, W).setBackground('#FFE0E0'); });
 
-  sheet.getRange(2, 1, out.length - 1, 1).setNumberFormat('@');       // 日付はテキスト（Excelでのシリアル化防止）
+  // ★2026-09-04 検品で本番が落ちた原因の修正:
+  //   ここは元々 checkRowIdx.forEach(r => sheet.getRange(r,1,1,W).setBackground(...)) と
+  //   **1行につき1通信**していた。要確認の行が数百あると通信が数百回に達し、
+  //   集計全体が制限時間を超えて「集計エラー」になる。
+  //   これはこのアプリが2026-07-13に一度踏んだ失敗と同じ形
+  //   （引き継ぎ「書式一括化で185秒→約35秒」）。背景色は必ずグリッドで一括に流し込む。
+  const bgGrid = [];
+  for (let i = 0; i < out.length; i++) bgGrid.push(new Array(W).fill('#FFFFFF'));
+  for (let c = 0; c < W; c++) bgGrid[1][c] = '#E8F4FD';            // ヘッダー行
+  checkRowIdx.forEach(r => { for (let c = 0; c < W; c++) bgGrid[r - 1][c] = '#FFE0E0'; });
+  sheet.getRange(1, 1, out.length, W).setBackgrounds(bgGrid);
+  sheet.getRange(1, 1, 1, W).setBackground('#FFF9C4');             // 注意書きの行は塗り直す
+  sheet.getRange(2, 1, 1, W).setFontWeight('bold').setHorizontalAlignment('center');
+
   sheet.getRange(3, 6, out.length - 2, 1).setNumberFormat('0.##').setHorizontalAlignment('center');
   sheet.getRange(3, 7, out.length - 2, 3).setHorizontalAlignment('center');
   sheet.getRange(3, 15, out.length - 2, 1).setHorizontalAlignment('center');
@@ -3614,9 +3658,17 @@ function generateWorkerDetailSheet_(ss, records) {
   sheet.setColumnWidth(15, 60);
 
   sheet.setFrozenRows(2);
-  try { sheet.getRange(2, 1, out.length - 1, W).createFilter(); } catch (e) {}
-  sheet.getRange(2, 1, out.length - 1, W)
-    .setBorder(true, true, true, true, true, true, '#DDDDDD', SpreadsheetApp.BorderStyle.SOLID);
+  // ★2026-09-05 本番で集計が77秒で落ちた件の対策:
+  //   ここは元々「2,667行×15列の全マスに罫線」と「同じ範囲にフィルタ作成」をしていた。
+  //   4万マスへの罫線は Apps Script で極端に重く、明細は行数が毎月増え続けるので、
+  //   放っておけば必ず限界を超える。
+  //   罫線は**ヘッダー行だけ**にし、フィルタは行数が多いときは掛けない。
+  //   （Excelへ出したあとに事務がフィルタを掛ける方が速い）
+  sheet.getRange(2, 1, 1, W)
+    .setBorder(true, true, true, true, true, true, '#BBBBBB', SpreadsheetApp.BorderStyle.SOLID);
+  if (out.length <= 1000) {
+    try { sheet.getRange(2, 1, out.length - 1, W).createFilter(); } catch (e) {}
+  }
 }
 
 // ============================================================
@@ -3676,9 +3728,17 @@ function generateNightKakuninTable_(ss, records) {
         row.push(k);
         if (k > 0) { nights++; total += k; dayTotals[d] += k; }
       }
-      // 会社はその人の夜勤レコードから拾う
-      const anyRec = mr.filter(r => r.name === name && workClass_(r.yakin) === '夜勤')[0];
-      row[2] = anyRec ? (anyRec.company || '') : '';
+      // ★2026-09-05 Codexレビュー[P1]#5 への対応（提案どおりには直さない）:
+      //   指摘は「氏名だけで一意化すると、別会社の同姓同名が1人に合算される」。事実その通り。
+      //   ただし**本人キーを (会社,氏名) に変えると、月別確認表（昔から氏名だけで集計）と
+      //   母集団がずれ、依頼の完了条件「既存の人工合計＝日勤＋夜勤」が崩れる。**
+      //   このアプリは保存時に重複名を改名する仕組み（mergedMemberName_ / 例「柳澤（関東）」）を
+      //   持っており、同姓同名は入口で潰す設計になっている。
+      //   そこで集計は月別確認表と揃えたまま、**会社欄には関わった会社を全部出す**。
+      //   万一2社が混ざったら「グローライズ / 和信カインド」と並んで目に見える。
+      const cos = [...new Set(mr.filter(r => r.name === name && workClass_(r.yakin) === '夜勤')
+        .map(r => r.company).filter(Boolean))];
+      row[2] = cos.join(' / ');
       row.push(nights); row.push(total);
       monthDays += nights; monthKosu += total;
       out.push(row);

@@ -3985,6 +3985,30 @@ function inheritYakinFlags(ids,name){
   return {yakinTeate:src?String(src.yakinTeate||''):'',yakinSeikyu:src?String(src.yakinSeikyu||''):''};
 }
 
+// ★2026-09-05 Codexレビュー[P1]#2・#3 の修正:
+//   現場画面には作業員ごとの夜勤設定のUIが無い。それ自体は方針どおりだが、
+//   保存時に**全員へグループの夜勤フラグを配って**いたため、
+//   「同じ予定でAさんは日勤・Bさんは夜勤」という状態が、
+//   **現場でメモを1行直しただけで全員同じに潰れて**いた。
+//   さらに一括編集では、最初に見つかった1行の設定を全日へコピーしていた。
+//
+//   直し方: 編集画面を開いた時点の夜勤フラグ(editOrigYakin)を覚えておき、
+//   利用者が🌙夜勤を**切り替えたときだけ**全員へ適用する。
+//   切り替えていなければ、**その人・その日の元の行**の設定をそのまま残す。
+let editOrigYakin=false;
+
+function resolveMemberYakinSite(ids,name,date,groupYakin){
+  // 日付まで一致する元の行を探す（一括編集で他の日の設定を潰さないため）
+  const src=(allNippos||[]).find(n=>!n.isGhost&&(ids||[]).includes(n.id)&&n.name===name&&n.date===date)
+         || (allNippos||[]).find(n=>!n.isGhost&&(ids||[]).includes(n.id)&&n.name===name);
+  const switched = (!!groupYakin)!==(!!editOrigYakin);   // 利用者が🌙を触ったか
+  return {
+    yakin: switched ? !!groupYakin : (src?!!src.yakin:!!groupYakin),
+    teate: src?String(src.yakinTeate||''):'',
+    seikyu: src?String(src.yakinSeikyu||''):''
+  };
+}
+
 function groupNippos(nippos){
   const groups={};
   nippos.forEach(n=>{
@@ -4586,6 +4610,7 @@ function openEditModal(idx,groupsOverride){
   document.getElementById('edit-title').textContent=`編集：${formatDate(g.date)} ${g.genba}`;
   const mode=g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'';
   applyMode('e',mode);
+  editOrigYakin=!!g.yakin;   // ★2026-09-05 保存時に「利用者が夜勤を切り替えたのか」を見るため
   const leader=g.members.find(m=>m.role==='代表');
   document.getElementById('e-leader').value=leader?leader.name:'';
   editSelectedMembers=[];
@@ -4727,7 +4752,7 @@ async function saveEdit(){
   const rows=[];
   dates.forEach(date=>{
     const newId=uuid();
-    members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company),butai:resolveEditButai(date),...inheritYakinFlags(editIds,m.name)});});
+    members.forEach(m=>{const _y=resolveMemberYakinSite(editIds,m.name,date,yakin);rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin:_y.yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company),butai:resolveEditButai(date),yakinTeate:_y.teate,yakinSeikyu:_y.seikyu});});
   });
   btn.textContent='保存中...';btn.disabled=true;
   try{
@@ -4979,6 +5004,7 @@ function openBulkEditModal(){
   document.getElementById('edit-title').textContent=`一括編集：${targets.length}日分（${dateLabels}）`;
   const mode=g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'';
   applyMode('e',mode);
+  editOrigYakin=!!g.yakin;   // ★2026-09-05 保存時に「利用者が夜勤を切り替えたのか」を見るため
   const leader=g.members.find(m=>m.role==='代表');
   document.getElementById('e-leader').value=leader?leader.name:'';
   editSelectedMembers=[];

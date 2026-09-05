@@ -70,25 +70,85 @@ describe('admin.html: 作業員ごとの夜勤設定パネル（依頼書2・3�
     expect(src.split('loadEditYakinOverrides(g);').length - 1).toBe(2);
   });
 
+  // ★2026-09-04 検品（実際に押して目で見た）で出た2件。両方ここで止める。
+  it('★氏名を onchange の文字列へ埋め込まない（アポストロフィを含む名前で壊れた）', () => {
+    // JSの "\\'" は ' そのものなので、.replace(/'/g,"\\'") は何も escape しない。
+    // 名前ではなく並び順の番号で引く形にした。
+    expect(src).not.toContain('setEditYakinOverride(\'${String(name)');
+    expect(src).toContain('setEditYakinOverrideAt(${i}');
+    expect(src).toContain('function setEditYakinOverrideAt(i,field,value)');
+  });
+
+  it('★画面に出す氏名とラベルを esc() に通す', () => {
+    const i = src.indexOf('function renderEditYakinPanel()');
+    const body = src.slice(i, src.indexOf('\n}', i));
+    expect(body).toContain('${esc(name)}');
+    expect(body).toContain('${esc(label)}');
+  });
+
+  it('★選択欄に width:auto を付ける（付けないと1人で3行ぶん縦に伸びる）', () => {
+    // このアプリは先頭のCSSで select を全部 width:100% にしている。
+    expect(src).toContain("const SELST='width:auto;margin:0;");
+  });
+
   it('責任者を変えても班員を足し引きしてもパネルが追従する', () => {
     expect(src).toContain("onchange=\"refreshButaiField('e');renderEditYakinPanel()\"");
     expect(src).toContain('toggleEditMember);renderEditYakinPanel();');
   });
 
-  it('★「自動」に戻す操作も保存される（パネルの値が正、引き継ぎで上書きしない）', () => {
-    const i = src.indexOf('function resolveMemberYakin(name,groupYakin)');
+  // ★2026-09-05 Codexレビュー[P1]#3: 一括編集で、触ってもいない設定が全日へコピーされていた。
+  //   9/1は「対象外」・9/2は「自動」の人を2日まとめて時刻だけ直すと、片方が黙って消えた。
+  it('★触った欄だけを全日へ適用し、触っていない欄は日ごとの元の値を残す', () => {
+    const i = src.indexOf('function resolveMemberYakin(name,groupYakin,date)');
     expect(i).toBeGreaterThan(-1);
     const body = src.slice(i, src.indexOf('\n}', i));
-    // パネルに行があるならパネルの値をそのまま返す（空なら空のまま）
-    expect(body).toContain("teate: ov.teate||'', seikyu: ov.seikyu||''");
-    // パネルに無い人（編集中に追加した人）だけ引き継ぐ
-    expect(body).toContain('inheritYakinFlags(editIds,name)');
+    expect(body).toContain('const t=editYakinTouched[name]||{};');
+    expect(body).toContain('t[field] ?');
+    // 元の行は「その人・その日」で探す（日をまたいで潰さない）
+    expect(body).toContain('n.name===name&&n.date===date');
   });
 
-  it('作業員ごとに勤務区分を上書きできる（現場全体は夜勤でもAさんだけ日勤）', () => {
-    const i = src.indexOf('function resolveMemberYakin(name,groupYakin)');
+  it('★🌙夜勤を切り替えたときだけ全員へ適用する（触っていないなら各人の元の区分を保つ）', () => {
+    const i = src.indexOf('function resolveMemberYakin(name,groupYakin,date)');
     const body = src.slice(i, src.indexOf('\n}', i));
-    expect(body).toContain("ov.mode==='夜勤'?true:ov.mode==='日勤'?false:!!groupYakin");
+    expect(body).toContain("ov.mode==='夜勤'?true: ov.mode==='日勤'?false: !!groupYakin");
+    expect(body).toContain('const switched=(!!groupYakin)!==(!!editOrigGroupYakin);');
+    expect(body).toContain('switched ? !!groupYakin : (src?!!src.yakin:!!groupYakin)');
+  });
+
+  it('★開き直したら「触った」印が消える（前回の操作が残らない）', () => {
+    expect(src).toContain('editYakinTouched={};');
+    expect(src).toContain('editOrigGroupYakin=!!g.yakin;');
+  });
+});
+
+// ★2026-09-05 Codexレビュー[P1]#2:
+//   現場画面はUIが無いぶん、保存時に全員へグループの夜勤フラグを配っていた。
+//   「Aさんは日勤・Bさんは夜勤」の予定を現場でメモだけ直すと、全員同じに潰れた。
+describe('index.html: 現場画面の編集で作業員ごとの夜勤区分を潰さない', () => {
+  const src = read('index.html');
+
+  it('★保存時に作業員ごと・日ごとに解決する', () => {
+    expect(src).toContain('function resolveMemberYakinSite(ids,name,date,groupYakin)');
+    expect(src).toContain('const _y=resolveMemberYakinSite(editIds,m.name,date,yakin);');
+    expect(src).toContain('yakin:_y.yakin');
+  });
+
+  it('★🌙を切り替えたときだけ全員へ適用する', () => {
+    const i = src.indexOf('function resolveMemberYakinSite(ids,name,date,groupYakin)');
+    const body = src.slice(i, src.indexOf('\n}', i));
+    expect(body).toContain('const switched = (!!groupYakin)!==(!!editOrigYakin);');
+    expect(body).toContain('switched ? !!groupYakin : (src?!!src.yakin:!!groupYakin)');
+  });
+
+  it('★元の行は「その人・その日」で探す（一括編集で他の日を潰さない）', () => {
+    const i = src.indexOf('function resolveMemberYakinSite(ids,name,date,groupYakin)');
+    const body = src.slice(i, src.indexOf('\n}', i));
+    expect(body).toContain('n.name===name&&n.date===date');
+  });
+
+  it('編集画面を開くときに元の夜勤フラグを覚える（単体編集・一括編集の両方）', () => {
+    expect(src.split('editOrigYakin=!!g.yakin;').length - 1).toBe(2);
   });
 });
 
