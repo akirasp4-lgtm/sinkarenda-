@@ -12,9 +12,15 @@ const BILLING_FILTER_SHEET = '元請別請求集計_フィルタ用';
 const BILLING_RATE_SHEET = '請求単価マスタ';
 const BILLING_CALC_SHEET = '請求計算';
 const ALLOCATION_SHEET = '事業部別按分';
+// ★2026-09-03 夜勤区分の改修（依頼書 予定表カレンダー改修.txt）
+//   「Excel出力上で夜勤かどうかを判定できない。夜勤手当・夜勤応援請求を機械的に拾えない」
+//   既存の 月別確認表 / 元請別請求集計 は事務が毎月そのまま使っているので触らず、
+//   夜勤が見える出力を別シートとして足す。
+const DETAIL_SHEET = '作業者日別明細';
+const NIGHT_KAKUNIN_SHEET = '夜勤確認表';
 const OPLOG_SHEET = '操作ログ';
 const HISTORY_SHEET = '変更履歴';
-const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両','拠点','部隊'];
+const HEADERS = ['登録日時','作業日','元請名','現場名','氏名','役割','出勤','退勤','人工','メモ','夜勤','会社','ID','更新者','色','事業部','工番','作業区分','車両','拠点','部隊','夜勤手当','夜勤請求'];
 const GROWISE = 'グローライズ';
 
 // ============================================================
@@ -602,7 +608,7 @@ function handleGetSheet_(body) {
   }
   try {
   const sheetName = body.sheet || '';
-  const allowed = [SHEET_NAME, ARCHIVE_SHEET, MEMBER_SHEET, GENBA_MASTER_SHEET, JOBSITE_SHEET, SUMMARY_COMPANY, SUMMARY_MONTH, KAKUNIN_SHEET, BILLING_SHEET, BILLING_FILTER_SHEET, ALLOCATION_SHEET, OPLOG_SHEET];
+  const allowed = [SHEET_NAME, ARCHIVE_SHEET, MEMBER_SHEET, GENBA_MASTER_SHEET, JOBSITE_SHEET, SUMMARY_COMPANY, SUMMARY_MONTH, KAKUNIN_SHEET, BILLING_SHEET, BILLING_FILTER_SHEET, ALLOCATION_SHEET, OPLOG_SHEET, DETAIL_SHEET, NIGHT_KAKUNIN_SHEET];
   if (!allowed.includes(sheetName)) return error('無効なシート名です');
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const targetSheet = ss.getSheetByName(sheetName);
@@ -717,9 +723,24 @@ function buildDailyValues_(ss, rows, updatedBy) {
       resolveKyoten_(row.kyoten, kyotenMap[String(row.loc || '').trim()], row.company),
       // ★2026-08-27 フェーズ1: 部隊。画面が明示した値 > 職人マスタの既定部隊。
       //   画面が butai を送ってきたら空欄でも尊重する（resolveButai_ の仕様）。
-      resolveButai_(row, lookupMemberButai_(butaiMap, row.company, row.name))
+      resolveButai_(row, lookupMemberButai_(butaiMap, row.company, row.name)),
+      // ★2026-09-03 夜勤手当・夜勤請求。空欄＝自動（夜勤ならYes・日勤ならNo）。
+      //   ★画面側（admin.html / index.html）で必ず読み書きすること。
+      //   読まずに保存すると、夜勤と無関係な編集をしただけで事務が入れた
+      //   『対象外』が消える（部隊・拠点で実際に起きたのと同じ壊れ方）。
+      normalizeYakinFlag_(row.yakinTeate),
+      normalizeYakinFlag_(row.yakinSeikyu)
     ];
   });
+}
+
+// 画面から来た夜勤手当・夜勤請求の値をシートに入れる形へ正規化する。
+// 受け付けるのは '対象' / '対象外' / 空 の3つだけ。それ以外は空（＝自動）に落とす。
+function normalizeYakinFlag_(v) {
+  const t = String(v == null ? '' : v).trim();
+  if (t === YAKIN_OFF || t === 'No' || t === 'no' || t === '×' || t === 'false') return YAKIN_OFF;
+  if (t === YAKIN_ON || t === 'Yes' || t === 'yes' || t === '○' || t === 'true') return YAKIN_ON;
+  return '';
 }
 
 function appendDailyValues_(sheet, values) {
@@ -1031,7 +1052,7 @@ function doPost(e) {
     // 日報データ／アーカイブで dateFrom/dateTo 指定があれば一時シートを作って絞り込んでからエクスポート
     if (action === 'export_sheet_xlsx') {
       const sheetName = body.sheet || '';
-      const allowed = [SHEET_NAME, ARCHIVE_SHEET, MEMBER_SHEET, GENBA_MASTER_SHEET, JOBSITE_SHEET, SUMMARY_COMPANY, SUMMARY_MONTH, KAKUNIN_SHEET, BILLING_SHEET, BILLING_FILTER_SHEET, ALLOCATION_SHEET, OPLOG_SHEET];
+      const allowed = [SHEET_NAME, ARCHIVE_SHEET, MEMBER_SHEET, GENBA_MASTER_SHEET, JOBSITE_SHEET, SUMMARY_COMPANY, SUMMARY_MONTH, KAKUNIN_SHEET, BILLING_SHEET, BILLING_FILTER_SHEET, ALLOCATION_SHEET, OPLOG_SHEET, DETAIL_SHEET, NIGHT_KAKUNIN_SHEET];
       if (!allowed.includes(sheetName)) return error('無効なシート名です');
       const targetSheet = ss.getSheetByName(sheetName);
       if (!targetSheet) return error('シートが見つかりません: ' + sheetName);
@@ -2433,6 +2454,60 @@ function getOrGenerateJobNo_(ss, genba, loc, division) {
   return jobNo;
 }
 
+// ============================================================
+// 夜勤区分（勤務区分・夜勤手当・夜勤請求）— 2026-09-03 追加
+//   依頼書「予定表カレンダー改修.txt」への対応。
+//   背景: 月別確認表・元請別請求集計は昼と夜を足して1セルに入れており、
+//   出力Excelから夜勤かどうかが判定できない。そのため夜勤手当（給与側）と
+//   夜勤応援分の請求（元請側）を機械的に拾えなかった。
+//
+//   ★設計の要（ここを間違えると二重管理になる）:
+//   勤務区分のための新しい列は作らない。既存の『夜勤』列から導出する。
+//   『夜勤』列は元から 空欄=日勤 / '夜勤' / '休み' / '予定' / '倉庫' を持っていて、
+//   カレンダー・集計・LINE通知の全部がこれを見ている。ここへ別に『勤務区分』列を
+//   足すと同じ事実が2箇所に書かれ、片方だけ直されて必ずズレる。
+//
+//   ★手当と請求を2本に分ける理由（依頼書3）:
+//   「作業員へ夜勤手当を払うか」と「元請へ夜勤応援として請求するか」は
+//   別の判断になりうる。ただし45人×毎日ぶんを毎回2箇所入力させると必ず漏れるので、
+//   **空欄＝自動判定（夜勤ならYes・日勤ならNo）** とし、例外だけ '対象外' を手で入れる。
+// ============================================================
+const YAKIN_ON = '対象';
+const YAKIN_OFF = '対象外';
+
+// 勤務区分。『夜勤』列の値から導出する（別列としては保存しない）
+function workClass_(yakinVal) {
+  const v = String(yakinVal == null ? '' : yakinVal).trim();
+  if (v === '夜勤') return '夜勤';
+  if (v === '休み') return '休み';
+  if (v === '予定') return '予定';
+  if (v === '倉庫') return '倉庫';
+  return '日勤';   // 空欄は日勤。改修前の全データがこれ（依頼書5「過去データは日勤で移行」）
+}
+
+// 実働かどうか（休み・予定は人工に数えない。倉庫は働いているので含む）
+function isWorkClass_(cls) { return cls === '日勤' || cls === '夜勤' || cls === '倉庫'; }
+
+// 手当・請求の対象判定。明示指定 > 自動（夜勤ならYes）
+function yakinFlag_(explicit, cls) {
+  const v = String(explicit == null ? '' : explicit).trim();
+  if (v === YAKIN_OFF || v === 'No' || v === 'no' || v === '×') return false;
+  if (v === YAKIN_ON || v === 'Yes' || v === 'yes' || v === '○') return true;
+  return cls === '夜勤';     // 空欄＝自動
+}
+function yakinTeateOn_(rec) { return yakinFlag_(rec && rec.teate, workClass_(rec && rec.yakin)); }
+function yakinSeikyuOn_(rec) { return yakinFlag_(rec && rec.seikyu, workClass_(rec && rec.yakin)); }
+
+// 確認漏れ。夜勤なのに出勤・退勤が空の行は、手当を計算する根拠が無い。
+// （夜勤マークの「付け忘れ」自体は日勤と見分けがつかないので機械では検知できない。
+//   検知できることだけを出す）
+function yakinNeedsCheck_(rec) {
+  if (workClass_(rec && rec.yakin) !== '夜勤') return false;
+  const st = String((rec && rec.start) || '').trim();
+  const en = String((rec && rec.end) || '').trim();
+  return !st || !en;
+}
+
 // ========== 集計機能 ==========
 
 function generateSummary_() {
@@ -2459,7 +2534,15 @@ function generateSummary_() {
         // ★2026-08-28 利用者指示「関東支店と本社の売上とか割を分けれるように」。
         // これが無いと集計シートが拠点を一切見られない。
         kyoten: String(row[colIdx['拠点']] || ''),
-        yakin: String(row[colIdx['夜勤']] || '')
+        yakin: String(row[colIdx['夜勤']] || ''),
+        // ★2026-09-03 夜勤区分。作業者日別明細・夜勤確認表・請求フィルタで使う。
+        //   ここに書かないと明細シートに出せない（拠点で起きたのと同じ抜け）。
+        start: fmtTime_(row[colIdx['出勤']], tz),
+        end: fmtTime_(row[colIdx['退勤']], tz),
+        memo: String(row[colIdx['メモ']] || ''),
+        id: String(row[colIdx['ID']] || ''),
+        teate: String(row[colIdx['夜勤手当']] || ''),
+        seikyu: String(row[colIdx['夜勤請求']] || '')
       };
     }).filter(r => r.date && r.name);
   }
@@ -2482,9 +2565,13 @@ function generateSummary_() {
   generateMonthSummary_(ss, mainRecords);
   generateBillingSummary_(ss, mainRecords);
   generateBillingFilterSheet_(ss, mainRecords);
+  // ★2026-09-03 作業者日別明細は請求系と同じ「現在のデータ」を見る（アーカイブは含めない）
+  generateWorkerDetailSheet_(ss, mainRecords);
 
   const allRecords = [...mainRecords, ...archiveRecords];
   generateKakuninTable_(ss, allRecords);
+  // ★2026-09-03 夜勤確認表は月別確認表と同じ母集団・同じ月の窓で作る（並べて突き合わせるため）
+  generateNightKakuninTable_(ss, allRecords);
   generateDivisionAllocation_(ss, allRecords);
 
   // 孤立現場の削除は保存処理と競合するため、管理画面の手動操作だけで行う。
@@ -2876,6 +2963,30 @@ function exportPeriodKakuninAsXlsxBase64_(ss, dateFrom, dateTo, companyFilter) {
   }
 }
 
+// 1人・1日ぶんの人工を「昼」「夜勤」の2バケットに分けて返す。
+//   ・休み／予定の単体レコードは実働ではないので除外
+//   ・同じバケットに複数レコードがあれば最大値を採る（重複入力を二重に数えない）
+//   ・昼と夜勤は別枠なので、同日に両方あれば 1.0 + 1.0 = 2.0 になる
+//
+// ★2026-09-03 ここを共通関数に抜き出した理由:
+//   月別確認表は元から day + night を返していた。夜勤確認表を別に書き起こすと、
+//   片方だけ直された時に「既存の人工合計 ≠ 日勤＋夜勤」になる。
+//   同じ関数から取ることで、依頼書の完了条件（合計が一致する）を構造で保証する。
+function dailyKosuBuckets_(records, name, dateStr) {
+  const dayRecords = records.filter(r => r.name === name && r.date === dateStr);
+  if (dayRecords.length === 0) return { day: 0, night: 0 };
+  // 休み・予定の単体レコードは除外（同日に実働があればそちらを採用、calcEffective_と同じ挙動）
+  const effective = dayRecords.filter(r => r.yakin !== '休み' && r.yakin !== '予定');
+  if (effective.length === 0) return { day: 0, night: 0 };
+  let day = 0, night = 0;
+  effective.forEach(r => {
+    const k = Number(r.kosu) || 0;
+    if (r.yakin === '夜勤') { if (k > night) night = k; }
+    else { if (k > day) day = k; }
+  });
+  return { day: day, night: night };
+}
+
 function generateKakuninTable_(ss, records) {
   let sheet = ss.getSheetByName(KAKUNIN_SHEET);
   if (sheet) {
@@ -2914,20 +3025,8 @@ function generateKakuninTable_(ss, records) {
       const dateStr = year + '-' + String(month + 1).padStart(2, '0') + '-' + String(day).padStart(2, '0');
       const dayRecords = mr.filter(r => r.name === name && r.date === dateStr);
       if (dayRecords.length === 0) return 0;
-      // 休み・予定の単体レコードは除外（同日に実働があればそちらを採用、calcEffective_と同じ挙動）
-      const effective = dayRecords.filter(r => r.yakin !== '休み' && r.yakin !== '予定');
-      if (effective.length === 0) return 0;
-      // 昼/夜勤は別バケットでmaxを取り、最後に合算（同日 昼+夜勤=2.0）
-      let dayKosu = 0, nightKosu = 0;
-      effective.forEach(r => {
-        const k = Number(r.kosu) || 0;
-        if (r.yakin === '夜勤') {
-          if (k > nightKosu) nightKosu = k;
-        } else {
-          if (k > dayKosu) dayKosu = k;
-        }
-      });
-      return dayKosu + nightKosu;
+      const b = dailyKosuBuckets_(mr, name, dateStr);
+      return b.day + b.night;
     }
 
     const titleRow = Array(maxCols).fill('');
@@ -3250,7 +3349,9 @@ function generateBillingFilterSheet_(ss, records) {
   else sheet = ss.insertSheet(BILLING_FILTER_SHEET);
   // 既存フィルタを除去（再生成時の衝突防止）
   try { const f = sheet.getFilter(); if (f) f.remove(); } catch (e) {}
-  ensureColumns_(sheet, 36);
+  // ★2026-09-03 列を2本増やした（勤務区分・夜勤請求）。36 → 38。
+  const W = 38;
+  ensureColumns_(sheet, W);
 
   // 休み/予定は除外。倉庫は genba='', loc='倉庫作業' に正規化してフィルタ用シートに含める
   // （通常の請求集計シート generateBillingSummary_ は変更なし — 倉庫除外のまま）
@@ -3264,14 +3365,35 @@ function generateBillingFilterSheet_(ss, records) {
   // 倉庫作業が存在する場合は空 genba ブロックを末尾に追加（倉庫は元請名が空）
   if (workRecords.some(r => r.loc === '倉庫作業' && !r.genba)) genbas.push('');
 
+  // ★2026-09-03 夜勤区分（依頼書4）:
+  //   「同一月・同一元請・同一現場・同一作業員でも、日勤と夜勤は別行または別列で
+  //     判別できるようにする」→ 別行にした。勤務区分の列でオートフィルタを掛ければ
+  //   日勤人工／夜勤人工がそのまま出る。
+  //   夜勤請求列は「元請へ夜勤応援として請求するか」。空欄＝自動判定なので、
+  //   その区分のレコードが全部対象なら ○、一部だけなら 一部 と出す。
+  const CLASSES = [
+    { label: '日勤', isNight: false },
+    { label: '夜勤', isNight: true }
+  ];
+  function inClass_(r, isNight) {
+    return isNight ? (r.yakin === '夜勤') : (r.yakin !== '夜勤');
+  }
+  function seikyuMark_(recs) {
+    if (!recs.length) return '';
+    const on = recs.filter(r => yakinSeikyuOn_(r)).length;
+    if (on === 0) return '';
+    return on === recs.length ? '○' : '一部';
+  }
+
   // ヘッダー行
-  const header = ['月', '会社名', '現場名', '名前'];
+  const header = ['月', '会社名', '現場名', '名前', '勤務区分', '夜勤請求'];
   for (let d = 1; d <= 31; d++) header.push(d + '日');
   header.push('合計');
 
   const rows = [header];
   // 合計行のインデックス（後で背景色つけるため）
   const totalRowIndices = [];
+  const nightRowIndices = [];   // 夜勤行（薄く色を付けて目で追えるように）
 
   months.forEach(month => {
     const parts = month.split('-');
@@ -3290,6 +3412,16 @@ function generateBillingFilterSheet_(ss, records) {
       sitesByPDN[k].add(r.genba + '|||' + (r.loc || '（現場名なし）'));
     });
 
+    // 1人・1日・1区分ぶんの按分人工。日勤行・夜勤行・合計行のすべてがこれを使う
+    // （別々に書くと片方だけ直されて合計が合わなくなる）
+    function kosuOf_(lr, name, dateStr, isNight) {
+      const dayRecs = lr.filter(r => r.name === name && r.date === dateStr && inClass_(r, isNight));
+      if (!dayRecs.length) return 0;
+      const dn = isNight ? 'N' : 'D';
+      const sCnt = (sitesByPDN[name + '|' + dateStr + '|' + dn] || new Set()).size || 1;
+      return 1 / sCnt;
+    }
+
     genbas.forEach(genba => {
       const gr = mr.filter(r => r.genba === genba);
       if (gr.length === 0) return;
@@ -3300,51 +3432,37 @@ function generateBillingFilterSheet_(ss, records) {
         const activeNames = namesInLoc.filter(name => calcEffective_(lr, name).kosu > 0);
         if (activeNames.length === 0) return;
 
-        // 各人の行
+        // 各人の行（日勤・夜勤で別行。その区分の実働が無ければ行を出さない）
         activeNames.forEach(name => {
-          const row = [monthLabel, genba, loc, name];
-          let rowTotal = 0;
-          for (let d = 1; d <= 31; d++) {
-            if (d > daysInMonth) { row.push(''); continue; }
-            const dateStr = year + '-' + String(mon).padStart(2,'0') + '-' + String(d).padStart(2,'0');
-            const dayRecs = lr.filter(r => r.name === name && r.date === dateStr);
-            const hasDay = dayRecs.some(r => r.yakin !== '夜勤');
-            const hasNight = dayRecs.some(r => r.yakin === '夜勤');
-            let kosu = 0;
-            if (hasDay) {
-              const sCnt = (sitesByPDN[name + '|' + dateStr + '|D'] || new Set()).size || 1;
-              kosu += 1 / sCnt;
+          CLASSES.forEach(cls => {
+            const clsRecs = lr.filter(r => r.name === name && inClass_(r, cls.isNight));
+            if (clsRecs.length === 0) return;
+            const row = [monthLabel, genba, loc, name, cls.label, seikyuMark_(clsRecs)];
+            let rowTotal = 0;
+            for (let d = 1; d <= 31; d++) {
+              if (d > daysInMonth) { row.push(''); continue; }
+              const dateStr = year + '-' + String(mon).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+              const k = kosuOf_(lr, name, dateStr, cls.isNight);
+              row.push(k);
+              rowTotal += k;
             }
-            if (hasNight) {
-              const sCnt = (sitesByPDN[name + '|' + dateStr + '|N'] || new Set()).size || 1;
-              kosu += 1 / sCnt;
-            }
-            row.push(kosu);
-            rowTotal += kosu;
-          }
-          row.push(rowTotal);
-          rows.push(row);
+            if (rowTotal === 0) return;   // その月に実働が無い区分の行は出さない
+            row.push(rowTotal);
+            rows.push(row);
+            if (cls.isNight) nightRowIndices.push(rows.length);
+          });
         });
 
-        // 案件の合計行
-        const totalRow = [monthLabel, genba, loc, '合計'];
+        // 案件の合計行（日勤＋夜勤。改修前と同じ数字が出る＝既存の請求運用が壊れない）
+        const totalRow = [monthLabel, genba, loc, '合計', '', ''];
         let grandTotal = 0;
         for (let d = 1; d <= 31; d++) {
           if (d > daysInMonth) { totalRow.push(''); continue; }
-          const dateStr = year + '-' + String(mon).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+          const dateStr = year + '-' + String(mon).padStart(2, '0') + '-' + String(d).padStart(2, '0');
           let daySum = 0;
           activeNames.forEach(name => {
-            const dayRecs = lr.filter(r => r.name === name && r.date === dateStr);
-            const hasDay = dayRecs.some(r => r.yakin !== '夜勤');
-            const hasNight = dayRecs.some(r => r.yakin === '夜勤');
-            if (hasDay) {
-              const sCnt = (sitesByPDN[name + '|' + dateStr + '|D'] || new Set()).size || 1;
-              daySum += 1 / sCnt;
-            }
-            if (hasNight) {
-              const sCnt = (sitesByPDN[name + '|' + dateStr + '|N'] || new Set()).size || 1;
-              daySum += 1 / sCnt;
-            }
+            daySum += kosuOf_(lr, name, dateStr, false);
+            daySum += kosuOf_(lr, name, dateStr, true);
           });
           totalRow.push(daySum);
           grandTotal += daySum;
@@ -3358,50 +3476,248 @@ function generateBillingFilterSheet_(ss, records) {
 
   if (rows.length === 1) {
     // データなし: ヘッダーだけ書いて終了
-    sheet.getRange(1, 1, 1, 36).setValues(rows)
+    sheet.getRange(1, 1, 1, W).setValues(rows)
       .setFontWeight('bold').setBackground('#E8F4FD').setHorizontalAlignment('center');
     return;
   }
 
   // 一括書き込み
-  sheet.getRange(1, 1, rows.length, 36).setValues(rows);
+  sheet.getRange(1, 1, rows.length, W).setValues(rows);
 
   // ヘッダー＋合計行の背景・太字は全行グリッドで一括適用（以前は合計行ごとに2通信だった）
   {
     const n = rows.length;
     const bgsF = [], fwsF = [];
-    for (let i = 0; i < n; i++) { bgsF.push(new Array(36).fill('#FFFFFF')); fwsF.push(new Array(36).fill('normal')); }
-    for (let c = 0; c < 36; c++) { bgsF[0][c] = '#E8F4FD'; fwsF[0][c] = 'bold'; }
-    totalRowIndices.forEach(r => { for (let c = 0; c < 36; c++) { bgsF[r - 1][c] = '#FFF9C4'; fwsF[r - 1][c] = 'bold'; } });
-    sheet.getRange(1, 1, n, 36).setBackgrounds(bgsF).setFontWeights(fwsF);
+    for (let i = 0; i < n; i++) { bgsF.push(new Array(W).fill('#FFFFFF')); fwsF.push(new Array(W).fill('normal')); }
+    for (let c = 0; c < W; c++) { bgsF[0][c] = '#E8F4FD'; fwsF[0][c] = 'bold'; }
+    // 夜勤行を薄い紺で塗る（合計行より先に塗り、合計行の黄で上書きされないようにする）
+    nightRowIndices.forEach(r => { for (let c = 0; c < W; c++) bgsF[r - 1][c] = '#EDF0FA'; });
+    totalRowIndices.forEach(r => { for (let c = 0; c < W; c++) { bgsF[r - 1][c] = '#FFF9C4'; fwsF[r - 1][c] = 'bold'; } });
+    sheet.getRange(1, 1, n, W).setBackgrounds(bgsF).setFontWeights(fwsF);
   }
-  sheet.getRange(1, 1, 1, 36).setHorizontalAlignment('center');
+  sheet.getRange(1, 1, 1, W).setHorizontalAlignment('center');
 
   // 月列をテキスト書式（Excel での日付シリアル化防止）
   sheet.getRange(2, 1, rows.length - 1, 1).setNumberFormat('@');
+  // 勤務区分・夜勤請求列は中央寄せ
+  sheet.getRange(2, 5, rows.length - 1, 2).setHorizontalAlignment('center');
 
   // 日付列・合計列の数値書式（0は非表示）
-  sheet.getRange(2, 5, rows.length - 1, 32).setNumberFormat('0.0;-0.0;').setHorizontalAlignment('center');
+  sheet.getRange(2, 7, rows.length - 1, 32).setNumberFormat('0.0;-0.0;').setHorizontalAlignment('center');
 
   // 列幅
   sheet.setColumnWidth(1, 80);    // 月
   sheet.setColumnWidth(2, 150);   // 会社名
   sheet.setColumnWidth(3, 220);   // 現場名
   sheet.setColumnWidth(4, 70);    // 名前
-  sheet.setColumnWidths(5, 31, 32);  // 1〜31日
-  sheet.setColumnWidth(36, 60);   // 合計
+  sheet.setColumnWidth(5, 70);    // 勤務区分
+  sheet.setColumnWidth(6, 70);    // 夜勤請求
+  sheet.setColumnWidths(7, 31, 32);  // 1〜31日
+  sheet.setColumnWidth(38, 60);   // 合計
 
-  // フリーズ（1行＋4列）
+  // フリーズ（1行＋6列）
   sheet.setFrozenRows(1);
-  sheet.setFrozenColumns(4);
+  sheet.setFrozenColumns(6);
 
   // AutoFilter（全範囲）
   try {
-    sheet.getRange(1, 1, rows.length, 36).createFilter();
+    sheet.getRange(1, 1, rows.length, W).createFilter();
   } catch (e) { /* createFilter は既存フィルタがあれば失敗するが、上で除去済み */ }
 
   // 罫線
-  sheet.getRange(1, 1, rows.length, 36)
+  sheet.getRange(1, 1, rows.length, W)
+    .setBorder(true, true, true, true, true, true, '#DDDDDD', SpreadsheetApp.BorderStyle.SOLID);
+}
+
+// ============================================================
+// 作業者日別明細シート — 2026-09-03 追加（依頼書4「必須出力」）
+//   日付 / 支店 / 元請 / 現場 / 作業員 / 人工数 / 勤務区分 /
+//   夜勤手当対象 / 夜勤請求対象 / 予定ID / メモ
+//   ＋ 会社・出勤・退勤・確認（依頼書の並びを崩さないよう後ろに足す）
+//
+//   ★人工数は「入力された値そのまま」。同じ人が同じ日に2現場へ行けば2行出るので、
+//     単純合計は月別確認表と一致しない（確認表は昼・夜それぞれ1日1人工が上限）。
+//     突き合わせは 夜勤確認表 とするのが正しい。1行目に注意書きを出す。
+// ============================================================
+function generateWorkerDetailSheet_(ss, records) {
+  let sheet = ss.getSheetByName(DETAIL_SHEET);
+  if (sheet) { sheet.clear(); sheet.clearFormats(); }
+  else sheet = ss.insertSheet(DETAIL_SHEET);
+  try { const f = sheet.getFilter(); if (f) f.remove(); } catch (e) {}
+
+  const W = 15;
+  ensureColumns_(sheet, W);
+
+  const note = '※人工数は入力値そのまま。同じ人が同じ日に複数現場へ行くと複数行出るため、単純合計は月別確認表と一致しません（確認表は昼・夜それぞれ1日1人工が上限）。突き合わせは「夜勤確認表」を使ってください。';
+  const header = ['日付', '支店', '元請', '現場', '作業員', '人工数', '勤務区分',
+                  '夜勤手当対象', '夜勤請求対象', '予定ID', 'メモ',
+                  '会社', '出勤', '退勤', '確認'];
+
+  // 休み・予定は実働ではないので明細から外す（倉庫は働いているので残す）
+  const rows = records
+    .filter(r => isWorkClass_(workClass_(r.yakin)))
+    .slice()
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)));
+
+  const checkRowIdx = [];   // 要確認の行（1-based シート行）
+  const out = [[note].concat(new Array(W - 1).fill('')), header];
+  rows.forEach(r => {
+    const cls = workClass_(r.yakin);
+    const needs = yakinNeedsCheck_(r);
+    out.push([
+      r.date,
+      r.kyoten || '',
+      r.genba || '',
+      r.loc || '',
+      r.name || '',
+      Number(r.kosu) || 0,
+      cls,
+      yakinTeateOn_(r) ? '○' : '',
+      yakinSeikyuOn_(r) ? '○' : '',
+      r.id || '',
+      r.memo || '',
+      r.company || '',
+      r.start || '',
+      r.end || '',
+      needs ? '要確認' : ''
+    ]);
+    if (needs) checkRowIdx.push(out.length);
+  });
+
+  if (out.length === 2) {
+    sheet.getRange(1, 1, 2, W).setValues(out);
+    sheet.getRange(2, 1, 1, W).setFontWeight('bold').setBackground('#E8F4FD').setHorizontalAlignment('center');
+    return;
+  }
+
+  sheet.getRange(1, 1, out.length, W).setValues(out);
+
+  // 1行目の注意書き
+  sheet.getRange(1, 1, 1, W).merge().setBackground('#FFF9C4').setFontSize(9).setWrap(true);
+  // ヘッダー行
+  sheet.getRange(2, 1, 1, W).setFontWeight('bold').setBackground('#E8F4FD').setHorizontalAlignment('center');
+  // 要確認の行は赤く塗る（見落とし防止）
+  checkRowIdx.forEach(r => { sheet.getRange(r, 1, 1, W).setBackground('#FFE0E0'); });
+
+  sheet.getRange(2, 1, out.length - 1, 1).setNumberFormat('@');       // 日付はテキスト（Excelでのシリアル化防止）
+  sheet.getRange(3, 6, out.length - 2, 1).setNumberFormat('0.##').setHorizontalAlignment('center');
+  sheet.getRange(3, 7, out.length - 2, 3).setHorizontalAlignment('center');
+  sheet.getRange(3, 15, out.length - 2, 1).setHorizontalAlignment('center');
+
+  sheet.setColumnWidth(1, 90);   sheet.setColumnWidth(2, 70);
+  sheet.setColumnWidth(3, 140);  sheet.setColumnWidth(4, 200);
+  sheet.setColumnWidth(5, 80);   sheet.setColumnWidth(6, 60);
+  sheet.setColumnWidth(7, 70);   sheet.setColumnWidth(8, 90);
+  sheet.setColumnWidth(9, 90);   sheet.setColumnWidth(10, 200);
+  sheet.setColumnWidth(11, 180); sheet.setColumnWidth(12, 110);
+  sheet.setColumnWidth(13, 60);  sheet.setColumnWidth(14, 60);
+  sheet.setColumnWidth(15, 60);
+
+  sheet.setFrozenRows(2);
+  try { sheet.getRange(2, 1, out.length - 1, W).createFilter(); } catch (e) {}
+  sheet.getRange(2, 1, out.length - 1, W)
+    .setBorder(true, true, true, true, true, true, '#DDDDDD', SpreadsheetApp.BorderStyle.SOLID);
+}
+
+// ============================================================
+// 夜勤確認表シート — 2026-09-03 追加（依頼書4・完了条件3）
+//   月別確認表と同じ計算（dailyKosuBuckets_）の「夜」バケットだけを出す。
+//   月 / 名前 / 会社 / 1〜31日 / 夜勤日数 / 夜勤人工合計
+//
+//   ★突き合わせ方: 月別確認表の合計 − 夜勤確認表の夜勤人工合計 ＝ 日勤の人工。
+//     どちらも dailyKosuBuckets_ から取っているので必ず一致する。
+//   ★対象月は月別確認表と同じ4ヶ月（来月〜2ヶ月前）。並べて見比べられるように揃えた。
+// ============================================================
+function generateNightKakuninTable_(ss, records) {
+  let sheet = ss.getSheetByName(NIGHT_KAKUNIN_SHEET);
+  if (sheet) { sheet.clear(); sheet.clearFormats(); }
+  else sheet = ss.insertSheet(NIGHT_KAKUNIN_SHEET);
+  try { const f = sheet.getFilter(); if (f) f.remove(); } catch (e) {}
+
+  const W = 36;   // 月 + 名前 + 会社 + 31日 + 夜勤日数 + 夜勤人工合計
+  ensureColumns_(sheet, W);
+
+  const now = new Date();
+  const months = [];
+  for (let i = 1; i >= -2; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+    months.push({ year: d.getFullYear(), month: d.getMonth() });
+  }
+
+  const header = ['月', '名前', '会社'];
+  for (let d = 1; d <= 31; d++) header.push(d + '日');
+  header.push('夜勤日数'); header.push('夜勤人工合計');
+
+  const out = [header];
+  const totalRowIdx = [];
+
+  months.forEach(function (m) {
+    const year = m.year, month = m.month;
+    const monthStr = year + '-' + String(month + 1).padStart(2, '0');
+    const monthLabel = year + '年' + (month + 1) + '月';
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const mr = records.filter(r => r.month === monthStr);
+    if (mr.length === 0) return;
+
+    const names = [...new Set(mr.filter(r => workClass_(r.yakin) === '夜勤').map(r => r.name))]
+      .filter(Boolean).sort();
+    if (names.length === 0) return;
+
+    const dayTotals = new Array(32).fill(0);
+    let monthDays = 0, monthKosu = 0;
+
+    names.forEach(name => {
+      const row = [monthLabel, name, ''];
+      let nights = 0, total = 0;
+      for (let d = 1; d <= 31; d++) {
+        if (d > daysInMonth) { row.push(''); continue; }
+        const dateStr = year + '-' + String(month + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+        const k = dailyKosuBuckets_(mr, name, dateStr).night;
+        row.push(k);
+        if (k > 0) { nights++; total += k; dayTotals[d] += k; }
+      }
+      // 会社はその人の夜勤レコードから拾う
+      const anyRec = mr.filter(r => r.name === name && workClass_(r.yakin) === '夜勤')[0];
+      row[2] = anyRec ? (anyRec.company || '') : '';
+      row.push(nights); row.push(total);
+      monthDays += nights; monthKosu += total;
+      out.push(row);
+    });
+
+    const totalRow = [monthLabel, '合計', ''];
+    for (let d = 1; d <= 31; d++) totalRow.push(d > daysInMonth ? '' : dayTotals[d]);
+    totalRow.push(monthDays); totalRow.push(monthKosu);
+    out.push(totalRow);
+    totalRowIdx.push(out.length);
+  });
+
+  if (out.length === 1) {
+    sheet.getRange(1, 1, 1, W).setValues(out)
+      .setFontWeight('bold').setBackground('#2B3A67').setFontColor('#FFFFFF').setHorizontalAlignment('center');
+    sheet.getRange(2, 1).setValue('（この期間に夜勤の予定はありません）').setFontColor('#999999');
+    return;
+  }
+
+  sheet.getRange(1, 1, out.length, W).setValues(out);
+  sheet.getRange(1, 1, 1, W)
+    .setFontWeight('bold').setBackground('#2B3A67').setFontColor('#FFFFFF').setHorizontalAlignment('center');
+  totalRowIdx.forEach(r => { sheet.getRange(r, 1, 1, W).setBackground('#FFF9C4').setFontWeight('bold'); });
+
+  sheet.getRange(2, 1, out.length - 1, 1).setNumberFormat('@');
+  sheet.getRange(2, 4, out.length - 1, 31).setNumberFormat('0.##;-0.##;').setHorizontalAlignment('center');
+  sheet.getRange(2, 35, out.length - 1, 2).setNumberFormat('0.##').setHorizontalAlignment('center').setFontWeight('bold');
+
+  sheet.setColumnWidth(1, 80);
+  sheet.setColumnWidth(2, 80);
+  sheet.setColumnWidth(3, 110);
+  sheet.setColumnWidths(4, 31, 30);
+  sheet.setColumnWidth(35, 70);
+  sheet.setColumnWidth(36, 90);
+
+  sheet.setFrozenRows(1);
+  sheet.setFrozenColumns(3);
+  try { sheet.getRange(1, 1, out.length, W).createFilter(); } catch (e) {}
+  sheet.getRange(1, 1, out.length, W)
     .setBorder(true, true, true, true, true, true, '#DDDDDD', SpreadsheetApp.BorderStyle.SOLID);
 }
 

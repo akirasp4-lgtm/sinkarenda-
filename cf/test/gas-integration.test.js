@@ -115,11 +115,11 @@ describe('buildDailyValues_（実際にシートを読んで行を組み立て�
     id: 'ID1', updatedBy: '向', color: '', workType: '現場作業', vehicle: ''
   };
 
-  it('★21列ちょうど出る（列がずれていない）', () => {
+  it('★23列ちょうど出る（列がずれていない）', () => {
     const out = ctx.g.buildDailyValues_(ctx.ss, [baseRow], '向');
     expect(out.length).toBe(1);
-    expect(out[0].length).toBe(21);
-    expect(ctx.g.HEADERS.length).toBe(21);
+    expect(out[0].length).toBe(23);
+    expect(ctx.g.HEADERS.length).toBe(23);
   });
 
   it('★既存20列の中身が正しい位置に入っている', () => {
@@ -165,11 +165,11 @@ describe('buildDailyValues_（実際にシートを読んで行を組み立て�
     expect(out[ctx.g.HEADERS.indexOf('拠点')]).toBe('');
   });
 
-  it('複数人まとめて登録しても全員21列', () => {
+  it('複数人まとめて登録しても全員23列', () => {
     const out = ctx.g.buildDailyValues_(ctx.ss,
       [baseRow, { ...baseRow, name: '中島', role: '同行', id: 'ID1' }], '向');
     expect(out.length).toBe(2);
-    out.forEach(r => expect(r.length).toBe(21));
+    out.forEach(r => expect(r.length).toBe(23));
     expect(out[0][ctx.g.HEADERS.indexOf('部隊')]).toBe('第二部隊');
     expect(out[1][ctx.g.HEADERS.indexOf('部隊')]).toBe('');
   });
@@ -256,10 +256,10 @@ describe('変更履歴が実際の行の形で動く', () => {
     expect(b.after).toBe('第三部隊');
   });
 
-  it('★削除の記録から元の予定を復元できる（21項目そろっている）', () => {
+  it('★削除の記録から元の予定を復元できる（23項目そろっている）', () => {
     const rows = ctx.g.buildDailyValues_(ctx.ss, [mk({ id: 'DEL', memo: '大事なメモ' })], '向');
     const o = JSON.parse(ctx.g.rowFullJson_(ctx.g.HEADERS, rows[0]));
-    expect(Object.keys(o).length).toBe(21);
+    expect(Object.keys(o).length).toBe(23);
     expect(o['メモ']).toBe('大事なメモ');
     expect(o['氏名']).toBe('元');
     expect(o['部隊']).toBe('第二部隊');

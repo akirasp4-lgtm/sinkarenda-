@@ -1426,7 +1426,8 @@ describe('21列目 部隊（フェーズ1）', () => {
   });
 
   it('OPTIONAL_HEADERSの順番は拠点→部隊', () => {
-    expect(OPTIONAL_HEADERS).toEqual(['拠点', '部隊']);
+    // ★2026-09-03 夜勤区分で末尾に2列足した。GAS の HEADERS と同じ名前・同じ順番。
+    expect(OPTIONAL_HEADERS).toEqual(['拠点', '部隊', '夜勤手当', '夜勤請求']);
   });
 
   it('sanitizeForStorage が既定部隊と有効を残す', () => {

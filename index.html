@@ -3578,9 +3578,13 @@ function parseRows(rows,company){
     workType:String(r['作業区分']||''),
     vehicle:String(r['車両']||''),
     kyoten:String(r['拠点']||''),     // ★2026-08-26 拠点（本社/関東支店/両方）
-    butai:String(r['部隊']||'')       // ★2026-08-27 部隊（1〜4部隊）。
+    butai:String(r['部隊']||''),      // ★2026-08-27 部隊（1〜4部隊）。
     // ★ここに書かないと部隊が画面のデータから消え、部隊と無関係な編集をしただけで
     //   保存済みの部隊が失われる（拠点で起きたバグと同じ形・Codexレビュー[P1]#1）
+    // ★2026-09-03 夜勤手当・夜勤請求。上と同じ理由でここに必ず書く。
+    //   空欄＝自動（夜勤ならYes・日勤ならNo）。'対象外' が事務の入れた例外。
+    yakinTeate:String(r['夜勤手当']||''),
+    yakinSeikyu:String(r['夜勤請求']||'')
   }));
 }
 
@@ -3635,6 +3639,8 @@ function addLocalRows(rows,opts){
     // ★2026-08-27: 送信前の楽観表示にも拠点・部隊を載せる。無いと送信が終わるまで
     //   タグが出ず「消えた？」と見える（拠点は2026-08-26から落ちていた取りこぼし）。
     kyoten:String(r.kyoten||''),butai:String(r.butai||''),
+    // ★2026-09-03 夜勤手当・夜勤請求も楽観表示に載せる（上と同じ理由）
+    yakinTeate:String(r.yakinTeate||''),yakinSeikyu:String(r.yakinSeikyu||''),
     isPending:pending
   }));
   allNippos=allNippos.concat(added).concat(generateGhosts(added));
@@ -3971,12 +3977,22 @@ function tsValue(s){
   return isNaN(d)?0:d.getTime();
 }
 
+// ★2026-09-03 編集で置き換える前の行から、その人の夜勤手当・夜勤請求を引き継ぐ。
+//   これをやらないと、夜勤と無関係な編集（時刻を1つ直しただけ等）をするたびに
+//   事務が入れた「対象外」が消える。部隊・拠点で実際に起きた壊れ方と同じ形。
+function inheritYakinFlags(ids,name){
+  const src=(allNippos||[]).find(n=>!n.isGhost&&(ids||[]).includes(n.id)&&n.name===name);
+  return {yakinTeate:src?String(src.yakinTeate||''):'',yakinSeikyu:src?String(src.yakinSeikyu||''):''};
+}
+
 function groupNippos(nippos){
   const groups={};
   nippos.forEach(n=>{
     const key=n.id||`${n.date}__${n.genba}__${n.loc}__${n.start}__${n.end}__${n.kosu}__${n.memo}__${n.yakin}__${n.yasumi}__${n.yotei}__${n.souko}`;
     if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,timestamp:n.timestamp||'',color:n.color,jobNo:n.jobNo,workType:n.workType||'',vehicle:n.vehicle||'',butai:n.butai||'',isGhost:!!n.isGhost,isPending:!!n.isPending,originalId:n.originalId||''};
-    groups[key].members.push({name:n.name,role:n.role,butai:n.butai||''});
+    // ★2026-09-03 夜勤の設定はメンバーごとに持つ（同じ現場でもAさんだけ日勤、が有りうる）
+    groups[key].members.push({name:n.name,role:n.role,butai:n.butai||'',
+      yakinSelf:!!n.yakin,yakinTeate:String(n.yakinTeate||''),yakinSeikyu:String(n.yakinSeikyu||'')});
     if(n.id)groups[key].ids.push(n.id);
     // グループ内で最新の登録日時 + その時の更新者を採用（Date 経由で比較）
     if(n.timestamp && tsValue(n.timestamp)>tsValue(groups[key].timestamp)){
@@ -4711,7 +4727,7 @@ async function saveEdit(){
   const rows=[];
   dates.forEach(date=>{
     const newId=uuid();
-    members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company),butai:resolveEditButai(date)});});
+    members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:effectiveKosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company),butai:resolveEditButai(date),...inheritYakinFlags(editIds,m.name)});});
   });
   btn.textContent='保存中...';btn.disabled=true;
   try{

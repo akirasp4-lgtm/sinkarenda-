@@ -59,9 +59,13 @@ beforeAll(() => {
 });
 
 describe('HEADERS', () => {
-  it('21列で、21列目が部隊', () => {
-    expect(ctx.HEADERS.length).toBe(21);
+  it('23列で、21列目が部隊。22・23列目が夜勤手当・夜勤請求', () => {
+    // ★2026-09-03 夜勤区分の改修で末尾に2列足した（依頼書 予定表カレンダー改修.txt）。
+    //   足すのは末尾だけ。既存20列の位置は下の別テストが守っている。
+    expect(ctx.HEADERS.length).toBe(23);
     expect(ctx.HEADERS[20]).toBe('部隊');
+    expect(ctx.HEADERS[21]).toBe('夜勤手当');
+    expect(ctx.HEADERS[22]).toBe('夜勤請求');
   });
 
   it('先頭19列は1つも動いていない', () => {
@@ -348,11 +352,11 @@ describe('変更履歴シートの形', () => {
     expect(ctx.HISTORY_SHEET).toBe('変更履歴');
   });
 
-  it('★削除時は21列すべてをJSONで残す（要約では復元できない）', () => {
+  it('★削除時は23列すべてをJSONで残す（要約では復元できない）', () => {
     const headers = ctx.HEADERS;
     const arr = headers.map((h, i) => 'v' + i);
     const o = JSON.parse(ctx.rowFullJson_(headers, arr));
-    expect(Object.keys(o).length).toBe(21);
+    expect(Object.keys(o).length).toBe(23);
     expect(o['部隊']).toBe('v20');
     expect(o['人工']).toBe('v8');
   });
@@ -588,7 +592,7 @@ describe('変更履歴の読みやすさ（2026-08-27 実機テストで見つ�
     expect(o['登録日時']).not.toContain('GMT');
     expect(o['氏名']).toBe('元');
     expect(o['部隊']).toBe('第三部隊');
-    expect(Object.keys(o).length).toBe(21);
+    expect(Object.keys(o).length).toBe(23);
   });
 
   it('文字列で入っている日付はそのまま通す（画面由来の行）', () => {

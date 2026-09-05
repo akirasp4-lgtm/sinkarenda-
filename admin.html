@@ -708,6 +708,8 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div style="font-size:13px;color:#666;margin-bottom:8px;font-weight:500">👀 集計をこの画面で見る — スプレッドシートを開かずに確認できます</div>
   <select id="view-sheet" style="margin-bottom:8px">
     <option value="月別確認表">月別確認表（職人×日付の人工）</option>
+    <option value="夜勤確認表">夜勤確認表（職人ごとの夜勤日数・夜勤人工）</option>
+    <option value="作業者日別明細">作業者日別明細（夜勤・手当・請求つき）</option>
     <option value="会社別集計">会社別集計</option>
     <option value="月別集計">月別集計</option>
     <option value="元請別請求集計">元請別請求集計（金額あり）</option>
@@ -729,7 +731,9 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
     <option value="月別集計">月別集計</option><option value="会社別集計">会社別集計</option>
     <option value="職人マスタ">職人マスタ</option><option value="元請マスタ">元請マスタ</option>
     <option value="現場マスタ">現場マスタ</option>
-    <option value="月別確認表">月別確認表</option><option value="元請別請求集計">元請別請求集計</option><option value="元請別請求集計_フィルタ用">元請別請求集計_フィルタ用</option>
+    <option value="月別確認表">月別確認表</option><option value="夜勤確認表">夜勤確認表</option>
+    <option value="作業者日別明細">作業者日別明細</option>
+    <option value="元請別請求集計">元請別請求集計</option><option value="元請別請求集計_フィルタ用">元請別請求集計_フィルタ用（勤務区分つき）</option>
     <option value="事業部別按分">事業部別按分</option>
     <option value="操作ログ">操作ログ</option>
   </select>
@@ -928,8 +932,18 @@ textarea{resize:vertical;min-height:64px;font-size:15px}
   <div class="toggle-row toggle-yakin" id="e-yakin-toggle" onclick="setMode('e','yakin')"><span class="t-icon">🌙</span><span class="t-label">夜勤</span></div>
   <div class="toggle-row toggle-yasumi" id="e-yasumi-toggle" onclick="setMode('e','yasumi')"><span class="t-icon">🏖️</span><span class="t-label">休み</span></div>
   <div class="toggle-row toggle-yotei" id="e-yotei-toggle" onclick="setMode('e','yotei')"><span class="t-icon">📌</span><span class="t-label">予定</span></div>
-  <div class="leader-select-wrap"><label>責任者</label><select id="e-leader" onchange="refreshButaiField('e')"><option value="">責任者を選択してください</option></select></div>
+  <div class="leader-select-wrap"><label>責任者</label><select id="e-leader" onchange="refreshButaiField('e');renderEditYakinPanel()"><option value="">責任者を選択してください</option></select></div>
   <div class="member-section"><div class="member-label">班員（タップで選択）</div><div id="e-member-selector" class="member-grid"></div></div>
+  <!-- ★2026-09-03 作業員ごとの夜勤設定（依頼書2・3）。
+       現場全体の区分は上の🌙夜勤トグルで決める。ここは例外だけ直す欄。 -->
+  <div id="e-yakin-panel" style="display:none;background:#EDF0FA;border:2px solid #C7D0EA;border-radius:10px;padding:12px;margin:10px 0">
+    <div style="font-size:14px;font-weight:700;color:#2B3A67;margin-bottom:4px">🌙 作業員ごとの夜勤設定</div>
+    <div style="font-size:11px;color:#4A5878;line-height:1.5;margin-bottom:10px">
+      現場全体の勤務区分は上の「🌙 夜勤」で決めます。ここは<b>「現場全体は夜勤だが、Aさんだけ日勤扱い」</b>のような例外を直す欄です。<br>
+      手当・請求は<b>空欄のままで自動</b>（夜勤なら対象、日勤なら対象外）。外したい人だけ「対象外」にしてください。
+    </div>
+    <div id="e-yakin-rows"></div>
+  </div>
   <label>メモ</label><textarea id="e-memo"></textarea>
   <label>カレンダーの色</label>
   <div id="e-color-picker" class="color-picker-wrap"></div>
@@ -2370,7 +2384,7 @@ function renderMemberChips(id,arr,fn){
   el.innerHTML=getShokunin().map((name,i)=>`<div class="member-chip${arr.includes(i)?' selected':''}" onclick="${fn.name}(${i})">${esc(name)}</div>`).join('');
 }
 function toggleMember(i){const x=selectedMembers.indexOf(i);if(x>=0)selectedMembers.splice(x,1);else selectedMembers.push(i);renderMemberChips('member-selector',selectedMembers,toggleMember);}
-function toggleEditMember(i){const x=editSelectedMembers.indexOf(i);if(x>=0)editSelectedMembers.splice(x,1);else editSelectedMembers.push(i);renderMemberChips('e-member-selector',editSelectedMembers,toggleEditMember);}
+function toggleEditMember(i){const x=editSelectedMembers.indexOf(i);if(x>=0)editSelectedMembers.splice(x,1);else editSelectedMembers.push(i);renderMemberChips('e-member-selector',editSelectedMembers,toggleEditMember);renderEditYakinPanel();/* ★2026-09-03 班員を足し引きしたら夜勤設定の行も合わせる */}
 
 // ===== データ =====
 function formatTime(v){if(!v&&v!==0)return'';const s=String(v);if(s.match(/^\d{1,2}:\d{2}/))return s.slice(0,5);return'';}
@@ -3368,9 +3382,13 @@ function parseRows(rows,company){
     workType:String(r['作業区分']||''),
     vehicle:String(r['車両']||''),
     kyoten:String(r['拠点']||''),     // ★2026-08-26 拠点（本社/関東支店/両方）
-    butai:String(r['部隊']||'')       // ★2026-08-27 部隊（1〜4部隊）。
+    butai:String(r['部隊']||''),      // ★2026-08-27 部隊（1〜4部隊）。
     // ★ここに書かないと部隊が画面のデータから消え、部隊と無関係な編集をしただけで
     //   保存済みの部隊が失われる（拠点で起きたバグと同じ形・Codexレビュー[P1]#1）
+    // ★2026-09-03 夜勤手当・夜勤請求。上と同じ理由でここに必ず書く。
+    //   空欄＝自動（夜勤ならYes・日勤ならNo）。'対象外' が事務の入れた例外。
+    yakinTeate:String(r['夜勤手当']||''),
+    yakinSeikyu:String(r['夜勤請求']||'')
   }));
 }
 // 退勤<出勤の日付跨ぎレコードに翌日のゴーストを生成（クライアント側のみ）
@@ -3416,6 +3434,8 @@ function addLocalRows(rows,opts){
     // ★2026-08-27: 送信前の楽観表示にも拠点・部隊を載せる。無いと送信が終わるまで
     //   タグが出ず「消えた？」と見える（拠点は2026-08-26から落ちていた取りこぼし）。
     kyoten:String(r.kyoten||''),butai:String(r.butai||''),
+    // ★2026-09-03 夜勤手当・夜勤請求も楽観表示に載せる（上と同じ理由）
+    yakinTeate:String(r.yakinTeate||''),yakinSeikyu:String(r.yakinSeikyu||''),
     isPending:pending
   }));
   allNippos=allNippos.concat(added).concat(generateGhosts(added));
@@ -4419,12 +4439,94 @@ function tsValue(s){
   return isNaN(d)?0:d.getTime();
 }
 
+// ★2026-09-03 編集で置き換える前の行から、その人の夜勤手当・夜勤請求を引き継ぐ。
+//   これをやらないと、夜勤と無関係な編集（時刻を1つ直しただけ等）をするたびに
+//   事務が入れた「対象外」が消える。部隊・拠点で実際に起きた壊れ方と同じ形。
+function inheritYakinFlags(ids,name){
+  const src=(allNippos||[]).find(n=>!n.isGhost&&(ids||[]).includes(n.id)&&n.name===name);
+  return {yakinTeate:src?String(src.yakinTeate||''):'',yakinSeikyu:src?String(src.yakinSeikyu||''):''};
+}
+
+// ★2026-09-03 作業員ごとの夜勤設定（依頼書2「同じ現場でも作業員ごとに上書きできる」）
+//   { 氏名: { mode:''|'夜勤'|'日勤', teate:''|'対象'|'対象外', seikyu:''|'対象'|'対象外' } }
+//   mode が空なら現場全体の🌙夜勤トグルに従う。teate/seikyu が空なら自動判定。
+let editYakinOverrides={};
+
+// 編集モーダルを開いたときに、保存済みの値をこの箱へ読み戻す。
+// 読み戻さないと、モーダルを開いて保存し直しただけで設定が消える。
+function loadEditYakinOverrides(g){
+  editYakinOverrides={};
+  const groupYakin=!!g.yakin;
+  (g.members||[]).forEach(m=>{
+    const self=!!m.yakinSelf;
+    editYakinOverrides[m.name]={
+      mode: self===groupYakin ? '' : (self?'夜勤':'日勤'),
+      teate: String(m.yakinTeate||''),
+      seikyu: String(m.yakinSeikyu||'')
+    };
+  });
+  renderEditYakinPanel();
+}
+
+// 今モーダルで選ばれている人（責任者＋班員）を並べる
+function currentEditMemberNames(){
+  const leader=(document.getElementById('e-leader')||{}).value||'';
+  const shokunin=getShokunin();
+  const names=leader?[leader]:[];
+  editSelectedMembers.forEach(i=>{if(shokunin[i]&&shokunin[i]!==leader)names.push(shokunin[i]);});
+  return names;
+}
+
+function setEditYakinOverride(name,field,value){
+  if(!editYakinOverrides[name])editYakinOverrides[name]={mode:'',teate:'',seikyu:''};
+  editYakinOverrides[name][field]=value;
+}
+
+function renderEditYakinPanel(){
+  const panel=document.getElementById('e-yakin-panel');
+  const wrap=document.getElementById('e-yakin-rows');
+  if(!panel||!wrap)return;
+  const names=currentEditMemberNames();
+  if(names.length===0){panel.style.display='none';wrap.innerHTML='';return;}
+  panel.style.display='block';
+  const sel=(name,field,opts)=>{
+    const cur=(editYakinOverrides[name]||{})[field]||'';
+    const o=opts.map(([v,label])=>`<option value="${v}"${v===cur?' selected':''}>${label}</option>`).join('');
+    return `<select onchange="setEditYakinOverride('${String(name).replace(/'/g,"\'")}','${field}',this.value)" style="font-size:12px;padding:4px 6px;border:1px solid #C7D0EA;border-radius:6px;background:#fff">${o}</select>`;
+  };
+  wrap.innerHTML=names.map(name=>`
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 0;border-top:1px solid #DDE3F2">
+      <span style="min-width:76px;font-weight:700;font-size:13px;color:#2B3A67">${name}</span>
+      <span style="font-size:11px;color:#4A5878">勤務</span>${sel(name,'mode',[['','現場に合わせる'],['夜勤','夜勤'],['日勤','日勤']])}
+      <span style="font-size:11px;color:#4A5878">手当</span>${sel(name,'teate',[['','自動'],['対象','対象'],['対象外','対象外']])}
+      <span style="font-size:11px;color:#4A5878">請求</span>${sel(name,'seikyu',[['','自動'],['対象','対象'],['対象外','対象外']])}
+    </div>`).join('');
+}
+
+// ★2026-09-03 保存時に、作業員ごとの夜勤設定を効かせる。
+//   パネル（e-yakin-panel）は編集モーダルを開いた時点で保存済みの値を読み戻しているので、
+//   その人の行がパネルにあればパネルの値が正（＝「自動」に戻す操作もちゃんと保存される）。
+//   編集中に新しく足した人だけ、元の行から引き継ぐ。
+function resolveMemberYakin(name,groupYakin){
+  const ov=editYakinOverrides[name];
+  if(ov){
+    return {
+      yakin: ov.mode==='夜勤'?true:ov.mode==='日勤'?false:!!groupYakin,
+      teate: ov.teate||'', seikyu: ov.seikyu||''
+    };
+  }
+  const inh=inheritYakinFlags(editIds,name);
+  return {yakin:!!groupYakin,teate:inh.yakinTeate,seikyu:inh.yakinSeikyu};
+}
+
 function groupNippos(nippos){
   const groups={};
   nippos.forEach(n=>{
     const key=n.id||`${n.date}__${n.genba}__${n.loc}__${n.start}__${n.end}__${n.kosu}__${n.memo}`;
     if(!groups[key])groups[key]={date:n.date,genba:n.genba,loc:n.loc,start:n.start,end:n.end,kosu:n.kosu,memo:n.memo,yakin:n.yakin,yasumi:n.yasumi,yotei:n.yotei,souko:n.souko,company:n.company,members:[],ids:[],updatedBy:n.updatedBy,timestamp:n.timestamp||'',color:n.color,jobNo:n.jobNo,workType:n.workType||'',vehicle:n.vehicle||'',butai:n.butai||'',isGhost:!!n.isGhost,isPending:!!n.isPending,originalId:n.originalId||''};
-    groups[key].members.push({name:n.name,role:n.role,butai:n.butai||''});if(n.id)groups[key].ids.push(n.id);
+    // ★2026-09-03 夜勤の設定はメンバーごとに持つ（同じ現場でもAさんだけ日勤、が有りうる）
+    groups[key].members.push({name:n.name,role:n.role,butai:n.butai||'',
+      yakinSelf:!!n.yakin,yakinTeate:String(n.yakinTeate||''),yakinSeikyu:String(n.yakinSeikyu||'')});if(n.id)groups[key].ids.push(n.id);
     // グループ内で最新の登録日時 + その時の更新者を採用（Date 経由で比較）
     if(n.timestamp && tsValue(n.timestamp)>tsValue(groups[key].timestamp)){
       groups[key].timestamp=n.timestamp;
@@ -5011,6 +5113,7 @@ function openEditModal(idx,groupsOverride){
   editSelectedMembers=[];const shokunin=getShokunin();
   g.members.filter(m=>m.role==='同行').forEach(m=>{const i=shokunin.indexOf(m.name);if(i>=0)editSelectedMembers.push(i);});
   renderMemberChips('e-member-selector',editSelectedMembers,toggleEditMember);initColorPicker('e',g.color||CAL_COLORS[0]);
+  loadEditYakinOverrides(g);   // ★2026-09-03 保存済みの夜勤設定を読み戻す
   // ★Codexレビュー[P1]#2#3: 既存の拠点を読み込む（無いと編集で拠点が勝手に変わる）。
   //   判定は画面の currentCompany ではなく「その予定の会社」で行う。
   applyEditKyoten(g);
@@ -5121,7 +5224,8 @@ async function saveEdit(){
     }
   }
   const rows=[];
-  dates.forEach(date=>{const newId=uuid();members.forEach(m=>{rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:yasumi?0:kosu,memo,yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company),butai:resolveEditButai(date)});});});
+  // ★2026-09-03 夜勤は作業員ごとに解決する（現場全体は夜勤でもAさんだけ日勤、が有りうる）
+  dates.forEach(date=>{const newId=uuid();members.forEach(m=>{const _y=resolveMemberYakin(m.name,yakin);rows.push({date,genba,loc,name:m.name,role:m.role,start,end,kosu:yasumi?0:kosu,memo,yakin:_y.yakin,yasumi,yotei,souko,company,id:newId,updatedBy:getUsername(),color,workType,vehicle,kyoten:readKyoten('e',company),butai:resolveEditButai(date),yakinTeate:_y.teate,yakinSeikyu:_y.seikyu});});});
   btn.textContent='保存中...';btn.disabled=true;
   try{const res=await fetch(getGasUrl(),{method:'POST',body:JSON.stringify({action:'update',ids:editIds,rows}),headers:{'Content-Type':'text/plain'}});
     const json=await res.json();if(json.status==='ok'){closeEditModal();bulkEditMode=false;removeLocalByIds(editIds);addLocalRows(rows);renderGmList();refreshCalDayIfOpen();refreshInBackground(renderGmList);}
@@ -5336,6 +5440,7 @@ function openBulkEditModal(){
   const leader=g.members.find(m=>m.role==='代表');document.getElementById('e-leader').value=leader?leader.name:'';
   editSelectedMembers=[];const shokunin=getShokunin();g.members.filter(m=>m.role==='同行').forEach(m=>{const i=shokunin.indexOf(m.name);if(i>=0)editSelectedMembers.push(i);});
   renderMemberChips('e-member-selector',editSelectedMembers,toggleEditMember);initColorPicker('e',g.color||CAL_COLORS[0]);
+  loadEditYakinOverrides(g);   // ★2026-09-03 保存済みの夜勤設定を読み戻す
   // ★Codexレビュー[P1]#2#3: 既存の拠点を読み込む（無いと編集で拠点が勝手に変わる）。
   //   判定は画面の currentCompany ではなく「その予定の会社」で行う。
   applyEditKyoten(g);
