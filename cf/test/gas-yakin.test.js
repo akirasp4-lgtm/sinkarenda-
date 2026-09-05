@@ -23,7 +23,7 @@ const CODE = readFileSync(join(here, '..', '..', 'gas.js'), 'utf8');
 const EXPORT = `
 ;globalThis.__gas = {
   workClass_, isWorkClass_, yakinFlag_, yakinTeateOn_, yakinSeikyuOn_,
-  yakinNeedsCheck_, normalizeYakinFlag_, dailyKosuBuckets_,
+  yakinNeedsCheck_, yakinCheckNote_, normalizeYakinFlag_, dailyKosuBuckets_,
   generateKakuninTable_, generateNightKakuninTable_,
   generateWorkerDetailSheet_, generateBillingFilterSheet_,
   HEADERS, DETAIL_SHEET, NIGHT_KAKUNIN_SHEET, KAKUNIN_SHEET, BILLING_FILTER_SHEET
@@ -174,14 +174,35 @@ describe('保存の値の正規化（画面から何が来ても壊さない）'
 
 describe('確認漏れの検知', () => {
   it('夜勤なのに出勤・退勤が空なら要確認', () => {
-    expect(g.yakinNeedsCheck_(rec({ yakin: '夜勤' }))).toBe(true);
-    expect(g.yakinNeedsCheck_(rec({ yakin: '夜勤', start: '22:00' }))).toBe(true);
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤' }))).toBe('要確認：時刻なし');
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '22:00' }))).toBe('要確認：時刻なし');
   });
-  it('時刻が両方入っていれば要確認にしない', () => {
-    expect(g.yakinNeedsCheck_(rec({ yakin: '夜勤', start: '22:00', end: '05:00' }))).toBe(false);
+  it('日をまたぐ夜勤は正常（22:00〜05:00）', () => {
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '22:00', end: '05:00' }))).toBe('');
   });
   it('日勤は時刻が空でも要確認にしない（夜勤手当の話ではないため）', () => {
-    expect(g.yakinNeedsCheck_(rec({ yakin: '' }))).toBe(false);
+    expect(g.yakinCheckNote_(rec({ yakin: '' }))).toBe('');
+  });
+
+  // ★2026-09-05 検品③で本番に見つかった入力ミス。利用者確認「時間の間違いやね」。
+  //   9/17・18の夜勤が 08:00〜17:00 で登録されていた。時刻が空でないので拾えていなかった。
+  it('★夜勤なのに丸ごと昼の時間帯なら要確認（08:00〜17:00 は入力ミス）', () => {
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '08:00', end: '17:00' }))).toBe('要確認：昼の時刻');
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '09:00', end: '18:00' }))).toBe('要確認：昼の時刻');
+  });
+  it('夕方以降に出勤する夜勤は正常', () => {
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '18:00', end: '23:00' }))).toBe('');
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '20:00', end: '23:59' }))).toBe('');
+  });
+  it('朝までに退勤する夜勤は正常', () => {
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '00:00', end: '09:00' }))).toBe('');
+  });
+  it('読めない時刻は「時刻なし」扱い（安全側）', () => {
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: 'あさ', end: 'よる' }))).toBe('要確認：時刻なし');
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '25:00', end: '05:00' }))).toBe('要確認：時刻なし');
+  });
+  it('日勤は昼の時刻でも要確認にしない', () => {
+    expect(g.yakinCheckNote_(rec({ yakin: '', start: '08:00', end: '17:00' }))).toBe('');
   });
 });
 
@@ -301,7 +322,7 @@ describe('作業者日別明細シート（依頼書4の必須出力）', () => 
     const ss = makeSS();
     g.generateWorkerDetailSheet_(ss, records);
     const rows = ss.sheets[g.DETAIL_SHEET].written;
-    expect(rows[1].slice(0, 11)).toEqual([
+    expect(rows[0].slice(0, 11)).toEqual([
       '日付', '支店', '元請', '現場', '作業員', '人工数', '勤務区分',
       '夜勤手当対象', '夜勤請求対象', '予定ID', 'メモ'
     ]);
@@ -328,7 +349,17 @@ describe('作業者日別明細シート（依頼書4の必須出力）', () => 
     g.generateWorkerDetailSheet_(ss, records);
     const rows = ss.sheets[g.DETAIL_SHEET].written;
     const sato = rows.find(r => r[4] === '佐藤');
-    expect(sato[14]).toBe('要確認');
+    expect(sato[14]).toBe('要確認：時刻なし');
+  });
+
+  // ★2026-09-05 検品③の指摘P3: 1行目の注意書きを全15列に結合していたため、
+  //   画面で見るとき「日付」列だけで横幅を使い切り、他の列が画面外へ出ていた。
+  it('★1行目はヘッダー（長い注意書きの結合行を置かない）', () => {
+    const ss = makeSS();
+    g.generateWorkerDetailSheet_(ss, records);
+    const rows = ss.sheets[g.DETAIL_SHEET].written;
+    expect(rows[0][0]).toBe('日付');
+    expect(String(rows[0][0]).length).toBeLessThan(20);
   });
 
   it('休み・予定は明細に出さない', () => {

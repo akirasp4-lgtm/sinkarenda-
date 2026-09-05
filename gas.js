@@ -2498,15 +2498,44 @@ function yakinFlag_(explicit, cls) {
 function yakinTeateOn_(rec) { return yakinFlag_(rec && rec.teate, workClass_(rec && rec.yakin)); }
 function yakinSeikyuOn_(rec) { return yakinFlag_(rec && rec.seikyu, workClass_(rec && rec.yakin)); }
 
-// 確認漏れ。夜勤なのに出勤・退勤が空の行は、手当を計算する根拠が無い。
-// （夜勤マークの「付け忘れ」自体は日勤と見分けがつかないので機械では検知できない。
-//   検知できることだけを出す）
-function yakinNeedsCheck_(rec) {
-  if (workClass_(rec && rec.yakin) !== '夜勤') return false;
+// 'HH:MM' を分に直す。読めなければ null
+function hhmmToMin_(v) {
+  const m = String(v == null ? '' : v).trim().match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const h = Number(m[1]), mi = Number(m[2]);
+  if (!(h >= 0 && h <= 23 && mi >= 0 && mi <= 59)) return null;
+  return h * 60 + mi;
+}
+
+// 確認漏れの中身を返す（問題なければ空文字）。
+//
+// ★2026-09-05 利用者確認で追加:
+//   検品③で「9/17・18の夜勤が 08:00〜17:00 になっている」と出た。利用者に確認したところ
+//   **「時間の間違いやね」** ＝ 入力ミス。夜勤なら 22:00〜05:00 のような時間帯になる。
+//   時刻が空のときしか拾えていなかったので、**昼の時間帯のまま夜勤になっている行**も拾う。
+//
+//   夜勤として自然と見なす条件（どれか1つ満たせばよい）:
+//     ・日をまたぐ（退勤 < 出勤）… 22:00→05:00 など
+//     ・出勤が18:00以降
+//     ・退勤が09:00以前
+//   どれにも当たらない＝まるごと昼の時間帯なら、入力ミスの可能性が高い。
+//
+//   ※夜勤マークの「付け忘れ」自体は日勤と見分けがつかないので機械では検知できない。
+//     検知できることだけを出す。
+function yakinCheckNote_(rec) {
+  if (workClass_(rec && rec.yakin) !== '夜勤') return '';
   const st = String((rec && rec.start) || '').trim();
   const en = String((rec && rec.end) || '').trim();
-  return !st || !en;
+  if (!st || !en) return '要確認：時刻なし';
+  const s = hhmmToMin_(st), e = hhmmToMin_(en);
+  if (s === null || e === null) return '要確認：時刻なし';
+  if (e < s) return '';               // 日をまたぐ＝夜勤らしい
+  if (s >= 18 * 60) return '';        // 夕方以降に出勤
+  if (e <= 9 * 60) return '';         // 朝までに退勤
+  return '要確認：昼の時刻';
 }
+
+function yakinNeedsCheck_(rec) { return yakinCheckNote_(rec) !== ''; }
 
 // ========== 集計機能 ==========
 
@@ -3575,7 +3604,11 @@ function generateWorkerDetailSheet_(ss, records) {
   const W = 15;
   ensureColumns_(sheet, W);
 
-  const note = '※人工数は入力値そのまま。同じ人が同じ日に複数現場へ行くと複数行出るため、単純合計は月別確認表と一致しません（確認表は昼・夜それぞれ1日1人工が上限）。突き合わせは「夜勤確認表」を使ってください。';
+  // ★2026-09-05 検品③（Codex）の指摘P3:
+  //   1行目に長い注意書きを入れて全15列に結合していたため、画面で見るとき
+  //   「日付」列だけで表示領域の横幅を使い切り、他の列が画面外へ追い出されていた。
+  //   注意書きは行ごと廃止し、ヘッダーを1行目に戻す（Excelのフィルタも掛けやすくなる）。
+  //   人工数の但し書きは docs/夜勤区分の使い方_20260903.md に書いてある。
   const header = ['日付', '支店', '元請', '現場', '作業員', '人工数', '勤務区分',
                   '夜勤手当対象', '夜勤請求対象', '予定ID', 'メモ',
                   '会社', '出勤', '退勤', '確認'];
@@ -3587,10 +3620,10 @@ function generateWorkerDetailSheet_(ss, records) {
     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)));
 
   const checkRowIdx = [];   // 要確認の行（1-based シート行）
-  const out = [[note].concat(new Array(W - 1).fill('')), header];
+  const out = [header];
   rows.forEach(r => {
     const cls = workClass_(r.yakin);
-    const needs = yakinNeedsCheck_(r);
+    const note = yakinCheckNote_(r);
     out.push([
       r.date,
       r.kyoten || '',
@@ -3606,14 +3639,14 @@ function generateWorkerDetailSheet_(ss, records) {
       r.company || '',
       r.start || '',
       r.end || '',
-      needs ? '要確認' : ''
+      note
     ]);
-    if (needs) checkRowIdx.push(out.length);
+    if (note) checkRowIdx.push(out.length);
   });
 
-  if (out.length === 2) {
-    sheet.getRange(1, 1, 2, W).setValues(out);
-    sheet.getRange(2, 1, 1, W).setFontWeight('bold').setBackground('#E8F4FD').setHorizontalAlignment('center');
+  if (out.length === 1) {
+    sheet.getRange(1, 1, 1, W).setValues(out);
+    sheet.getRange(1, 1, 1, W).setFontWeight('bold').setBackground('#E8F4FD').setHorizontalAlignment('center');
     return;
   }
 
@@ -3627,9 +3660,6 @@ function generateWorkerDetailSheet_(ss, records) {
 
   sheet.getRange(1, 1, out.length, W).setValues(out);
 
-  // 1行目の注意書き
-  sheet.getRange(1, 1, 1, W).merge().setBackground('#FFF9C4').setFontSize(9).setWrap(true);
-
   // ★2026-09-04 検品で本番が落ちた原因の修正:
   //   ここは元々 checkRowIdx.forEach(r => sheet.getRange(r,1,1,W).setBackground(...)) と
   //   **1行につき1通信**していた。要確認の行が数百あると通信が数百回に達し、
@@ -3638,15 +3668,14 @@ function generateWorkerDetailSheet_(ss, records) {
   //   （引き継ぎ「書式一括化で185秒→約35秒」）。背景色は必ずグリッドで一括に流し込む。
   const bgGrid = [];
   for (let i = 0; i < out.length; i++) bgGrid.push(new Array(W).fill('#FFFFFF'));
-  for (let c = 0; c < W; c++) bgGrid[1][c] = '#E8F4FD';            // ヘッダー行
+  for (let c = 0; c < W; c++) bgGrid[0][c] = '#E8F4FD';            // ヘッダー行
   checkRowIdx.forEach(r => { for (let c = 0; c < W; c++) bgGrid[r - 1][c] = '#FFE0E0'; });
   sheet.getRange(1, 1, out.length, W).setBackgrounds(bgGrid);
-  sheet.getRange(1, 1, 1, W).setBackground('#FFF9C4');             // 注意書きの行は塗り直す
-  sheet.getRange(2, 1, 1, W).setFontWeight('bold').setHorizontalAlignment('center');
+  sheet.getRange(1, 1, 1, W).setFontWeight('bold').setHorizontalAlignment('center');
 
-  sheet.getRange(3, 6, out.length - 2, 1).setNumberFormat('0.##').setHorizontalAlignment('center');
-  sheet.getRange(3, 7, out.length - 2, 3).setHorizontalAlignment('center');
-  sheet.getRange(3, 15, out.length - 2, 1).setHorizontalAlignment('center');
+  sheet.getRange(2, 6, out.length - 1, 1).setNumberFormat('0.##').setHorizontalAlignment('center');
+  sheet.getRange(2, 7, out.length - 1, 3).setHorizontalAlignment('center');
+  sheet.getRange(2, 15, out.length - 1, 1).setHorizontalAlignment('center');
 
   sheet.setColumnWidth(1, 90);   sheet.setColumnWidth(2, 70);
   sheet.setColumnWidth(3, 140);  sheet.setColumnWidth(4, 200);
@@ -3657,17 +3686,17 @@ function generateWorkerDetailSheet_(ss, records) {
   sheet.setColumnWidth(13, 60);  sheet.setColumnWidth(14, 60);
   sheet.setColumnWidth(15, 60);
 
-  sheet.setFrozenRows(2);
+  sheet.setFrozenRows(1);
   // ★2026-09-05 本番で集計が77秒で落ちた件の対策:
   //   ここは元々「2,667行×15列の全マスに罫線」と「同じ範囲にフィルタ作成」をしていた。
   //   4万マスへの罫線は Apps Script で極端に重く、明細は行数が毎月増え続けるので、
   //   放っておけば必ず限界を超える。
   //   罫線は**ヘッダー行だけ**にし、フィルタは行数が多いときは掛けない。
   //   （Excelへ出したあとに事務がフィルタを掛ける方が速い）
-  sheet.getRange(2, 1, 1, W)
+  sheet.getRange(1, 1, 1, W)
     .setBorder(true, true, true, true, true, true, '#BBBBBB', SpreadsheetApp.BorderStyle.SOLID);
   if (out.length <= 1000) {
-    try { sheet.getRange(2, 1, out.length - 1, W).createFilter(); } catch (e) {}
+    try { sheet.getRange(1, 1, out.length, W).createFilter(); } catch (e) {}
   }
 }
 
