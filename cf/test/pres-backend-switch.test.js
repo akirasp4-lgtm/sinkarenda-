@@ -541,6 +541,33 @@ describe('解錠（鍵はサーバーが判定する）', () => {
     expect(app.initAppCalled).toBeUndefined();
   });
 
+  it('★解錠もCloudflareを先に見る（GAS一本だと混雑時に最大60秒待たされる）', async () => {
+    // 2026-09-14: 最初の実装は解錠だけ callGas でGASへ直に行っていた。
+    // 本番で実際に60秒待って失敗した（GAS_READ_TIMEOUT_MS=60000）。
+    // 画面の読み込みと同じ経路にそろえる。GASへ直行する書き方に戻したらここで落ちる。
+    const app = makeUnlockApp({
+      backendJson: D1_CFG,
+      d1: (b, respond) => respond({ status: 'ok', rows: [] }),
+      gas: (b, respond) => respond({ status: 'ok', rows: [] })
+    });
+    app.s.document.getElementById('pinInput').value = '4桁テスト';
+    await app.s.tryUnlock();
+    expect(app.initAppCalled, '解錠されていない').toBe(true);
+    expect(app.hits.some(h => h.startsWith('d1:')), 'Cloudflareを見ずにGASへ直行している').toBe(true);
+  });
+
+  it('Cloudflareが落ちていてもGASへ落ちて解錠できる', async () => {
+    const app = makeUnlockApp({
+      backendJson: D1_CFG,
+      d1: () => { throw new Error('Cloudflareに繋がらない'); },
+      gas: (b, respond) => respond({ status: 'ok', rows: [] })
+    });
+    app.s.document.getElementById('pinInput').value = '4桁テスト';
+    await app.s.tryUnlock();
+    expect(app.initAppCalled, 'GASへ落ちて解錠できていない').toBe(true);
+    expect(app.T.PIN).toBe('4桁テスト');
+  });
+
   it('覚えている鍵が通らなくなったらロック画面へ戻し、覚えた値を捨てる', async () => {
     const app = makeUnlockApp({ gas: (b, respond) => respond(AUTH_ERR) });
     app.T.PIN = '古い鍵';

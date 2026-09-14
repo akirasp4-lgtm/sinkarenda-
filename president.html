@@ -899,13 +899,23 @@ async function tryUnlock(){
   if (!v) { $('pinErr').textContent = 'PIN を入力してください'; return; }
   $('pinErr').textContent = '確認中…';
   $('pinBtn').disabled = true;
+  // ★2026-09-14 解錠の確認は presFetchList を使う（Cloudflare→GAS→GASの順）。
+  //   最初はここで callGas を直に呼んでいたが、それはGAS一本の経路で、
+  //   混雑すると最大60秒（GAS_READ_TIMEOUT_MS）待たされる。本番で実際に
+  //   60秒待って失敗した。画面の読み込みと同じ経路にそろえれば、
+  //   Cloudflareが生きている間は0.1秒で終わり、落ちていてもGASへ自動で落ちる。
+  //   presFetchList はこの PIN 変数を見るので、先に入れてから呼ぶ。
+  //   通らなかったら元へ戻す（解錠していないのに値が残らないように）。
+  const prevPin = PIN;
+  PIN = v;
   try {
-    await callGas({ action:'pres_list', pin: v }, { silent:true });
-    PIN = v;
+    const { data, err } = await presFetchList(false);
+    if (!data) throw (err || new Error('取得に失敗しました'));
     setPinStored(v);
     $('pinErr').textContent = '';
     unlockUI();
   } catch(e) {
+    PIN = prevPin;
     // ★「鍵が違う」と「つながらない」を分けて出す。まとめると、圏外のときに
     //   社長が鍵を疑って何度も打ち直すことになる。
     const msg = String((e && e.message) || '');
