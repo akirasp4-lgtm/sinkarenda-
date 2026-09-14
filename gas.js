@@ -461,7 +461,47 @@ function serializePresidentRows_(sheet) {
   });
 }
 
+// ★2026-09-14 GR JARVIS 連携用の「読むだけの鍵」。
+//   社長の依頼「まずは安全のため、JARVISから予定を書き換えるんじゃなくて読取専用で接続して、
+//   正常に同期できることを確認してから、予定追加・変更まで広げようと思ってる」への対応。
+//
+//   ★なぜPINを渡さないか:
+//   社長がカレンダーを開く4桁は「読む・足す・変える・消す」が全部できる。
+//   JARVIS側の不具合ひとつで社長の予定が消えうる（削除印方式なので戻せはするが、起こさない方がよい）。
+//   そこで**一覧取得(pres_list)にしか効かない別の鍵**を用意する。
+//
+//   ★置き場所: スクリプトプロパティ PRES_RO_TOKEN。コードには書かない。
+//   ★未設定なら誰も通さない（fail-closed）。PRES_PIN と同じ考え方。
+function presReadToken_() {
+  try {
+    var v = PropertiesService.getScriptProperties().getProperty('PRES_RO_TOKEN');
+    if (v && String(v).trim()) return String(v).trim();
+  } catch (e) {}
+  return '';
+}
+
+// 読むだけの鍵が正しいか。**pres_list 以外では絶対に true を返さない。**
+function presReadOnlyOk_(body, action) {
+  if (action !== 'pres_list') return false;          // ここが要。書き込みには効かせない
+  var t = presReadToken_();
+  if (!t) return false;                              // 未設定なら全拒否
+  var given = String((body && body.ro_token) || '').trim();
+  return given !== '' && given === t;
+}
+
 function handlePresidentAction_(body, action, updatedBy) {
+  // 読むだけの鍵で来た一覧取得は、PINを持っていなくても通す。
+  // （書き込みの action では presReadOnlyOk_ が必ず false になるので下のPIN照合へ落ちる）
+  if (presReadOnlyOk_(body, action)) {
+    try {
+      const roSs = SpreadsheetApp.getActiveSpreadsheet();
+      const roSheet = roSs.getSheetByName(PRES_SHEET);
+      return ok({rows: roSheet ? serializePresidentRows_(roSheet) : [], readOnly: true});
+    } catch (err) {
+      return error(err.toString());
+    }
+  }
+
   // ★未設定('')のときに body.pin も空だと '' === '' で素通りしてしまう。
   //   presPin 自体が空なら、何を送られても必ず落とす。
   var presPin = presPin_();

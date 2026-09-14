@@ -138,6 +138,34 @@ async function checkPresPin(request, env) {
   return { ok: true, body };
 }
 
+// ★2026-09-14 GR JARVIS 連携用の「読むだけの鍵」。
+//   社長の依頼「まずは読取専用で接続して、正常に同期できることを確認してから広げたい」。
+//   社長の4桁は書き換えもできてしまうので、**読むことしかできない別の鍵**を用意する。
+//
+//   ★この関数を使ってよいのは、データを返すだけの窓口に限る。
+//     書き込みの窓口（/api/pres-sync 等）からは絶対に呼ばないこと。
+//   ★鍵は Cloudflare のシークレット PRES_RO_TOKEN。未設定なら誰も通さない（fail-closed）。
+async function checkPresReadToken(request, env) {
+  const configured = String(env.PRES_RO_TOKEN || '');
+  if (!configured) {
+    return {
+      ok: false,
+      response: json({ status: 'error', message: 'PRES_RO_TOKENが未設定のため読取専用APIは無効です' }, 503)
+    };
+  }
+  let body = null;
+  try {
+    body = await request.json();
+  } catch (_e) {
+    return { ok: false, response: json({ status: 'error', message: '認証に失敗しました' }, 403) };
+  }
+  const given = String((body && body.token) || '').trim();
+  if (given === '' || given !== configured) {
+    return { ok: false, response: json({ status: 'error', message: '認証に失敗しました' }, 403) };
+  }
+  return { ok: true, body };
+}
+
 // 既定の返し方（fetch の外から使うとき用）。fetch の中では、
 // そのリクエストのOriginに合わせた物で上書きする（すぐ下）。
 const json = (obj, status = 200, headers = CORS) =>
@@ -333,6 +361,51 @@ export default {
         // readPresidentは失敗を投げず {status:'error'} を返すこともある。
         // 画面側は status!=='ok' を見て自動的にGASへ落ちる。
         return json(await readPresident(env));
+      } catch (e) {
+        return json({ status: 'error', message: String(e.message || e) }, 500);
+      }
+    }
+
+    // ★2026-09-14 GR JARVIS 用の読取専用の窓口。
+    //   POST /api/president-readonly  { "token": "<読むだけの鍵>" }
+    //
+    //   ・読むだけ。この窓口からは足す・変える・消すが一切できない
+    //   ・社長の4桁は不要（渡さない。渡すと書き換えもできてしまうため）
+    //   ・項目名を英語にし、日付と時刻を Asia/Tokyo の1つの値へ組み立てて返す
+    //     （社長へは「JARVIS側で組み立てて」と伝えたが、こちらでやる方が間違いが起きない）
+    //   ・終日予定は allDay:true、start は日付だけ（252件中114件が該当＝実測）
+    if (url.pathname === '/api/president-readonly' && request.method === 'POST') {
+      const auth = await checkPresReadToken(request, env);
+      if (!auth.ok) return auth.response;
+      try {
+        const raw = await readPresident(env);
+        if (!raw || raw.status !== 'ok') return json(raw || { status: 'error' });
+        const events = (raw.rows || []).map(r => {
+          const sd = String(r['開始日'] || '').trim();
+          const st = String(r['開始時刻'] || '').trim();
+          const ed = String(r['終了日'] || '').trim() || sd;
+          const et = String(r['終了時刻'] || '').trim();
+          const allDay = !st;                       // 開始時刻が空＝終日。nullではなく空文字で来る
+          return {
+            id: String(r['ID'] || ''),
+            title: String(r['タイトル'] || ''),
+            // 終日は日付だけ。時刻ありは +09:00 まで付けて渡す
+            start: allDay ? sd : (sd ? sd + 'T' + st + ':00+09:00' : ''),
+            end: allDay ? ed : (ed && et ? ed + 'T' + et + ':00+09:00' : ''),
+            allDay: allDay,
+            location: String(r['場所'] || ''),
+            notes: String(r['メモ'] || ''),
+            category: String(r['カテゴリ'] || ''),
+            updatedAt: String(r['登録日時'] || '')
+          };
+        });
+        return json({
+          status: 'ok',
+          timeZone: 'Asia/Tokyo',
+          readOnly: true,
+          count: events.length,
+          events: events
+        });
       } catch (e) {
         return json({ status: 'error', message: String(e.message || e) }, 500);
       }
