@@ -671,7 +671,45 @@ function requireDailyRows_(body) {
   if (!body || !Array.isArray(body.rows) || body.rows.length === 0) {
     throw new Error('登録する予定データがありません');
   }
+  assertYakinHours_(body.rows);
   return body.rows;
+}
+
+// ★2026-09-14 利用者依頼「夜勤なのに時間が間違ってたら入れれない仕組みってつくれないの？」
+//
+//   これまでは集計の「確認」列に後から出すだけだったので、間違ったまま入り続けていた
+//   （2026-09-05に15件→2026-09-14に73件へ増えていた）。入口で止める。
+//
+//   止めるのは**丸ごと昼の時間帯の夜勤だけ**。次は通す:
+//     ・時刻が空（これから決める予定もあるため。集計の「確認」列には出る）
+//     ・日をまたぐ／丸一日（22:00→05:00、10:00→翌10:00 など）
+//     ・夕方以降に出勤（18:00〜）／朝までに退勤（〜09:00）
+//
+//   ★画面側でも同じ判定をして先に止めているが、ここが本当の関所。
+//     スプレッドシートを直接触る・古い画面が残っている・APIを直に叩く、
+//     のいずれでも通さない。既に入っている分も、保存し直そうとすればここで止まる。
+function assertYakinHours_(rows) {
+  const bad = [];
+  (rows || []).forEach(row => {
+    if (!row) return;
+    // 画面は souko / yotei / yasumi / yakin のフラグで送ってくる。夜勤だけを見る。
+    const isYakin = row.souko ? false : row.yotei ? false : row.yasumi ? false : !!row.yakin;
+    if (!isYakin) return;
+    const note = yakinCheckNote_({ yakin: '夜勤', start: row.start, end: row.end });
+    if (note === '要確認：昼の時刻') {
+      bad.push(String(row.date || '') + ' ' + String(row.name || '')
+        + '（' + String(row.start || '') + '〜' + String(row.end || '') + '）');
+    }
+  });
+  if (bad.length) {
+    throw new Error(
+      '夜勤なのに昼の時間帯になっています。時刻を直してから保存してください。\n'
+      + bad.slice(0, 10).join('\n')
+      + (bad.length > 10 ? '\nほか' + (bad.length - 10) + '件' : '')
+      + '\n\n夜勤として通る形: 22:00〜05:00 のように日をまたぐ／18:00以降に出勤／09:00までに退勤。'
+      + '\n時刻がまだ決まっていない場合は、空欄のまま保存できます。'
+    );
+  }
 }
 
 // 現場マスタの「現場名→拠点」を1回だけ読んで辞書にする（行ごとにシートを読まない）。

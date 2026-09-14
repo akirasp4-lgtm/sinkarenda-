@@ -177,3 +177,35 @@ describe('index.html: 現場画面には給与に関わるUIを出さない', ()
     expect(src).not.toContain('id="e-yakin-panel"');
   });
 });
+
+// ★2026-09-14 利用者依頼「夜勤なのに時間が間違ってたら入れれない仕組みってつくれないの？」
+//   画面側でも先に止める（サーバーのエラーを待たせず、その場で理由を出すため）。
+//   サーバー側の関所は gas.js の assertYakinHours_。両方いる。
+describe('夜勤の時刻が昼なら保存させない（両画面・4つの保存経路すべて）', () => {
+  ['admin.html', 'index.html'].forEach((f) => {
+    const s = read(f);
+
+    it(f + ': 判定関数がある', () => {
+      expect(s).toContain('function yakinHoursNg(yakin,start,end)');
+    });
+
+    it(f + ': 新規登録と編集の両方から呼んでいる（2箇所）', () => {
+      expect(s.split('yakinHoursNg(yakin,start,end)').length - 1).toBe(3); // 定義1 + 呼び出し2
+    });
+
+    it(f + ': 時刻が空・日またぎ・夕方出勤・朝退勤は通す', () => {
+      const i = s.indexOf('function yakinHoursNg(yakin,start,end)');
+      const body = s.slice(i, s.indexOf('\n}', i));
+      expect(body).toContain("if(s===null||e===null)return '';");
+      expect(body).toContain("if(e<=s)return '';");
+      expect(body).toContain("if(s>=18*60)return '';");
+      expect(body).toContain("if(e<=9*60)return '';");
+    });
+
+    it(f + ': 全角の時刻も読む', () => {
+      const i = s.indexOf('function yakinHoursNg(yakin,start,end)');
+      const body = s.slice(i, s.indexOf('\n}', i));
+      expect(body).toContain('[０-９]');
+    });
+  });
+});

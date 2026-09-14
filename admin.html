@@ -4415,6 +4415,8 @@ async function submitNippo(){
   // 異常値検出
   if(!yasumi){
     if(!yakin&&start&&end&&start>=end){showAlert('退勤時刻が出勤時刻以下です。時間を確認してください','err');return;}
+    // ★2026-09-14 夜勤なのに昼の時間帯なら保存させない（サーバー側にも同じ関所あり）
+    {const _ng=yakinHoursNg(yakin,start,end);if(_ng){showAlert(_ng,'err');return;}}
   }
   if(loc){
     const exact=allNippos.some(n=>n.genba===genba&&n.loc===loc);
@@ -4556,6 +4558,33 @@ function tsValue(s){
 // ★2026-09-03 編集で置き換える前の行から、その人の夜勤手当・夜勤請求を引き継ぐ。
 //   これをやらないと、夜勤と無関係な編集（時刻を1つ直しただけ等）をするたびに
 //   事務が入れた「対象外」が消える。部隊・拠点で実際に起きた壊れ方と同じ形。
+// ★2026-09-14 利用者依頼「夜勤なのに時間が間違ってたら入れれない仕組みってつくれないの？」
+//   これまでは集計の「確認」列に後から出すだけで、間違ったまま入り続けていた
+//   （2026-09-05に15件 → 2026-09-14に73件へ増加）。保存の前に止める。
+//   ★サーバー（gas.js の assertYakinHours_）にも同じ関所がある。こちらは理由を出すため。
+//   丸ごと昼の時間帯だけを止める。時刻が空・日またぎ・丸一日・夕方出勤・朝退勤は通す。
+function yakinHoursNg(yakin,start,end){
+  if(!yakin)return '';
+  const toMin=v=>{
+    const s=String(v==null?'':v).trim()
+      .replace(/[０-９]/g,c=>String.fromCharCode(c.charCodeAt(0)-0xFEE0))
+      .replace(/[：･︓]/g,':').replace(/[\s　]/g,'');
+    const m=s.match(/^(\d{1,2}):(\d{2})/);
+    if(!m)return null;
+    const h=Number(m[1]),mi=Number(m[2]);
+    if(!(h>=0&&h<=23&&mi>=0&&mi<=59))return null;
+    return h*60+mi;
+  };
+  const s=toMin(start),e=toMin(end);
+  if(s===null||e===null)return '';       // 時刻が空・読めない → ここでは止めない
+  if(e<=s)return '';                     // 日をまたぐ／丸一日
+  if(s>=18*60)return '';                 // 夕方以降に出勤
+  if(e<=9*60)return '';                  // 朝までに退勤
+  return '🌙夜勤なのに昼の時間帯（'+start+'〜'+end+'）になっています。時刻を直してください。\n'
+       + '夜勤として通る形: 22:00〜05:00 のように日をまたぐ／18:00以降に出勤／09:00までに退勤。\n'
+       + '時刻がまだ決まっていなければ、空欄のままなら保存できます。';
+}
+
 function inheritYakinFlags(ids,name){
   const src=(allNippos||[]).find(n=>!n.isGhost&&(ids||[]).includes(n.id)&&n.name===name);
   return {yakinTeate:src?String(src.yakinTeate||''):'',yakinSeikyu:src?String(src.yakinSeikyu||''):''};
@@ -5326,6 +5355,8 @@ async function saveEdit(){
   if(!getUsername()){showMessage('編集者の名前が未設定です。事務タブの「操作者名」から名前を設定してください');openUsernameModal();return;}
   if(!yasumi){
     if(!yakin&&start&&end&&start>=end){showMessage('退勤時刻が出勤時刻以下です。時間を確認してください');return;}
+    // ★2026-09-14 夜勤なのに昼の時間帯なら保存させない（サーバー側にも同じ関所あり）
+    {const _ng=yakinHoursNg(yakin,start,end);if(_ng){showMessage(_ng);return;}}
   }
   const _butai=readButai('e');
   const members=[{name:leader,role:'代表',butai:_butai}];const shokunin=getShokunin();

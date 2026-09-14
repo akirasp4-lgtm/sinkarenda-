@@ -458,3 +458,81 @@ describe('日報データの列', () => {
     expect(g.HEADERS.indexOf('部隊')).toBe(20);
   });
 });
+
+// =========================================================
+// 2026-09-14 利用者依頼「夜勤なのに時間が間違ってたら入れれない仕組みってつくれないの？」
+//   それまでは集計の「確認」列に後から出すだけで、間違ったまま入り続けていた
+//   （2026-09-05に15件 → 2026-09-14に73件へ増加）。保存の入口で止める。
+// =========================================================
+describe('★夜勤なのに昼の時間帯は保存させない（入口の関所）', () => {
+  const G = (() => {
+    const sandbox = vm.createContext({
+      SpreadsheetApp: { BorderStyle: { SOLID: 'SOLID' }, flush() {} },
+      Session: { getScriptTimeZone: () => 'Asia/Tokyo' },
+      LockService: {}, Utilities: {}, ContentService: {}, UrlFetchApp: {},
+      PropertiesService: {}, Logger: { log() {} }, console
+    });
+    vm.runInContext(CODE + ';globalThis.__v = { assertYakinHours_, requireDailyRows_ };', sandbox, { filename: 'gas.js' });
+    return sandbox.__v;
+  })();
+
+  const r = (o) => Object.assign({ date: '2026-09-20', name: '東', start: '', end: '', yakin: false }, o);
+
+  it('夜勤 08:00〜17:00 は拒否する', () => {
+    expect(() => G.assertYakinHours_([r({ yakin: true, start: '08:00', end: '17:00' })]))
+      .toThrow(/昼の時間帯/);
+  });
+
+  it('拒否のときは日付・氏名・時刻を本文に出す（どれを直せばよいか分かるように）', () => {
+    try {
+      G.assertYakinHours_([r({ yakin: true, start: '08:00', end: '17:00' })]);
+      throw new Error('拒否されなかった');
+    } catch (e) {
+      expect(e.message).toContain('2026-09-20');
+      expect(e.message).toContain('東');
+      expect(e.message).toContain('08:00');
+    }
+  });
+
+  it('まともな夜勤は通す（日またぎ・丸一日・夕方出勤・朝退勤）', () => {
+    expect(() => G.assertYakinHours_([r({ yakin: true, start: '22:00', end: '05:00' })])).not.toThrow();
+    expect(() => G.assertYakinHours_([r({ yakin: true, start: '10:00', end: '10:00' })])).not.toThrow();
+    expect(() => G.assertYakinHours_([r({ yakin: true, start: '18:00', end: '23:00' })])).not.toThrow();
+    expect(() => G.assertYakinHours_([r({ yakin: true, start: '00:00', end: '09:00' })])).not.toThrow();
+  });
+
+  it('★時刻が空の夜勤は通す（これから決める予定があるため）', () => {
+    expect(() => G.assertYakinHours_([r({ yakin: true })])).not.toThrow();
+  });
+
+  it('全角の時刻でも正しく判定する', () => {
+    expect(() => G.assertYakinHours_([r({ yakin: true, start: '２２：００', end: '０５：００' })])).not.toThrow();
+    expect(() => G.assertYakinHours_([r({ yakin: true, start: '０８：００', end: '１７：００' })])).toThrow(/昼の時間帯/);
+  });
+
+  it('日勤・休み・予定・倉庫は昼の時刻でも止めない', () => {
+    expect(() => G.assertYakinHours_([r({ start: '08:00', end: '17:00' })])).not.toThrow();
+    expect(() => G.assertYakinHours_([r({ yakin: true, yasumi: true, start: '08:00', end: '17:00' })])).not.toThrow();
+    expect(() => G.assertYakinHours_([r({ yakin: true, yotei: true, start: '08:00', end: '17:00' })])).not.toThrow();
+    expect(() => G.assertYakinHours_([r({ yakin: true, souko: true, start: '08:00', end: '17:00' })])).not.toThrow();
+  });
+
+  it('★add/update の共通入口 requireDailyRows_ が関所を通る', () => {
+    expect(() => G.requireDailyRows_({ rows: [r({ yakin: true, start: '08:00', end: '17:00' })] }))
+      .toThrow(/昼の時間帯/);
+    expect(G.requireDailyRows_({ rows: [r({ yakin: true, start: '22:00', end: '05:00' })] })).toHaveLength(1);
+  });
+
+  it('複数件まとめて送られても、間違っている行だけを挙げる', () => {
+    try {
+      G.assertYakinHours_([
+        r({ yakin: true, start: '22:00', end: '05:00', name: '正しい人' }),
+        r({ yakin: true, start: '08:00', end: '17:00', name: '間違い人' })
+      ]);
+      throw new Error('拒否されなかった');
+    } catch (e) {
+      expect(e.message).toContain('間違い人');
+      expect(e.message).not.toContain('正しい人');
+    }
+  });
+});
