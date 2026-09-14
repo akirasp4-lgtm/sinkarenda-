@@ -153,15 +153,34 @@ async function checkPresReadToken(request, env) {
       response: json({ status: 'error', message: 'PRES_RO_TOKENが未設定のため読取専用APIは無効です' }, 503)
     };
   }
+  // ★2026-09-14 社長側で「認証に失敗しました」が出た件の対策:
+  //   本文がJSONとして読めない場合も、鍵が違う場合も同じ文言を返していたため、
+  //   どちらが原因か分からなかった。実際の原因はPowerShellの -Body @{...} で
+  //   フォーム形式として送られていたこと。**理由を区別して返す。**
+  //   （鍵そのものの値は絶対に返さない）
   let body = null;
   try {
     body = await request.json();
   } catch (_e) {
-    return { ok: false, response: json({ status: 'error', message: '認証に失敗しました' }, 403) };
+    return {
+      ok: false,
+      response: json({
+        status: 'error',
+        message: '本文をJSONとして読めませんでした。{"token":"…"} の形で送ってください。'
+          + 'PowerShellなら -Body (@{token="…"} | ConvertTo-Json) のように、'
+          + '波かっこのまま渡さずJSON文字列へ変換してください'
+      }, 400)
+    };
   }
   const given = String((body && body.token) || '').trim();
-  if (given === '' || given !== configured) {
-    return { ok: false, response: json({ status: 'error', message: '認証に失敗しました' }, 403) };
+  if (given === '') {
+    return {
+      ok: false,
+      response: json({ status: 'error', message: 'token が本文にありません。{"token":"…"} を送ってください' }, 400)
+    };
+  }
+  if (given !== configured) {
+    return { ok: false, response: json({ status: 'error', message: 'token が違います' }, 403) };
   }
   return { ok: true, body };
 }

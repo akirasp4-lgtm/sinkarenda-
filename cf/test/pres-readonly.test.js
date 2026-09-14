@@ -130,6 +130,25 @@ describe('Worker側の読取専用の窓口', () => {
     expect(body).toContain("given === ''");
   });
 
+  // ★2026-09-14 社長側で「認証に失敗しました」が出た件。
+  //   原因はPowerShellの -Body @{...} がフォーム形式で送られていたこと（実測で再現）。
+  //   本文の形が悪いのか鍵が違うのか、返事だけで区別できるようにした。
+  it('★断る理由を区別して返す（本文の形／tokenが無い／tokenが違う）', () => {
+    const i = SRC.indexOf('async function checkPresReadToken');
+    const body = SRC.slice(i, i + 2000);
+    expect(body).toContain('本文をJSONとして読めませんでした');
+    expect(body).toContain('ConvertTo-Json');
+    expect(body).toContain('token が本文にありません');
+    expect(body).toContain('token が違います');
+  });
+
+  it('★断り文に鍵そのものを載せない', () => {
+    const i = SRC.indexOf('async function checkPresReadToken');
+    const body = SRC.slice(i, i + 2000);
+    expect(body).not.toContain('+ configured');
+    expect(body).not.toContain('${configured}');
+  });
+
   it('項目名を英語にし Asia/Tokyo で組み立てて返す', () => {
     const i = SRC.indexOf("url.pathname === '/api/president-readonly'");
     const body = SRC.slice(i, i + 3200);
