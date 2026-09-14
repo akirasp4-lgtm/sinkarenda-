@@ -252,7 +252,22 @@ function normalizeSiteStatus_(raw, completedCell) {
 // ==============================================================
 const PRES_SHEET = '社長予定';
 const PRES_HEADERS = ['登録日時','タイトル','開始日','開始時刻','終了日','終了時刻','場所','メモ','カテゴリ','色','ID','更新者'];
-const PRES_PIN = '1203';
+// ★2026-09-14 鍵の値をコードから出した。このファイルは公開リポジトリへ上がるので、
+//   ここに書いた時点で公開される（実際、画面側 president.html にも書いてあり、
+//   認証なしで誰でも読める状態だった）。CAL_TOKEN / VEHICLE_RES_TOKEN と同じ形にそろえ、
+//   値は設定欄＝スクリプトプロパティへ置く。
+//     スクリプトプロパティ名: PRES_PIN
+//   ⚠️ 未設定のときは全拒否（fail-closed）。calAuthOk_ と同じ考え方で、
+//      「設定し忘れ＝素通し」にしない。
+//   ⚠️ 反映の順番: 先に設定欄へ値を入れ、そのあとデプロイする。逆にすると
+//      値を入れるまでの間、社長用カレンダーが開かなくなる。
+function presPin_() {
+  try {
+    var v = PropertiesService.getScriptProperties().getProperty('PRES_PIN');
+    if (v && String(v).trim()) return String(v).trim();
+  } catch (e) {}
+  return '';
+}
 const PRES_DELETE_MARKER = '__PRES_DELETED__';
 
 // ==============================================================
@@ -447,7 +462,10 @@ function serializePresidentRows_(sheet) {
 }
 
 function handlePresidentAction_(body, action, updatedBy) {
-  if (String(body.pin || '') !== PRES_PIN) {
+  // ★未設定('')のときに body.pin も空だと '' === '' で素通りしてしまう。
+  //   presPin 自体が空なら、何を送られても必ず落とす。
+  var presPin = presPin_();
+  if (!presPin || String(body.pin || '') !== presPin) {
     return error('認証に失敗しました');
   }
 

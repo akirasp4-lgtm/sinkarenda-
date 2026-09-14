@@ -369,8 +369,16 @@ window.fetch=async function(url,opts){
   return res;
 };
 
-const PIN = '1203';
-const STORAGE_PIN_OK = 'pres-pin-ok-v1';
+// ★2026-09-14 このファイルから鍵の値を消した。
+//   以前は PIN という定数に4桁をそのまま書いており、解錠の判定も
+//   入力値とその定数を見比べるだけで、ブラウザの中で完結していた。この画面は誰でも
+//   開けるので、鍵が世界中から読める状態だった（実測: 認証なしで取得できた）。
+//   いまは「社長が入力した値」をここへ入れるだけで、正しいかどうかの判定は
+//   サーバーが行う。このファイルに鍵の値は1つも書かない。
+let PIN = '';
+// ★保存キーを v2 にした。旧 v1 は「解錠済み」の印として '1' を入れていたため、
+//   そのまま読むと '1' を鍵だと誤解する。キーごと切り離す。
+const STORAGE_PIN = 'pres-pin-v2';
 
 const COLORS = ['#1a1a2e','#36c','#1D9E75','#e8a317','#d33','#9b59b6','#777','#ff6b9d'];
 
@@ -846,14 +854,17 @@ async function callGas(payload, opts){
 // ============================================================
 // PIN ロック
 // ============================================================
+// ★sessionStorage なのでタブを閉じれば消える（端末に残り続けない）。
+//   持つのは「社長が入力した値」で、正解そのものではない。合っているかは
+//   サーバーが毎回判定する。
 function checkPinStored(){
-  try { return sessionStorage.getItem(STORAGE_PIN_OK) === '1'; } catch(e){ return false; }
+  try { return sessionStorage.getItem(STORAGE_PIN) || ''; } catch(e){ return ''; }
 }
-function setPinStored(){
-  try { sessionStorage.setItem(STORAGE_PIN_OK,'1'); } catch(e){}
+function setPinStored(v){
+  try { sessionStorage.setItem(STORAGE_PIN, v); } catch(e){}
 }
 function clearPinStored(){
-  try { sessionStorage.removeItem(STORAGE_PIN_OK); } catch(e){}
+  try { sessionStorage.removeItem(STORAGE_PIN); } catch(e){}
 }
 
 function unlockUI(){
@@ -881,15 +892,32 @@ function lockUI(){
 $('pinBtn').addEventListener('click', tryUnlock);
 $('pinInput').addEventListener('keydown', e => { if (e.key === 'Enter') tryUnlock(); });
 
-function tryUnlock(){
+// ★答え合わせはサーバーが行う。合っていれば予定が返り、違えば認証エラーになる。
+//   画面側は正解を持たないので、このファイルを読んでも鍵は分からない。
+async function tryUnlock(){
   const v = $('pinInput').value.trim();
-  if (v === PIN) {
-    setPinStored();
+  if (!v) { $('pinErr').textContent = 'PIN を入力してください'; return; }
+  $('pinErr').textContent = '確認中…';
+  $('pinBtn').disabled = true;
+  try {
+    await callGas({ action:'pres_list', pin: v }, { silent:true });
+    PIN = v;
+    setPinStored(v);
+    $('pinErr').textContent = '';
     unlockUI();
-  } else {
-    $('pinErr').textContent = 'PIN が違います';
+  } catch(e) {
+    // ★「鍵が違う」と「つながらない」を分けて出す。まとめると、圏外のときに
+    //   社長が鍵を疑って何度も打ち直すことになる。
+    const msg = String((e && e.message) || '');
+    if (/認証/.test(msg)) {
+      $('pinErr').textContent = 'PIN が違います';
+    } else {
+      $('pinErr').textContent = '確認できませんでした。電波の状態を見て、もう一度お試しください';
+    }
     $('pinInput').value = '';
     $('pinInput').focus();
+  } finally {
+    $('pinBtn').disabled = false;
   }
 }
 
@@ -1036,6 +1064,15 @@ async function loadEvents(opts){
     if (seq !== presLoadSeq) return;
     presLoadOk = false;
     const msg = (err && err.message) ? err.message : String(err);
+    // ★鍵が通らなくなった場合（サーバー側で変えた等）は、覚えている値を捨てて
+    //   ロック画面へ戻す。放っておくと「開いているのに何も読めない」状態が続く。
+    if (/認証/.test(msg)) {
+      clearPinStored();
+      PIN = '';
+      lockUI();
+      $('pinErr').textContent = 'PIN を入力し直してください';
+      return;
+    }
     if ((state.events && state.events.length) || hydratePresSnapshot()) {
       // 前回の内容を残す。空にしない。presLoadOk は false のままなので保存は不可＝安全。
       setStaleBadge(true, true);
@@ -1516,7 +1553,11 @@ attachSwipe($('dayModal'), () => shiftDayModal(1), () => shiftDayModal(-1));
 // ============================================================
 // 起動
 // ============================================================
-if (checkPinStored()) {
+const storedPin = checkPinStored();
+if (storedPin) {
+  // ★同じタブで解錠済み。覚えている値で続きから開く。値が通らなければ
+  //   loadEvents 側がロック画面へ戻す（上の「再ロック」）。
+  PIN = storedPin;
   unlockUI();
 } else {
   setTimeout(() => $('pinInput').focus(), 200);

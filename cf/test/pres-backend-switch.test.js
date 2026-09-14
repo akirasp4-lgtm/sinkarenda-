@@ -115,7 +115,10 @@ function makeApp(o = {}) {
   vm.createContext(sandbox);
   const BRIDGE = `\n;globalThis.__T={get state(){return state},set state(v){state=v},
     get presLoadOk(){return presLoadOk},
-    get tracker(){return presPreferGasTracker}, get PIN(){return PIN},
+    get tracker(){return presPreferGasTracker},
+    // ★2026-09-14 PINは定数ではなくなった（画面から鍵の値を消したため）。
+    //   実際の画面では解錠時に社長が入力した値が入る。検証台では set で入れる。
+    get PIN(){return PIN}, set PIN(v){PIN=v},
     get presQueue(){return presQueue}};`;
   vm.runInContext(guardJs + '\n' + queueJs + '\n' + pageJs + BRIDGE, sandbox, { filename: 'president' });
   app.s = sandbox; app.T = sandbox.__T;
@@ -209,9 +212,20 @@ describe('presFetchList（読み取り先の切り替え）', () => {
       backendJson: D1_CFG,
       d1: (b, respond) => respond({ status: 'ok', rows: [] })
     });
+    // ★解錠後の状態を作る。空のままだと not.toContain('') が常に失敗し、
+    //   「URLに載っていないこと」を検証できない。実在しそうにない値を使う。
+    const TEST_PIN = 'PIN-TEST-9137';
+    app.T.PIN = TEST_PIN;
     await app.s.presFetchList(false);
-    expect(app.lastD1Body.pin).toBe(app.T.PIN);
-    expect(app.hits.find(h => h.startsWith('d1:'))).not.toContain(app.T.PIN);
+    expect(app.lastD1Body.pin).toBe(TEST_PIN);
+    expect(app.hits.find(h => h.startsWith('d1:'))).not.toContain(TEST_PIN);
+  });
+
+  it('★画面ファイルに鍵の値を書かない（公開されるため）', async () => {
+    // 2026-09-14: 以前は const PIN = '<4桁>' と直書きされ、認証なしで誰でも読めた。
+    // 定数として鍵を持つ書き方が復活したら、ここで落とす。
+    expect(pageJs).not.toMatch(/const\s+PIN\s*=\s*['"][^'"]+['"]/);
+    expect(pageJs).toMatch(/let\s+PIN\s*=\s*''/);
   });
 
   it('応答の rows が配列でなければ受け入れずGASへ落ちる', async () => {
@@ -470,5 +484,71 @@ describe('GAS優先の立て方・外し方（Codex再レビュー[P1]）', () =
     await settle();
     expect(statusAtMarkSent).not.toBe(null);
     expect(statusAtMarkSent).not.toBe('trust');   // 消す時点で既にGAS優先が立っている
+  });
+});
+
+// ============================================================
+// 解錠（2026-09-14 追加）
+//   鍵の値を画面から消し、正しいかどうかの判定をサーバーへ移した。
+//   「正解を持たない画面で、ちゃんと開け閉めできるか」をここで見る。
+// ============================================================
+describe('解錠（鍵はサーバーが判定する）', () => {
+  const AUTH_ERR = { status: 'error', message: '認証に失敗しました' };
+
+  // unlockUI() の先の initApp() は描画も通信も始めるので、ここでは差し替える。
+  // 見たいのは「開くかどうか」の判定であって、開いた後の画面ではない。
+  function makeUnlockApp(o = {}) {
+    const app = makeApp(o);
+    app.s.initApp = () => { app.initAppCalled = true; };
+    return app;
+  }
+
+  it('正しい鍵なら開き、その値を持っておく（次の通信で使うため）', async () => {
+    const app = makeUnlockApp({ gas: (b, respond) => respond({ status: 'ok', rows: [] }) });
+    app.s.document.getElementById('pinInput').value = ' 4桁テスト ';
+    await app.s.tryUnlock();
+    expect(app.initAppCalled, '解錠されていない').toBe(true);
+    expect(app.T.PIN, '入力値を保持していない').toBe('4桁テスト');   // 前後の空白は落とす
+    expect(app.s.sessionStorage.getItem('pres-pin-v2')).toBe('4桁テスト');
+    expect(app.s.document.getElementById('pinErr').textContent).toBe('');
+  });
+
+  it('鍵が違えば開かない。値も残さない', async () => {
+    const app = makeUnlockApp({ gas: (b, respond) => respond(AUTH_ERR) });
+    app.s.document.getElementById('pinInput').value = '9999';
+    await app.s.tryUnlock();
+    expect(app.initAppCalled, '違う鍵で開いてしまった').toBeUndefined();
+    expect(app.T.PIN).toBe('');
+    expect(app.s.sessionStorage.getItem('pres-pin-v2'), '違う鍵を保存している').toBe(null);
+    expect(app.s.document.getElementById('pinErr').textContent).toBe('PIN が違います');
+  });
+
+  it('★つながらないだけのときに「PIN が違います」と出さない（鍵を疑わせない）', async () => {
+    const app = makeUnlockApp({ gas: () => { throw new Error('ネットワークに接続できません'); } });
+    app.s.document.getElementById('pinInput').value = '4桁テスト';
+    await app.s.tryUnlock();
+    expect(app.initAppCalled).toBeUndefined();
+    const shown = app.s.document.getElementById('pinErr').textContent;
+    expect(shown, '通信失敗を鍵の間違いとして見せている').not.toContain('PIN が違います');
+    expect(shown).toContain('もう一度');
+  });
+
+  it('空のまま押しても通信しない', async () => {
+    const app = makeUnlockApp({ gas: (b, respond) => respond({ status: 'ok', rows: [] }) });
+    app.s.document.getElementById('pinInput').value = '   ';
+    await app.s.tryUnlock();
+    expect(app.hits.filter(h => h.startsWith('gas:')).length, '空欄でサーバーを叩いている').toBe(0);
+    expect(app.initAppCalled).toBeUndefined();
+  });
+
+  it('覚えている鍵が通らなくなったらロック画面へ戻し、覚えた値を捨てる', async () => {
+    const app = makeUnlockApp({ gas: (b, respond) => respond(AUTH_ERR) });
+    app.T.PIN = '古い鍵';
+    app.s.sessionStorage.setItem('pres-pin-v2', '古い鍵');
+    await app.s.loadEvents({ silent: true });
+    expect(app.T.PIN, '通らない鍵を持ち続けている').toBe('');
+    expect(app.s.sessionStorage.getItem('pres-pin-v2'), '通らない鍵を保存したまま').toBe(null);
+    expect(app.s.document.getElementById('lockOverlay')._cls.has('hidden'),
+           'ロック画面へ戻っていない').toBe(false);
   });
 });
