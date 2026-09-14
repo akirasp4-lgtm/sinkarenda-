@@ -63,3 +63,8 @@ docs/*.pptx
 ラインボットへの返信.md
 ラインボットからの返信_倉庫作業確認.md
 calendar_request_20260826/
+
+# 従業員の資格証（個人情報）— GitHubへ絶対に上げない 2026-09-08
+002_資格証/
+資格証_社長用_*.zip
+finish-build-checkpoint*.json
