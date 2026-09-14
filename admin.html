@@ -2165,6 +2165,8 @@ function selectColor(prefix,color){selectedColor[prefix]=color;initColorPicker(p
 function setMode(p,mode){
   const cur=modeState[p];
   const next=cur===mode?'':mode;modeState[p]=next;
+  // ★2026-09-05 検品④ P2#4: 🌙を押した事実を記録する（ON→OFFで元に戻しても効くように）
+  if(p==='e'&&(mode==='yakin'||cur==='yakin'||next==='yakin'))editYakinToggleTouched=true;
   syncWorkTypeWithMode(p,next,cur);
   // souko/yasumi から抜ける時に残った値をクリア
   if((cur==='souko'||cur==='yasumi')&&next!==cur){
@@ -4565,6 +4567,12 @@ function inheritYakinFlags(ids,name){
 let editYakinOverrides={};
 // 編集画面を開いた時点のグループの夜勤フラグ。保存時に「利用者が🌙を切り替えたか」を見る。
 let editOrigGroupYakin=false;
+// ★2026-09-05 検品④（Codexレビュー2周目）P2#4:
+//   「利用者が🌙を切り替えたか」を初期値と最終値の差だけで見ていたため、
+//   ON→OFF と押して元へ戻した場合に「触っていない」と誤判定していた。
+//   その結果、全員を日勤へ統一しようとしても夜勤の人が夜勤のまま残った。
+//   押した事実そのものを覚える。
+let editYakinToggleTouched=false;
 
 // 編集モーダルを開いたときに、保存済みの値をこの箱へ読み戻す。
 // 読み戻さないと、モーダルを開いて保存し直しただけで設定が消える。
@@ -4572,6 +4580,7 @@ function loadEditYakinOverrides(g){
   editYakinOverrides={};
   editYakinTouched={};   // ★開き直したら「触った」印は消す
   editOrigGroupYakin=!!g.yakin;
+  editYakinToggleTouched=false;   // ★開き直したら「🌙を押した」印も消す
   const groupYakin=!!g.yakin;
   (g.members||[]).forEach(m=>{
     const self=!!m.yakinSelf;
@@ -4663,7 +4672,7 @@ function resolveMemberYakin(name,groupYakin,date){
     yakin = ov.mode==='夜勤'?true: ov.mode==='日勤'?false: !!groupYakin;
   }else{
     // 触っていないなら、利用者が🌙夜勤そのものを切り替えたときだけ全員へ適用する
-    const switched=(!!groupYakin)!==(!!editOrigGroupYakin);
+    const switched=editYakinToggleTouched||((!!groupYakin)!==(!!editOrigGroupYakin));
     yakin = switched ? !!groupYakin : (src?!!src.yakin:!!groupYakin);
   }
   return {yakin:yakin, teate:pick('teate'), seikyu:pick('seikyu')};

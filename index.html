@@ -1681,6 +1681,8 @@ function setMode(p,mode){
   const cur=modeState[p];
   const next=cur===mode?'':mode;
   modeState[p]=next;
+  // ★2026-09-05 検品④ P2#4: 🌙を押した事実を記録する（ON→OFFで元に戻しても効くように）
+  if(p==='e'&&(mode==='yakin'||cur==='yakin'||next==='yakin'))editYakinToggleTouched=true;
   // モードに応じて作業区分プルダウンも同期
   syncWorkTypeWithMode(p,next,cur);
   // souko/yasumi モードから抜ける時に残った値をクリア
@@ -4108,12 +4110,18 @@ function inheritYakinFlags(ids,name){
 //   利用者が🌙夜勤を**切り替えたときだけ**全員へ適用する。
 //   切り替えていなければ、**その人・その日の元の行**の設定をそのまま残す。
 let editOrigYakin=false;
+// ★2026-09-05 検品④（Codexレビュー2周目）P2#4:
+//   「利用者が🌙を切り替えたか」を初期値と最終値の差だけで見ていたため、
+//   ON→OFF と押して元へ戻した場合に「触っていない」と誤判定していた。
+//   その結果、全員を日勤へ統一しようとしても夜勤の人が夜勤のまま残った。
+//   現場画面には作業員ごとの欄が無いので、この操作が効かないと直す手段が無くなる。
+let editYakinToggleTouched=false;
 
 function resolveMemberYakinSite(ids,name,date,groupYakin){
   // 日付まで一致する元の行を探す（一括編集で他の日の設定を潰さないため）
   const src=(allNippos||[]).find(n=>!n.isGhost&&(ids||[]).includes(n.id)&&n.name===name&&n.date===date)
          || (allNippos||[]).find(n=>!n.isGhost&&(ids||[]).includes(n.id)&&n.name===name);
-  const switched = (!!groupYakin)!==(!!editOrigYakin);   // 利用者が🌙を触ったか
+  const switched = editYakinToggleTouched||((!!groupYakin)!==(!!editOrigYakin));   // 利用者が🌙を触ったか
   return {
     yakin: switched ? !!groupYakin : (src?!!src.yakin:!!groupYakin),
     teate: src?String(src.yakinTeate||''):'',
@@ -4723,6 +4731,7 @@ function openEditModal(idx,groupsOverride){
   const mode=g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'';
   applyMode('e',mode);
   editOrigYakin=!!g.yakin;   // ★2026-09-05 保存時に「利用者が夜勤を切り替えたのか」を見るため
+  editYakinToggleTouched=false;   // ★開き直したら「🌙を押した」印も消す
   const leader=g.members.find(m=>m.role==='代表');
   document.getElementById('e-leader').value=leader?leader.name:'';
   editSelectedMembers=[];
@@ -5117,6 +5126,7 @@ function openBulkEditModal(){
   const mode=g.souko?'souko':g.yakin?'yakin':g.yasumi?'yasumi':g.yotei?'yotei':'';
   applyMode('e',mode);
   editOrigYakin=!!g.yakin;   // ★2026-09-05 保存時に「利用者が夜勤を切り替えたのか」を見るため
+  editYakinToggleTouched=false;   // ★開き直したら「🌙を押した」印も消す
   const leader=g.members.find(m=>m.role==='代表');
   document.getElementById('e-leader').value=leader?leader.name:'';
   editSelectedMembers=[];

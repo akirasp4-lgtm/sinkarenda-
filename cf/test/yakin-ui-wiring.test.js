@@ -112,7 +112,8 @@ describe('admin.html: 作業員ごとの夜勤設定パネル（依頼書2・3�
     const i = src.indexOf('function resolveMemberYakin(name,groupYakin,date)');
     const body = src.slice(i, src.indexOf('\n}', i));
     expect(body).toContain("ov.mode==='夜勤'?true: ov.mode==='日勤'?false: !!groupYakin");
-    expect(body).toContain('const switched=(!!groupYakin)!==(!!editOrigGroupYakin);');
+    // ★2026-09-05 検品④ P2#4: ON→OFFと押して元へ戻した操作も「切り替えた」と見なす
+    expect(body).toContain('const switched=editYakinToggleTouched||((!!groupYakin)!==(!!editOrigGroupYakin));');
     expect(body).toContain('switched ? !!groupYakin : (src?!!src.yakin:!!groupYakin)');
   });
 
@@ -137,7 +138,9 @@ describe('index.html: 現場画面の編集で作業員ごとの夜勤区分を�
   it('★🌙を切り替えたときだけ全員へ適用する', () => {
     const i = src.indexOf('function resolveMemberYakinSite(ids,name,date,groupYakin)');
     const body = src.slice(i, src.indexOf('\n}', i));
-    expect(body).toContain('const switched = (!!groupYakin)!==(!!editOrigYakin);');
+    // ★2026-09-05 検品④ P2#4: 現場画面には個人別の欄が無いので、
+    //   この操作が効かないと「全員を日勤へ統一する」手段が無くなる。
+    expect(body).toContain('const switched = editYakinToggleTouched||((!!groupYakin)!==(!!editOrigYakin));');
     expect(body).toContain('switched ? !!groupYakin : (src?!!src.yakin:!!groupYakin)');
   });
 
@@ -149,6 +152,22 @@ describe('index.html: 現場画面の編集で作業員ごとの夜勤区分を�
 
   it('編集画面を開くときに元の夜勤フラグを覚える（単体編集・一括編集の両方）', () => {
     expect(src.split('editOrigYakin=!!g.yakin;').length - 1).toBe(2);
+  });
+});
+
+// ★2026-09-05 検品④（Codexレビュー2周目）P2#4:
+//   「🌙を切り替えたか」を初期値と最終値の差だけで見ていたため、
+//   ON→OFF と押して元へ戻す操作が「触っていない」扱いになっていた。
+//   同じ予定でAさん日勤・Bさん夜勤のとき、全員を日勤へ統一できなかった。
+describe('🌙を押した事実を覚えている（両画面）', () => {
+  ['admin.html', 'index.html'].forEach((f) => {
+    const s = read(f);
+    it(f + ': setMode で 🌙 を押したら印を立てる', () => {
+      expect(s).toContain("if(p==='e'&&(mode==='yakin'||cur==='yakin'||next==='yakin'))editYakinToggleTouched=true;");
+    });
+    it(f + ': 編集画面を開き直したら印を消す', () => {
+      expect(s).toContain('editYakinToggleTouched=false;');
+    });
   });
 });
 

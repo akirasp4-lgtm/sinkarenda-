@@ -201,6 +201,25 @@ describe('確認漏れの検知', () => {
     expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: 'あさ', end: 'よる' }))).toBe('要確認：時刻なし');
     expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '25:00', end: '05:00' }))).toBe('要確認：時刻なし');
   });
+  // === 2026-09-05 検品④（Codexレビュー2周目）で出たP1 2件 ===
+  it('★24時間勤務（10:00→翼10:00）を要確認にしない', () => {
+    // 日またぎを e<s だけで見ていたため、同時刻が通らなかった。
+    // 08:00→08:00 は通るのに 10:00→10:00 だけ落ちる、という不整合だった。
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '10:00', end: '10:00' }))).toBe('');
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '08:00', end: '08:00' }))).toBe('');
+  });
+  it('★全角の時刻も読む（２２：００〜０５：００）', () => {
+    // 日報シートに直接全角で打たれると、まともな夜勤が「時刻なし」になっていた。
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '２２：００', end: '０５：００' }))).toBe('');
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '０８：００', end: '１７：００' }))).toBe('要確認：昼の時刻');
+  });
+  it('秒つきの時刻も読む（22:00:00）', () => {
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '22:00:00', end: '05:00:00' }))).toBe('');
+  });
+  it('1桁の時刻も読む（8:00）', () => {
+    expect(g.yakinCheckNote_(rec({ yakin: '夜勤', start: '8:00', end: '17:00' }))).toBe('要確認：昼の時刻');
+  });
+
   it('日勤は昼の時刻でも要確認にしない', () => {
     expect(g.yakinCheckNote_(rec({ yakin: '', start: '08:00', end: '17:00' }))).toBe('');
   });

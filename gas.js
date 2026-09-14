@@ -2517,8 +2517,16 @@ function yakinTeateOn_(rec) { return yakinFlag_(rec && rec.teate, workClass_(rec
 function yakinSeikyuOn_(rec) { return yakinFlag_(rec && rec.seikyu, workClass_(rec && rec.yakin)); }
 
 // 'HH:MM' を分に直す。読めなければ null
+// ★2026-09-05 検品④（Codexレビュー2周目）P1#3:
+//   日報シートに全角で「２２：００」と直接打たれると、半角しか受けていなかったため
+//   まともな夜勤が「要確認：時刻なし」になっていた（事務の手戻りになる）。
+//   全角の数字とコロンを半角へ直してから読む。
 function hhmmToMin_(v) {
-  const m = String(v == null ? '' : v).trim().match(/^(\d{1,2}):(\d{2})/);
+  let s = String(v == null ? '' : v).trim();
+  s = s.replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+       .replace(/[：･:︓]/g, ':')
+       .replace(/[\s　]/g, '');
+  const m = s.match(/^(\d{1,2}):(\d{2})/);
   if (!m) return null;
   const h = Number(m[1]), mi = Number(m[2]);
   if (!(h >= 0 && h <= 23 && mi >= 0 && mi <= 59)) return null;
@@ -2547,7 +2555,10 @@ function yakinCheckNote_(rec) {
   if (!st || !en) return '要確認：時刻なし';
   const s = hhmmToMin_(st), e = hhmmToMin_(en);
   if (s === null || e === null) return '要確認：時刻なし';
-  if (e < s) return '';               // 日をまたぐ＝夜勤らしい
+  // ★2026-09-05 検品④ P1#2: 日またぎを e<s だけで見ていたため、
+  //   24時間勤務「10:00→翌10:00」が昼勤務と誤判定されていた（08:00→08:00は通るのに）。
+  //   出勤と退勤が同じ時刻＝丸一日なので、これも日またぎ扱いにする。
+  if (e <= s) return '';              // 日をまたぐ／丸一日＝夜勤らしい
   if (s >= 18 * 60) return '';        // 夕方以降に出勤
   if (e <= 9 * 60) return '';         // 朝までに退勤
   return '要確認：昼の時刻';
@@ -3785,7 +3796,13 @@ function generateNightKakuninTable_(ss, records) {
       //   万一2社が混ざったら「グローライズ / 和信カインド」と並んで目に見える。
       const cos = [...new Set(mr.filter(r => r.name === name && workClass_(r.yakin) === '夜勤')
         .map(r => r.company).filter(Boolean))];
-      row[2] = cos.join(' / ');
+      // ★2026-09-05 検品④ P1#1: 別会社に同姓同名がいると、この行に2人分が合算される。
+      //   利用者確認（2026-09-05）:「苗字がかぶる人は下の名前もつけているので、今のところ被らない」
+      //   → 本人キー（氏名）は変えない。変えると月別確認表まで直すことになり、
+      //     依頼の完了条件「既存の人工合計＝日勤＋夜勤」と事務の毎月の運用に影響が出る。
+      //   代わりに、**将来かぶったときに黙って間違わないよう目に見える印を出す**。
+      //   数字は1つも変えていない。⚠が出たら職人マスタで下の名前を足すこと。
+      row[2] = (cos.length > 1 ? '⚠2社以上 ' : '') + cos.join(' / ');
       row.push(nights); row.push(total);
       monthDays += nights; monthKosu += total;
       out.push(row);
